@@ -1,0 +1,17 @@
+{
+  "version": "2.4.657",
+  "date": "2026-10-21",
+  "type": "fix-only",
+  "summary": "People signed in through the sign-in front stay signed in across restarts and updates.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Sessions survive restarts and updates",
+      "text": "People who sign in through the sign-in front stay signed in across restarts and updates. Old sign-in cookies no longer block a sign-in."
+    },
+    {
+      "title": "Scripts tell the sign-in front apart",
+      "text": "Rollback and version checks no longer mistake the sign-in front for PIM Manager."
+    }
+  ]
+}

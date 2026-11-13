@@ -1,0 +1,13 @@
+{
+  "version": "2.4.615",
+  "date": "2026-10-13",
+  "type": "fix-only",
+  "summary": "Active assignments works on large tenants without timing out.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Active assignments work on large tenants",
+      "text": "On a large tenant, the Active assignments list no longer times out. It loads one page at a time, with fast search, filters and sorting."
+    }
+  ]
+}

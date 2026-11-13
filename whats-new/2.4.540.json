@@ -1,0 +1,13 @@
+{
+  "version": "2.4.540",
+  "date": "2026-10-09",
+  "type": "fix-only",
+  "summary": "A brief Microsoft slowdown no longer fails the tenant data refresh.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Tenant refresh survives Microsoft slowdowns",
+      "text": "When Microsoft briefly slows the optional group activity list, the tenant data refresh keeps the last result instead of failing and mailing an alert."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.636",
+  "date": "2026-10-15",
+  "type": "fix-only",
+  "summary": "Long runs on very large tenants are never cut short.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Long runs are never cut short",
+      "text": "Every job can now run for up to 7 days, set at install and on every update, so a long run on a very large tenant is never cut short."
+    }
+  ]
+}

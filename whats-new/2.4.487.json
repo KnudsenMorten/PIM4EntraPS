@@ -1,0 +1,14 @@
+{
+  "version": "2.4.487",
+  "date": "2026-10-03",
+  "type": "fix-only",
+  "summary": "Licences from Invardia's new signing key are accepted, and existing licences keep working.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Licences from the new Invardia signer accepted",
+      "text": "PIM Manager now accepts licences signed by Invardia's new licensing key. Every licence already issued keeps working.",
+      "action": "Install this version before you install a licence file from the new Invardia signer."
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "version": "2.4.539",
+  "date": "2026-10-09",
+  "type": "feature",
+  "summary": "Your Pro licence unlocks every Pro feature, the engine grows with your tenant, and the database no longer runs full.",
+  "new": [
+    {
+      "title": "Home shows your setup health",
+      "text": "Home now flags a critical setting that is missing or wrong, such as no alert recipient, with what to do. Pro installs can share the same report with Invardia support."
+    },
+    {
+      "title": "Licence page explains each Pro feature",
+      "text": "Settings > Licence now shows beside each Pro feature why it is included or what licence it needs."
+    },
+    {
+      "title": "Engine sized for your tenant automatically",
+      "text": "PIM Manager sizes the engine for your number of users, groups and apps at install and on every update, and raises it after an out-of-memory run."
+    },
+    {
+      "title": "Re-issued licences install themselves",
+      "text": "When Invardia re-issues your licence, your installation fetches and checks it within 30 minutes, with no action from you."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "The delegation wizard asks for a per-environment workload's target, a script sets the database tier, and support sees database space, update ring and failure causes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Pro licence covers every Pro feature",
+      "text": "Features added after your licence was issued showed as \"Pro - not licensed\". Your edition now unlocks every current and future feature it includes."
+    },
+    {
+      "title": "The database no longer runs full",
+      "text": "A database raised from Basic kept a 2 GB limit and stopped accepting changes when full. Every Standard database now gets a 250 GB maximum at no extra cost."
+    },
+    {
+      "title": "Large tenants no longer run out of memory",
+      "text": "The list behind Reviews & controls > Revoke could stop with an out-of-memory error on very large tenants. It now completes using far less memory."
+    },
+    {
+      "title": "Removing an unapplied workload binding works",
+      "text": "A workload binding PIM Manager never applied can now be removed cleanly, and it disappears from Failing now."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Pro is always recognised during updates, the end-of-install licence check is correct, the mail sender shows its chosen address, and install progress shows every step."
+    }
+  ]
+}

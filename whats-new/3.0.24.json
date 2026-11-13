@@ -1,0 +1,29 @@
+{
+  "version": "3.0.24",
+  "date": "2026-11-03",
+  "type": "fix-only",
+  "summary": "Shorter install commands, and Invardia sees the true state of every setup step.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Invardia sees the true setup state",
+      "text": "Invardia's install view now shows the true state of every one-time setup step instead of unknown."
+    },
+    {
+      "title": "Shorter install commands",
+      "text": "The second install line carries only the tenant, subscription, region and the options you actually chose."
+    },
+    {
+      "title": "Private installs check DNS zones first",
+      "text": "A private-network install checks every private DNS zone it needs before it creates anything, and names all missing ones at once."
+    },
+    {
+      "title": "Running the installer twice works",
+      "text": "Running the installer twice in the same PowerShell window no longer fails; it signs in again."
+    },
+    {
+      "title": "Cleaner release package",
+      "text": "Every release package from Invardia is checked before it is published."
+    }
+  ]
+}

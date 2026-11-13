@@ -1,0 +1,26 @@
+{
+  "version": "3.0.10",
+  "date": "2026-10-31",
+  "type": "feature",
+  "summary": "You can now set a time of day by which every PIM Activator activation ends.",
+  "new": [
+    {
+      "title": "Set a daily end time for activations",
+      "text": "On the Client onboarding page, set a time of day by which every PIM Activator activation ends."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Mail send right stays in place",
+      "text": "A mail send right is never removed when Exchange does not report a scope's filter."
+    },
+    {
+      "title": "Managed tenants set up mail themselves",
+      "text": "A managed tenant build no longer sets up the mail sender. Your Exchange administrator does it under Get Started > Mail sender."
+    },
+    {
+      "title": "Hybrid worker removal keeps shared servers",
+      "text": "Removing the hybrid worker keeps the server when another product is registered on it, or when that cannot be checked."
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "version": "2.4.378",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "One page now shows what is delegated and what is not across every workload, and Defender XDR roles are managed end to end.",
+  "new": [
+    {
+      "title": "Coverage & gaps page",
+      "text": "Reviews & controls > Coverage & gaps shows what is covered and what is a gap across Entra ID, Intune, Defender XDR, Power BI and Azure, with ready proposals to stage."
+    },
+    {
+      "title": "Defender XDR roles managed for you",
+      "text": "PIM Manager creates Defender XDR custom roles named like their group, corrects their permissions and assigns them with the right data sources."
+    },
+    {
+      "title": "Workload readiness at a glance",
+      "text": "Template cards, wizards and Coverage & gaps show a green, amber or red chip for each workload's prerequisites, with the step to take."
+    },
+    {
+      "title": "Managed tenant registry and overview",
+      "text": "On the managing tenant you register and edit managed tenants on a page, and a replication overview shows exactly what each tenant receives."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Policy templates page, all three policy types in every wizard, a new Intune template, Defender and Intune discovery, and warnings for groups missing their workload role."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Azure permission groups are created",
+      "text": "Groups made by the Azure wizards were never created in the tenant. The group and its assignment are now added together."
+    },
+    {
+      "title": "Not checked is never in sync",
+      "text": "Drift now shows an area that was skipped or could not be read as not checked, with the reason, instead of counting it as in sync."
+    },
+    {
+      "title": "Your naming convention everywhere",
+      "text": "Discovered resources, template imports and retired groups now follow your own group naming pattern."
+    },
+    {
+      "title": "Defender XDR discovery works",
+      "text": "Defender XDR roles are read correctly, and a failed read shows as a failed job instead of no roles."
+    },
+    {
+      "title": "Replication preview matches for admins",
+      "text": "An admin without a management mode stays on the managing tenant and is shown that way in the preview."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.344",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Home loads instantly and no longer slows the Manager for other users.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Home loads instantly",
+      "text": "The Expiring access and Pending access reviews tiles load only when you click Load live data (slow)."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "version": "2.4.598",
+  "date": "2026-10-12",
+  "type": "feature",
+  "summary": "You decide every PIM policy setting; PIM Manager changes none on its own.",
+  "new": [
+    {
+      "title": "You decide every policy setting",
+      "text": "On the new Policy settings page and in Get Started, you choose Microsoft default, PIM Manager recommendation or Keep current per setting. A quick selection for all settings needs a typed confirmation."
+    },
+    {
+      "title": "Managed tenants can choose differently",
+      "text": "In an MSP setup, the managing tenant's choices are the default, and a managed tenant can choose differently."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Every policy change needs a SuperAdmin",
+      "text": "PIM Manager changes no policy on its own, and every resulting change waits for a SuperAdmin to approve it."
+    },
+    {
+      "title": "Unwanted held removals clear themselves",
+      "text": "A held removal plan that is no longer wanted clears by itself on the next run."
+    }
+  ]
+}

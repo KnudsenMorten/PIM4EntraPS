@@ -1,0 +1,13 @@
+{
+  "version": "3.0.68",
+  "date": "2026-11-09",
+  "type": "fix-only",
+  "summary": "PIM jobs can move to their standard names without any risk to your schedule.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Jobs move to standard names safely",
+      "text": "Each PIM job can be re-created under its standard name with the same identity. The schedule switches only after one proven run, and nothing is removed before that."
+    }
+  ]
+}

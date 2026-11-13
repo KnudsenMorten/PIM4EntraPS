@@ -1,0 +1,17 @@
+{
+  "version": "2.4.365",
+  "date": "2026-09-16",
+  "type": "feature",
+  "summary": "You can require approval for permission delegations, and existing delegations are easy to find and edit.",
+  "new": [
+    {
+      "title": "Activation policy for permission delegations",
+      "text": "When you create an Entra ID or Azure permission group in the wizard, you can pick its activation policy, including one that needs approval. Use default changes nothing."
+    },
+    {
+      "title": "Edit delegations in a table",
+      "text": "Access now has Delegations - edit in a table, where you change an existing delegation's duration or policy and then commit."
+    }
+  ],
+  "fixes": []
+}

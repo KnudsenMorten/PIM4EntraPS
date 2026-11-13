@@ -1,0 +1,22 @@
+{
+  "version": "2.4.369",
+  "date": "2026-09-18",
+  "type": "feature",
+  "summary": "Screens now tell you clearly what they did, so a successful action never looks like a lost one.",
+  "new": [
+    {
+      "title": "See your update ring in the Manager",
+      "text": "The header shows which update ring the environment is on. Jobs has an Updates & ring panel with the running version, the approved version and the last update run."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Revoke selected reports what it staged",
+      "text": "Review standing access now shows how many rows were staged and which were refused, with the reason. Nothing is revoked until you commit."
+    },
+    {
+      "title": "Your commit shows up in the queue",
+      "text": "The change queue now opens with recent commits included. A committed change shows as saved, and the engine applies it on its next run."
+    }
+  ]
+}

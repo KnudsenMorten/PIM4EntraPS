@@ -1,0 +1,25 @@
+{
+  "version": "2.4.349",
+  "date": "2026-09-13",
+  "type": "security",
+  "summary": "Every policy change and revoke is fully audited, and initial passwords are never shown or saved.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Policy changes audited rule by rule",
+      "text": "The audit trail records each policy rule's value before and after, its template, and whether an approved mass-change plan applied it."
+    },
+    {
+      "title": "Revokes and passes audited as they happen",
+      "text": "Revokes, Temporary Access Pass resets and session revokes record who asked, what was done to whom, how it was verified and the outcome."
+    },
+    {
+      "title": "Initial passwords never shown or saved",
+      "text": "Creating an admin from the setup tools never shows or keeps a password. Onboard the admin with a Temporary Access Pass."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "A refused commit stays on Pending changes with its blocking errors and fixes, and template rows with a placeholder subscription are not offered for import."
+    }
+  ]
+}

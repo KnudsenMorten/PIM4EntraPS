@@ -1,0 +1,22 @@
+{
+  "version": "2.4.386",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Held policy changes are where you expect them, and more group names follow your naming pattern.",
+  "new": [
+    {
+      "title": "Held changes on the Approvals page",
+      "text": "A held policy change is now listed at the top of Reviews & controls > Approvals, with each setting change and the Approve button."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clones follow your naming",
+      "text": "A cloned group is named by your current group pattern, and Re-add definition suggests the name your pattern gives."
+    },
+    {
+      "title": "Administrative unit groups use their pattern",
+      "text": "Once you change the administrative unit group pattern, permission groups granted inside an administrative unit are named by it. With the default, nothing changes."
+    }
+  ]
+}

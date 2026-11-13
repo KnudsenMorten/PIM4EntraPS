@@ -1,0 +1,22 @@
+{
+  "version": "2.4.388",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Rings now work the same way everywhere, from dev to test to broad.",
+  "new": [
+    {
+      "title": "One ring order everywhere",
+      "text": "Replication rings now run like update rings: 0 is dev, 1 is test, 2 is broad. Existing rings are converted once, so everyone keeps reaching exactly what they reached."
+    },
+    {
+      "title": "Tags live on the deployment ring",
+      "text": "The Managed tenant registry page has a Deployment rings card where you name each ring and narrow it with a tag rule. Existing admin tags are kept and shown."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Older managed tenants keep working",
+      "text": "A managed tenant on an older version converts the old ring numbers itself."
+    }
+  ]
+}

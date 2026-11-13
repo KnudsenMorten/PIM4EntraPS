@@ -1,0 +1,21 @@
+{
+  "version": "2.4.353",
+  "date": "2026-09-14",
+  "type": "fix-only",
+  "summary": "Committed changes now reach your tenant in minutes instead of waiting for a full engine pass.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Only what changed runs",
+      "text": "A committed change starts only the engine steps for the kind of data you changed, not every step for the whole tenant."
+    },
+    {
+      "title": "The engine starts right away",
+      "text": "Commit and Run start the engine immediately, and a run in progress picks up new commits as soon as its current step finishes."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Faster admin and nesting checks, and every admin now shows a type on Admin accounts."
+    }
+  ]
+}

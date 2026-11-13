@@ -1,0 +1,13 @@
+{
+  "version": "3.0.71",
+  "date": "2026-11-09",
+  "type": "security",
+  "summary": "The web app needs one right less, because the engine now reads access reviews.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Fewer rights for the web app",
+      "text": "The engine now reads access reviews, so the web app no longer needs an access review right."
+    }
+  ]
+}

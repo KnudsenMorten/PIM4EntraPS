@@ -1,0 +1,26 @@
+{
+  "version": "2.4.578",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "Network and custom host name setup is simpler and can be undone cleanly.",
+  "new": [
+    {
+      "title": "Hub preparation without extra tools",
+      "text": "The script for the hub network owner now runs on any machine with PowerShell, needs no Azure CLI, shows a plan first and never deletes anything."
+    },
+    {
+      "title": "Remove a custom host name again",
+      "text": "You can now take a custom host name off PIM Manager again; setup removes its binding and certificate and tells you which DNS record to delete."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Custom host name uses the right DNS zone",
+      "text": "The private DNS record now lands in the existing zone your name belongs to, and an already linked network is left alone."
+    },
+    {
+      "title": "More certificate formats accepted",
+      "text": "A Key Vault certificate in PEM format now works for a custom host name, and a public environment no longer waits 20 minutes for a certificate that cannot issue."
+    }
+  ]
+}

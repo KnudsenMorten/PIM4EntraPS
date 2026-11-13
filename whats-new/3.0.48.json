@@ -1,0 +1,17 @@
+{
+  "version": "3.0.48",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Newly granted permissions no longer show as missing while they take effect.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false missing access after new permissions",
+      "text": "Right after new permissions are granted, the database job and support access no longer show as missing or blocked. A membership that cannot be read yet shows as not yet known."
+    },
+    {
+      "title": "Least-privilege check keeps its result",
+      "text": "The database least-privilege check keeps its result after the updater leaves the database admin group."
+    }
+  ]
+}

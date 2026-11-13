@@ -1,0 +1,25 @@
+{
+  "version": "2.4.669",
+  "date": "2026-10-23",
+  "type": "fix-only",
+  "summary": "Screen texts are clearer and accurate; nothing behaves differently.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Approval texts say what really happens",
+      "text": "The Approvals page says a SuperAdmin can allow self-approval. Approve all says each held policy change set is approved for its exact plan only."
+    },
+    {
+      "title": "Break-glass list explains its effect",
+      "text": "The Break-glass list says it exempts an account from every revoke, disable and offboard action."
+    },
+    {
+      "title": "Plain names in Settings and guards",
+      "text": "Settings and guard names show plain names instead of internal ids and reference numbers."
+    },
+    {
+      "title": "Smaller text improvements",
+      "text": "The Drift note explains what the stray-object sweep finds, the Community vs Pro page says permission templates are imported in the portal, and the Entra roles pack is named PIM Manager reference set."
+    }
+  ]
+}

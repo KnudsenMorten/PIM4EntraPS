@@ -1,0 +1,13 @@
+{
+  "version": "2.4.531",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "Missing engine permissions are now granted with one browser sign-in and no extra software.",
+  "new": [
+    {
+      "title": "Grant missing engine permissions in one step",
+      "text": "When the engine lacks a permission, Overview and Get Started show a download from Invardia and one command. You sign in in the browser, and it covers the Azure right too."
+    }
+  ],
+  "fixes": []
+}

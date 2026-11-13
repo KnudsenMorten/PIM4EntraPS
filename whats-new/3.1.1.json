@@ -1,0 +1,13 @@
+{
+  "version": "3.1.1",
+  "date": "2026-11-11",
+  "type": "fix-only",
+  "summary": "Invardia support can see more of your installation's health, without changing anything.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Invardia support sees more health details",
+      "text": "PIM Manager now reports when its updater last ran and how it ended, and whether your Key Vault has purge protection and holds every secret. Nothing is changed."
+    }
+  ]
+}

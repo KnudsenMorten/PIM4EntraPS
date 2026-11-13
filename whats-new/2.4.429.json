@@ -1,0 +1,22 @@
+{
+  "version": "2.4.429",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "PIM Manager now only touches what you define, and held policy changes come with a spreadsheet your change board can approve.",
+  "new": [
+    {
+      "title": "A spreadsheet for your change board",
+      "text": "A large policy change held for approval now comes with an Excel file listing every setting's current and new value. Download it from Approvals with Download for change board."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Only what you define is changed",
+      "text": "Policies are now changed only for groups you define or roles your assignments name. Policies on other groups and roles are left exactly as they are."
+    },
+    {
+      "title": "An empty environment changes nothing",
+      "text": "When you have defined no admins, groups or assignments, the engine skips every step and writes nothing."
+    }
+  ]
+}

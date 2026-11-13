@@ -1,0 +1,31 @@
+{
+  "version": "2.4.391",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Temporary Access Passes last longer, central admins can be managed on managed tenants, and failures are easier to spot.",
+  "new": [
+    {
+      "title": "Longer Temporary Access Pass",
+      "text": "When no lifetime is set, a Temporary Access Pass now lasts up to 48 hours, never longer than your tenant allows. A new one is issued until the admin registers their own sign-in method.",
+      "action": "To allow the full 48 hours, raise the maximum in Entra ID > Authentication methods > Temporary Access Pass."
+    },
+    {
+      "title": "Central admins on managed tenants",
+      "text": "Reset Temporary Access Pass, Revoke sessions and Access now work for a central admin replicated to a managed tenant."
+    },
+    {
+      "title": "Create an admin from Create access",
+      "text": "The Create access page has a card that opens the same wizard as + New admin."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Failures are easy to see",
+      "text": "Engine logs & errors shows a red count of failed runs and lists them first. Jobs lists failing jobs first."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Admin mail on managed tenants reaches the alert recipients, department owners show at once on Admin accounts, and rejected policy changes show more detail."
+    }
+  ]
+}

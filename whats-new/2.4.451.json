@@ -1,0 +1,13 @@
+{
+  "version": "2.4.451",
+  "date": "2026-09-26",
+  "type": "fix-only",
+  "summary": "A managed tenant's first pull no longer reports a failure for something that is only waiting.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false failure on the first pull",
+      "text": "On a managed tenant's first pull, a new group's membership waits a moment for the group. The pull is now recorded as successful and says what is waiting."
+    }
+  ]
+}

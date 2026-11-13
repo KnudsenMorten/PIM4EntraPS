@@ -1,0 +1,21 @@
+{
+  "version": "3.0.44",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "A healthy installation is no longer rolled back when Azure answers slowly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No rollback of a healthy installation",
+      "text": "Updates no longer roll back a healthy installation when Azure is slow to list app versions."
+    },
+    {
+      "title": "Private installs rebuild their build pool reliably",
+      "text": "A private installation's build pool is always made again after a tier change, also when Azure is slow to remove the old one."
+    },
+    {
+      "title": "Status reports catch up faster",
+      "text": "Status reports to Invardia now catch up within one cycle."
+    }
+  ]
+}

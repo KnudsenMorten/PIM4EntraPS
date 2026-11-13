@@ -1,0 +1,31 @@
+{
+  "version": "2.4.372",
+  "date": "2026-09-18",
+  "type": "feature",
+  "summary": "You decide how often managed tenants update, and reminder mail is safe to leave on.",
+  "new": [
+    {
+      "title": "Set how often managed tenants update",
+      "text": "The Job schedule page lets you switch the managed-tenant pull or the publish on or off, set an interval from 5 minutes to a day, and run it now.",
+      "action": "After upgrading, set the interval you want on the Job schedule page; the default is daily."
+    },
+    {
+      "title": "Changes publish on commit",
+      "text": "Committing a replicated change on the managing tenant starts a publish, so managed tenants can pick it up within minutes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Escalation mail is safe to leave on",
+      "text": "Escalation mails follow your alert settings, never arrive as a backlog after upgrade, and send at most one reminder per stage to the sponsor department's owners."
+    },
+    {
+      "title": "One role per workload delegation",
+      "text": "A delegation with several workload roles kept only the last one silently. It is now refused with a clear message."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Any whole number is a valid replication ring, ring labels are clearer, and jobs that do not apply show as skipped."
+    }
+  ]
+}

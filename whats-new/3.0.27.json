@@ -1,0 +1,25 @@
+{
+  "version": "3.0.27",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "Azure role assignments with a time limit apply again instead of failing.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Time-limited Azure roles apply again",
+      "text": "Azure role assignments that a scope's PIM policy limits in duration now apply at the longest allowed duration. Before, they failed."
+    },
+    {
+      "title": "Power BI checks only when used",
+      "text": "With Power BI switched off and nothing defined for it, its prerequisites are no longer checked or shown."
+    },
+    {
+      "title": "Clearer workload prerequisites",
+      "text": "A prerequisite that only the portal can show now says first that Confirm or Not used closes it."
+    },
+    {
+      "title": "Sign-in clean-up",
+      "text": "A new install removes a sign-in setting it no longer needs once sign-in is live."
+    }
+  ]
+}

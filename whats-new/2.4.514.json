@@ -1,0 +1,17 @@
+{
+  "version": "2.4.514",
+  "date": "2026-10-06",
+  "type": "fix-only",
+  "summary": "Deleting an admin stays each tenant's own decision.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Central admins never deleted in managed tenants",
+      "text": "A managed tenant only disables a central admin marked as deleted. Deleting an account stays each tenant's own decision."
+    },
+    {
+      "title": "Pro updates follow your environment's ring",
+      "text": "Pro updates now match the ring set in your environment, and an update for another ring is refused."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "3.0.35",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "When Invardia cannot be reached in time, the update status now says so plainly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Clear message when Invardia cannot be reached",
+      "text": "When an update cannot reach Invardia in time, the status says so plainly. The next update run asks again, and nothing was changed."
+    }
+  ]
+}

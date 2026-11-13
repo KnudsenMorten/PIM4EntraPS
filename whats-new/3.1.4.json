@@ -1,0 +1,13 @@
+{
+  "version": "3.1.4",
+  "date": "2026-11-11",
+  "type": "fix-only",
+  "summary": "An update held back by a running job now arrives within minutes instead of a day later.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Held updates are retried within minutes",
+      "text": "If a nightly update waits because a PIM job is running, the updater now tries again every 15 minutes instead of waiting a day. It never changes anything while a job runs."
+    }
+  ]
+}

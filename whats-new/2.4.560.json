@@ -1,0 +1,13 @@
+{
+  "version": "2.4.560",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Setup works on Windows in any language.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup works on non-English Windows",
+      "text": "Setup failed on Windows in other languages with an error about identity references. It now works whatever the Windows language."
+    }
+  ]
+}

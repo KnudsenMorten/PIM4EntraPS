@@ -1,0 +1,26 @@
+{
+  "version": "2.4.671",
+  "date": "2026-10-23",
+  "type": "feature",
+  "summary": "Database security events are now kept in your own Log Analytics workspace, and the nightly update recovers from short network faults.",
+  "new": [
+    {
+      "title": "Database security events are recorded",
+      "text": "PIM Manager's database now records security events, such as sign-ins and permission changes, in your own Log Analytics workspace for 90 days. New and existing installations get it."
+    },
+    {
+      "title": "About card on the Support page",
+      "text": "The Support page now has an About card with the Invardia legal line."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Tier impact report shows level separately",
+      "text": "The Tier impact report takes the tier from the tier marker and shows the level in its own column."
+    },
+    {
+      "title": "Nightly update recovers from network faults",
+      "text": "A nightly update that hits a short network fault while storing the new version retries once. A second failure is reported in plain words."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.569",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "New installations finish their PIM Manager setup steps again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup finishes on new installations",
+      "text": "Closing PIM Manager and storing its sign-in secret work again on a new installation. Setup now waits when the app is still busy."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "3.1.2",
+  "date": "2026-11-11",
+  "type": "fix-only",
+  "summary": "Fewer false reports of runs taking far longer than usual.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Fewer false long-run reports",
+      "text": "A run is reported as far longer than usual only when it takes over twice the longest recent good run and at least 30 minutes."
+    }
+  ]
+}

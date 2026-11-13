@@ -1,0 +1,26 @@
+{
+  "version": "2.4.498",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "Menus are quicker to use, numbers follow your format, and you can print the audit trail as evidence.",
+  "new": [
+    {
+      "title": "Menus open on hover",
+      "text": "On a desktop, pointing at a menu opens it and arrow keys move between menus. Touch screens still open a menu with a tap."
+    },
+    {
+      "title": "Numbers in your regional format",
+      "text": "Choose Automatic, Danish, English US, English UK or German in the status line. Your browser remembers the choice."
+    },
+    {
+      "title": "Print the audit trail as evidence",
+      "text": "Print as evidence on the Audit page prints the filtered trail with who printed it, when and the filter used."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Exports are audited",
+      "text": "Exporting or printing the audit trail is now itself recorded in the audit trail."
+    }
+  ]
+}

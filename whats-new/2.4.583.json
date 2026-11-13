@@ -1,0 +1,18 @@
+{
+  "version": "2.4.583",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "The as-built document works on existing environments, and updates report their state correctly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "As-built document works on existing environments",
+      "text": "The as-built document could not be made on environments set up by the nightly update. It now works, and its log names the fix if it still cannot run.",
+      "action": "An Owner of the PIM resource group runs the hosting access setup script once; the update log reminds you until then."
+    },
+    {
+      "title": "Updates no longer report false problems",
+      "text": "The update no longer reports the as-built document job as not fully updated right after moving it, and it waits briefly when that job is still busy."
+    }
+  ]
+}

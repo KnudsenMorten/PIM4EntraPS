@@ -1,0 +1,47 @@
+{
+  "version": "2.4.575",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "Nothing that waits on you is forgotten, and you can see and revoke privileged access on a visual map.",
+  "new": [
+    {
+      "title": "A reminder when something waits on you",
+      "text": "SuperAdmins get one reminder mail listing everything waiting on them, each with a link. Change it under Settings > Mail & alerting > Reminders: what waits on you."
+    },
+    {
+      "title": "Delegation overview with a graph view",
+      "text": "All privileged permissions now shows live access as a map of people, groups, roles and scopes. Click a path, tick what to take away and press Revoke."
+    },
+    {
+      "title": "Setup needs no extra tools",
+      "text": "Setup and support scripts no longer need the Azure CLI or PowerShell modules, and the PIM Manager image is slimmer."
+    },
+    {
+      "title": "Your DNS stays yours",
+      "text": "With a custom host name, setup no longer changes your Active Directory DNS. It prints the one record to add and a command to check it."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Access reviews also ask department owners",
+      "text": "Department owners now always review their department; extra reviewers on a review rule join them instead of replacing them.",
+      "action": "To keep the old behaviour, tick \"only these reviewers (not the owners)\" on the review rule."
+    },
+    {
+      "title": "Drift Apply now applies only what you ticked",
+      "text": "Before, Apply now re-applied every missing and changed item. Now only the items you ticked are created or updated."
+    },
+    {
+      "title": "Mail recipients get working Reader access",
+      "text": "Recipients whose mail address differs from their sign-in name now get Reader access under the name they sign in with."
+    },
+    {
+      "title": "Old workload rows no longer block commits",
+      "text": "An old workload row without a Resource now shows as a warning instead of blocking your commits."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "New mail layout for alerts, auto-extend moved to Settings > Automation, a clear loading message on delegations, readable list columns and clearer revoke wording."
+    }
+  ]
+}

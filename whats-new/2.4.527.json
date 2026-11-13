@@ -1,0 +1,13 @@
+{
+  "version": "2.4.527",
+  "date": "2026-10-07",
+  "type": "fix-only",
+  "summary": "The PIM Activator page now recognises one app shared by PROD and TEST.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One PIM Activator app for both channels",
+      "text": "When one PIM Activator app serves both PROD and TEST, the page now shows that TEST uses it instead of reporting the TEST app as missing."
+    }
+  ]
+}

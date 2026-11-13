@@ -1,0 +1,13 @@
+{
+  "version": "2.4.537",
+  "date": "2026-10-09",
+  "type": "feature",
+  "summary": "You can install a managed tenant straight from Azure Cloud Shell.",
+  "new": [
+    {
+      "title": "Install a managed tenant from Cloud Shell",
+      "text": "You can now install a managed tenant from Azure Cloud Shell or Linux, without Windows PowerShell. On Windows nothing changes."
+    }
+  ],
+  "fixes": []
+}

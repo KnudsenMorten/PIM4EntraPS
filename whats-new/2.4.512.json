@@ -1,0 +1,13 @@
+{
+  "version": "2.4.512",
+  "date": "2026-10-06",
+  "type": "fix-only",
+  "summary": "Admin accounts now have their own menu, so they are easier to find.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A new Admin accounts menu",
+      "text": "A new Admin accounts menu, left of Access, holds Admin accounts & TAP and Invite a guest or consultant."
+    }
+  ]
+}

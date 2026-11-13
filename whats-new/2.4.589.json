@@ -1,0 +1,25 @@
+{
+  "version": "2.4.589",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Status problems show honestly, new installations settle smoothly, and new managed tenants connect within minutes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Undelivered status shows as a warning",
+      "text": "When status reports do not reach Invardia, the Jobs page shows an amber warning with the reason, and an alert goes out at most once a day."
+    },
+    {
+      "title": "Updates wait for the install key",
+      "text": "An update in the first minutes after installing shows \"waiting for the install key\" and ends successfully. No key a day later shows a warning pointing to Settings > Licence."
+    },
+    {
+      "title": "New managed tenants connect within minutes",
+      "text": "In an MSP setup, the managing tenant allows a newly enrolled managed tenant within minutes. Until then, the managed tenant's install waits and retries by itself instead of failing."
+    },
+    {
+      "title": "Install check verifies more",
+      "text": "The end-of-install check confirms that scheduled jobs are on, have run, and that status reports reached Invardia."
+    }
+  ]
+}

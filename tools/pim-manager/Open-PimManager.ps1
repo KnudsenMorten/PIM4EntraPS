@@ -338,6 +338,7 @@ if (Test-Path -LiteralPath $_invUpdLib) { . $_invUpdLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DemoData.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-Docs.ps1')   # PIM 100.157: the documentation shipped with this version
+. (Join-Path $solutionRoot 'engine\_shared\PIM-WhatsNew.ps1')   # WHATS-NEW-1: What's new (release files + the shared renderer)
 # APIDOC-1: Settings > API and MCP reference (GET /api/api-reference) -- read from this process's own code (same library as the release hand-over)
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'tools\setup\_PimApiReference.ps1')) { . (Join-Path $solutionRoot 'tools\setup\_PimApiReference.ps1') }
 function Test-PimManagerDemoDataOn {
@@ -15408,6 +15409,31 @@ function Handle-Request {
         return 200
     }
 
+    # WHATS-NEW-1 (framework): Invardia's shared What's new renderer, embedded unchanged (tools/pim-manager/whatsnew/) --
+    # whats-new.js (an ES module the page imports) and whats-new.css. Read-only; the same gate as GET / (hosted: a trusted
+    # principal; local: the session cookie of the browser that opened the Manager). Only those two names exist here.
+    if ($path -like '/app/whats-new/*' -and ($method -eq 'GET' -or $method -eq 'HEAD')) {
+        if ($script:PimHosted -and -not "$script:CurrentRequestPrincipal".Trim()) {
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'no authenticated principal -- this app must be reached through its authentication edge' }
+            return 401
+        }
+        if (-not $script:PimHosted -and -not (Test-PimManagerLocalSessionCookie -Session $script:PimLocalSession -CookieHeader "$($req.Headers['Cookie'])")) {
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized' }
+            return 401
+        }
+        $wnAsset = Get-PimWhatsNewAsset -AssetDir (Get-PimWhatsNewAssetDir -SolutionRoot $solutionRoot) -Name ($path.Substring('/app/whats-new/'.Length))
+        if (-not $wnAsset.ok) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'not found' }; return 404 }
+        try {
+            $resp.StatusCode = 200
+            $resp.ContentType = "$($wnAsset.contentType)"
+            $resp.Headers['Cache-Control'] = 'no-cache'
+            $resp.Headers['X-Content-Type-Options'] = 'nosniff'
+            if ($method -eq 'GET') { $resp.ContentLength64 = $wnAsset.bytes.LongLength; $resp.OutputStream.Write($wnAsset.bytes, 0, $wnAsset.bytes.Length) }
+            $resp.OutputStream.Close()
+        } catch { Write-Host ("  [net] client gone before the What's new file was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
+        return 200
+    }
+
     if ($path -eq '/favicon.ico') {
         $resp.StatusCode = 204
         $resp.OutputStream.Close()
@@ -18231,6 +18257,21 @@ function Handle-Request {
         if ($path -eq '/api/docs' -and $method -eq 'GET') {
             $dix = Get-PimDocsIndex -ManualDir (Get-PimDocsDir -SolutionRoot $solutionRoot)
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $dix.ok; version = "$(Get-PimSolutionVersion)"; pages = @($dix.pages); error = $dix.error })
+            return 200
+        }
+        # WHATS-NEW-1 (framework): Settings > What's new -- every release file SHIPPED with this version (whats-new/), passed
+        # through as on disk. Read-only, every signed-in role (it is the product's own release information).
+        if ($path -eq '/api/whats-new' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $wnJson = Get-PimWhatsNewAnswer -Dir (Get-PimWhatsNewDir -SolutionRoot $solutionRoot) -Version "$(Get-PimSolutionVersion)"
+            try {
+                $wnBytes = [System.Text.Encoding]::UTF8.GetBytes($wnJson)
+                $resp.StatusCode = 200
+                $resp.ContentType = 'application/json; charset=utf-8'
+                $resp.ContentLength64 = $wnBytes.LongLength
+                $resp.OutputStream.Write($wnBytes, 0, $wnBytes.Length)
+                $resp.OutputStream.Close()
+            } catch { Write-Host ("  [net] client gone before What's new was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
             return 200
         }
         if ($path -eq '/api/docs/page' -and $method -eq 'GET') {

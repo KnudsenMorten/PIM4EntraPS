@@ -1,0 +1,17 @@
+{
+  "version": "2.4.452",
+  "date": "2026-09-27",
+  "type": "security",
+  "summary": "Every approval covers exactly one change set, and automated test runs are clearly labelled in the audit trail.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger protection for approvals",
+      "text": "Each approval covers exactly the policy changes that were reviewed."
+    },
+    {
+      "title": "Automated runs are named in the audit trail",
+      "text": "Automated test runs are now recorded as that automation, acting as the signed-in account, instead of under a person's name. A hosted Manager always records the real signed-in person."
+    }
+  ]
+}

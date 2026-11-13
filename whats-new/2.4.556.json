@@ -1,0 +1,13 @@
+{
+  "version": "2.4.556",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Setup signs you in once for both Entra ID and Azure.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One sign-in covers Entra ID and Azure",
+      "text": "Setup now signs you in once in the browser for both Entra ID and Azure, with no second sign-in window."
+    }
+  ]
+}

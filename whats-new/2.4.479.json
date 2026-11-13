@@ -1,0 +1,38 @@
+{
+  "version": "2.4.479",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "You can define your own rings and grant short-term group access, and the hybrid AD sync now heals itself.",
+  "new": [
+    {
+      "title": "Define your own deployment rings",
+      "text": "Name, add or remove up to ten rings under Settings > Deployment rings. Hovering a ring shows which managed tenants it reaches."
+    },
+    {
+      "title": "Short-term access to another group (Pro)",
+      "text": "In the request portal a consultant can ask for short-term membership of another group. The department approves, and it ends automatically, after 24 hours by default."
+    },
+    {
+      "title": "Bulk actions on Admin accounts",
+      "text": "Select several accounts to link them to a company or department, change the auto-disable date or reset their access."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Hybrid AD sync no longer stalls",
+      "text": "The sync can no longer stop for hours unnoticed. Watchdogs restart it, and Settings shows whether each worker job is working."
+    },
+    {
+      "title": "Same initials no longer block commits",
+      "text": "The new-admin wizard now refuses an account name already in use, before anything is staged."
+    },
+    {
+      "title": "Commits explained in plain words",
+      "text": "The commit dialog lists every change in plain words, and a refused commit explains why and offers buttons to fix it."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Settings are grouped in categories, some menu items moved, a single-administrator tenant can allow self-approval, and access keys can last up to 10 years."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "2.4.440",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "A new Community installation now finishes, exactly as the README describes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community installations finish",
+      "text": "A new Community installation no longer stops half-way. It now completes and checks itself: the Manager runs, the page answers behind sign-in and the engine job exists."
+    },
+    {
+      "title": "The README install command works",
+      "text": "The install command in the README now names who may sign in to the Manager, which is required. A dry run tells you if it is missing."
+    }
+  ]
+}

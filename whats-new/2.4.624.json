@@ -1,0 +1,27 @@
+{
+  "version": "2.4.624",
+  "date": "2026-10-14",
+  "type": "feature",
+  "summary": "PIM Manager can now manage Power BI workspace roles, and its screens speak in calmer, plainer words.",
+  "new": [
+    {
+      "title": "Power BI workspace roles",
+      "text": "PIM Manager can now add PIM groups to Power BI workspace roles. It only adds, never removes.",
+      "action": "Run the workload prerequisites script once to grant the Fabric Administrator role."
+    },
+    {
+      "title": "Hybrid worker is a switch",
+      "text": "The hybrid worker is now a feature you switch on. It is off by default."
+    },
+    {
+      "title": "Self-approve break-glass changes",
+      "text": "Break-glass changes can be self-approved when self-approval is on."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Calmer dialogs and pages",
+      "text": "Switch dialogs show one calm line with details behind More info. Guards say Protecting or Holding back changes, and Jobs shows no more overdue noise."
+    }
+  ]
+}

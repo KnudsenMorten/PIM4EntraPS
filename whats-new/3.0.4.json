@@ -1,0 +1,13 @@
+{
+  "version": "3.0.4",
+  "date": "2026-10-28",
+  "type": "fix-only",
+  "summary": "Jobs no longer fail right after you save a new role.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New groups no longer cause failed jobs",
+      "text": "A group PIM Manager creates is recorded straight away, so a run that starts meanwhile no longer reports it as waiting for adoption. Jobs no longer fail right after you save a new role."
+    }
+  ]
+}

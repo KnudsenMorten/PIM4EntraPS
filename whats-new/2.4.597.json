@@ -1,0 +1,18 @@
+{
+  "version": "2.4.597",
+  "date": "2026-10-12",
+  "type": "feature",
+  "summary": "You can open a support ticket at Invardia straight from PIM Manager.",
+  "new": [
+    {
+      "title": "Get support from inside PIM Manager",
+      "text": "A Get support button opens a support ticket at Invardia. You see and can edit everything before it is sent."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Smoother installation",
+      "text": "The installation checks the administrators before it creates anything, remembers the licence file when resumed, and closes the temporary database firewall rule it opened."
+    }
+  ]
+}

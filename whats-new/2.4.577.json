@@ -1,0 +1,30 @@
+{
+  "version": "2.4.577",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "Run the hybrid worker on your own servers and install PIM Manager in any Azure region.",
+  "new": [
+    {
+      "title": "Hybrid worker on your own server",
+      "text": "The hybrid worker can now run on an on-premises Windows server enabled for Azure Arc, with outbound connections only. Not yet proven on a live Arc server."
+    },
+    {
+      "title": "Deploy the hybrid worker with one command",
+      "text": "One command now deploys the hybrid worker in the right order, on an Azure VM or an Arc server, and pauses for the Active Directory steps."
+    },
+    {
+      "title": "Install in any Azure region",
+      "text": "Setup checks before anything is created that every service PIM Manager needs is offered in your chosen region, and suggests the nearest one that has them."
+    },
+    {
+      "title": "PIM Activator shows the Invardia shield",
+      "text": "The PIM Activator icons now show the official PIM Manager shield, from the next Activator package."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Install wizard asks fewer questions",
+      "text": "The install wizard no longer asks for admin account prefixes, and setup screens now say PIM Manager."
+    }
+  ]
+}

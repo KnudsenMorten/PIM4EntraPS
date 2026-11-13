@@ -1,0 +1,30 @@
+{
+  "version": "2.4.370",
+  "date": "2026-09-18",
+  "type": "security",
+  "summary": "A full review of the product makes every safety feature dependable and keeps your access and data safe from accidental loss.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger protection for the Manager",
+      "text": "Security hardening across the Manager, its sign-in, MSP baselines and PIM Activator.",
+      "action": "When you create a new Manager, configure its sign-in and choose who may use it: named people or groups, or all member users."
+    },
+    {
+      "title": "Two admins can no longer overwrite each other",
+      "text": "A commit made on data that changed since you loaded it is refused. You are offered a reload that keeps your staged edits."
+    },
+    {
+      "title": "Break-glass works as promised",
+      "text": "While an emergency override is active, approval is switched off on the scoped groups and restored afterwards. Manage Break-glass accounts in Settings; PIM Manager never disables them."
+    },
+    {
+      "title": "Safety alerts are really sent",
+      "text": "Removal budget, account-disable and policy mass-change alerts are now sent, and a failed send is recorded. A disable date in the past now asks for approval first."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Saving departments keeps all their settings, quick-fixes act on the right row, access-review screens show real data, and updates never move an environment backward."
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "version": "2.4.408",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Administrators with spaces or accents in their name can sign in again, and you can remove a delegation right on the Access map.",
+  "new": [
+    {
+      "title": "Remove a delegation on the Access map",
+      "text": "Click an existing link on the Access map, confirm by name, and the removal is staged until you commit it on Review & Save. Click again to undo."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Sign-in works for every name",
+      "text": "Administrators whose display name contains a space or an accented letter could not sign in. Install this version and sign-in works; nothing changes in your tenant."
+    },
+    {
+      "title": "\"Cannot be deleted\" names the blockers",
+      "text": "Deleting a group still in use now lists each delegation in plain words and opens exactly those rows, so you can remove them first."
+    },
+    {
+      "title": "Search finds group tags",
+      "text": "Review current delegations now finds group tags too. When nothing matches, it explains the difference and offers to search the Access map."
+    },
+    {
+      "title": "Clearer audit trail entries",
+      "text": "A sign-in is now one readable sentence instead of fields reading \"(none)\"."
+    },
+    {
+      "title": "PIM Manager's own group is not drift",
+      "text": "The administrators group the deployment creates for PIM Manager itself is no longer reported as drift. The page says what was left out."
+    }
+  ]
+}

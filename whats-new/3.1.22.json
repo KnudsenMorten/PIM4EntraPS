@@ -1,0 +1,26 @@
+{
+  "version": "3.1.22",
+  "date": "2026-11-13",
+  "type": "fix-only",
+  "summary": "Your Defender XDR roles stay exactly as you set them, and the workload job no longer fails after Microsoft's change.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Your Defender XDR roles are never changed",
+      "text": "PIM Manager only adds your groups to roles that already exist. It never creates, changes or deletes a role.",
+      "action": "Create the role in the Defender portal; Drift: live vs desired lists which ones."
+    },
+    {
+      "title": "No group gets more than you defined",
+      "text": "If a role grants more than you asked for, the group is not added and you see what is extra."
+    },
+    {
+      "title": "The workload job runs again",
+      "text": "Microsoft now shows some role permissions in a shorter form. PIM Manager reads both forms the same way, so the job no longer stops."
+    },
+    {
+      "title": "Differences in Data sources are only reported",
+      "text": "A difference in Data sources is shown to you and no longer fails the run."
+    }
+  ]
+}

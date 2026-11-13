@@ -1,0 +1,13 @@
+{
+  "version": "2.4.542",
+  "date": "2026-10-09",
+  "type": "fix-only",
+  "summary": "The tenant data refresh reads activity for every group again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Group activity is read for every group",
+      "text": "The tenant data refresh again reads activity for every group. The two previous versions read only some groups and reported the rest as failed."
+    }
+  ]
+}

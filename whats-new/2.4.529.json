@@ -1,0 +1,30 @@
+{
+  "version": "2.4.529",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "You can now complete each setup step right inside the Get Started wizard.",
+  "new": [
+    {
+      "title": "Get Started is a real wizard",
+      "text": "Every Get Started step now has its own fields, with Previous, Save & exit and Save & next. A refused save stays on the step and shows the reason."
+    },
+    {
+      "title": "Demo mode for live demos",
+      "text": "Off by default. Visitors in a demo group can look at everything and stage changes, but nothing is saved, and a banner says it is a demo."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No double removals",
+      "text": "Asking to remove something that is already queued adds nothing and says \"already queued\"."
+    },
+    {
+      "title": "Large tenants keep every snapshot",
+      "text": "The current assignments snapshot is no longer lost in busy tenants with ten thousand assignments."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The setup scripts now name the Invardia Support app; the old wording still works."
+    }
+  ]
+}

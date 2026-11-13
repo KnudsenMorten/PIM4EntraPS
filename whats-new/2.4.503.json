@@ -1,0 +1,18 @@
+{
+  "version": "2.4.503",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "You can now take a group out of PIM Manager with all its delegations in one click.",
+  "new": [
+    {
+      "title": "Quick clean-up on a group row",
+      "text": "One button takes a group out of PIM Manager together with every delegation that names it, staged in Pending changes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Records grouped more clearly",
+      "text": "Records are grouped as Direct groups, Indirect groups, Who gets what and Other records, and the delegations view lists more group types."
+    }
+  ]
+}

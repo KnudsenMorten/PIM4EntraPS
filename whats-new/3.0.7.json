@@ -1,0 +1,13 @@
+{
+  "version": "3.0.7",
+  "date": "2026-10-30",
+  "type": "fix-only",
+  "summary": "The monthly management report is never switched on by surprise.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Monthly report switch explains itself",
+      "text": "The monthly management report switch explains itself under More info and asks you before it is switched on."
+    }
+  ]
+}

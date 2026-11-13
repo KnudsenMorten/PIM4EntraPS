@@ -1,0 +1,29 @@
+{
+  "version": "2.4.554",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Fewer false alarms when Microsoft is busy, lower log costs, and a simpler managed tenant install.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Microsoft throttling no longer sends failure alerts",
+      "text": "When Microsoft briefly slows a job that changed nothing, it shows as throttled and retries. You are mailed only if it stays stuck for 12 runs or 6 hours."
+    },
+    {
+      "title": "Quieter logs, lower Log Analytics cost",
+      "text": "Repeating messages are now logged once and then daily, so your Log Analytics bill drops. Errors are always logged, and full logs stay under Jobs > Logs."
+    },
+    {
+      "title": "Managed tenant install needs no extra tools",
+      "text": "A managed tenant install and its downloadable setup scripts no longer need the Azure CLI, and the admin account prefix is now optional."
+    },
+    {
+      "title": "Updates finish more reliably",
+      "text": "The automatic update waits for a busy engine before sizing it, records the release it applied correctly, and no longer reports a false updater problem."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "PIM Manager reports in to Invardia every 4 hours, every script prints its name and version first, and large tenants see less load from daily activity reads."
+    }
+  ]
+}

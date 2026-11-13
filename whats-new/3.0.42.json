@@ -1,0 +1,17 @@
+{
+  "version": "3.0.42",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Updates never change the database while a PIM job is running.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates never interrupt a running job",
+      "text": "The updater waits up to 20 minutes for running PIM jobs. If they are still running, it waits for a later run and changes nothing."
+    },
+    {
+      "title": "Build pool idle between builds",
+      "text": "A private installation's build pool sits at zero between builds and scales up only for a build."
+    }
+  ]
+}

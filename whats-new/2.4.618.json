@@ -1,0 +1,30 @@
+{
+  "version": "2.4.618",
+  "date": "2026-10-13",
+  "type": "feature",
+  "summary": "Guard holds need a SuperAdmin, AD sync never removes on a doubt, and AD clean-up can be approved in batches.",
+  "new": [
+    {
+      "title": "SuperAdmin approves guard holds",
+      "text": "Changes held by a guard now need a SuperAdmin's approval, with counts on the Guards page."
+    },
+    {
+      "title": "Approve AD clean-up in batches",
+      "text": "AD clean-up and server groups can now be approved in batches."
+    },
+    {
+      "title": "List menu and two protection switches",
+      "text": "Every list has a list menu, and Settings has two new protection switches."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "AD sync never removes on a doubt",
+      "text": "When AD sync is not sure, it removes nothing."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Clear group states with one remove or delete dialog, revoking by scope and level, a settings clean-up, and a retry after a create."
+    }
+  ]
+}

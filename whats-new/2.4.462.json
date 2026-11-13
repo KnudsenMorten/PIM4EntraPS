@@ -1,0 +1,22 @@
+{
+  "version": "2.4.462",
+  "date": "2026-09-29",
+  "type": "feature",
+  "summary": "You cannot miss whether a commit worked, and new department groups commit reliably.",
+  "new": [
+    {
+      "title": "Commit results in the middle of the screen",
+      "text": "A failed or refused commit now shows a red box listing the errors and exactly what was and was not saved. A successful commit shows a green summary."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "New department groups commit reliably",
+      "text": "A new group for a department that already had an owner entry could be refused while its assignments were saved, blocking later commits. Existing data is corrected automatically during the update."
+    },
+    {
+      "title": "Commit all saves definitions first",
+      "text": "Commit all now writes definitions before assignments, so a definition that cannot be saved stops the commit before anything that depends on it is written."
+    }
+  ]
+}

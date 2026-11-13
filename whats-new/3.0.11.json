@@ -1,0 +1,25 @@
+{
+  "version": "3.0.11",
+  "date": "2026-11-01",
+  "type": "security",
+  "summary": "Security improvements for self-service requests, policy baselines and hybrid worker updates.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger protection for self-service requests",
+      "text": "Security improvements for self-service group requests."
+    },
+    {
+      "title": "Signed policy baselines",
+      "text": "Security improvements for policy baselines."
+    },
+    {
+      "title": "Signed hybrid worker updates",
+      "text": "Security improvements for the hybrid worker's daily update."
+    },
+    {
+      "title": "Stronger self-service sign-in",
+      "text": "Security improvements for self-service sign-in and PINs."
+    }
+  ]
+}

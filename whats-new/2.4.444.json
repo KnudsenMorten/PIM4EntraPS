@@ -1,0 +1,21 @@
+{
+  "version": "2.4.444",
+  "date": "2026-09-26",
+  "type": "fix-only",
+  "summary": "Setup and engine runs no longer fail on short Microsoft delays.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mailbox setup waits out a Microsoft delay",
+      "text": "Right after its permission is granted, Microsoft can refuse the mailbox check once. Setup now retries for a few minutes before reporting that mail cannot be sent."
+    },
+    {
+      "title": "New accounts and groups no longer fail runs",
+      "text": "A role or PIM policy for an account or group created moments earlier is now treated as a short wait that the next run completes, not as a failure."
+    },
+    {
+      "title": "The Community updater finds your installation",
+      "text": "Test runs no longer leave a saved deployment behind, so the Community updater always finds your own installation."
+    }
+  ]
+}

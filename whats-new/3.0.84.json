@@ -1,0 +1,17 @@
+{
+  "version": "3.0.84",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "Undelivered reports to Invardia support no longer reach your inbox or raise early warnings.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Undelivered reports no longer mail you",
+      "text": "A report to Invardia support that could not be delivered is retried and never mailed to you. The Invardia support link turns amber only after three failed rounds in a row."
+    },
+    {
+      "title": "Rights list matches what PIM Manager does",
+      "text": "The approved rights list now matches the product; the updater keeps reading SuperAdmins' mail addresses for alerts."
+    }
+  ]
+}

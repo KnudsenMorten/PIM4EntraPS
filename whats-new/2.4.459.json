@@ -1,0 +1,13 @@
+{
+  "version": "2.4.459",
+  "date": "2026-09-29",
+  "type": "fix-only",
+  "summary": "The hybrid worker can work with Active Directory groups again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Hybrid worker group work runs again",
+      "text": "In the previous version every Active Directory group step of the hybrid worker failed, so the group mirror and membership sync could not run. Nothing was changed in AD; both work now."
+    }
+  ]
+}

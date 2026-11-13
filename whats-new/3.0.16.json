@@ -1,0 +1,29 @@
+{
+  "version": "3.0.16",
+  "date": "2026-11-02",
+  "type": "security",
+  "summary": "Stronger protection for scripts, updates and sign-ins across PIM Manager.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Published scripts need PowerShell 7",
+      "text": "Every script published for you now needs PowerShell 7 and lists the role you need and the addresses it reaches."
+    },
+    {
+      "title": "Checked hybrid worker installs",
+      "text": "Security improvements for hybrid worker installs."
+    },
+    {
+      "title": "Local PIM Manager opens with a one-time link",
+      "text": "The local PIM Manager opens with a one-time link."
+    },
+    {
+      "title": "Access-request keys can be limited",
+      "text": "Access-request keys and applications can now be limited to named groups."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Stronger sign-in checks, the hub owner script runs on its own again, and more AI assistant tools are listed."
+    }
+  ]
+}

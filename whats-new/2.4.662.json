@@ -1,0 +1,22 @@
+{
+  "version": "2.4.662",
+  "date": "2026-10-21",
+  "type": "feature",
+  "summary": "New installations sign people in through the shared sign-in front, and dates read the same everywhere.",
+  "new": [
+    {
+      "title": "Install through the Invardia Support app",
+      "text": "An installation can now run as the Invardia Support app. The administrators come from your answers, so no person has to sign in."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "New installations use the shared sign-in front",
+      "text": "A new installation from the website now ends on the shared sign-in front, with its own Key Vault and its own database."
+    },
+    {
+      "title": "Dates in one clear format",
+      "text": "PIM Manager, the access-request portal and the PIM Activator popup show dates as yyyy-MM-dd HH:mm in local time, never in US format."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.493",
+  "date": "2026-10-04",
+  "type": "fix-only",
+  "summary": "It is now clear how to prove mail works, and old failures no longer linger on the Overview.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Clear steps to prove mail works",
+      "text": "The permission banner now points to Settings > Mail & alerting > Send test alert, which needs at least one alert recipient."
+    },
+    {
+      "title": "Environment name card easy to find",
+      "text": "It is now the first card under Settings > Naming & accounts."
+    },
+    {
+      "title": "Old failures are cleared",
+      "text": "The Overview no longer shows failures from an earlier run after every definition was removed."
+    }
+  ]
+}

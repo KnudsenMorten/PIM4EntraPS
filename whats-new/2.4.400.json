@@ -1,0 +1,13 @@
+{
+  "version": "2.4.400",
+  "date": "2026-09-21",
+  "type": "fix-only",
+  "summary": "Linking on the Access map works even after you select someone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Link targets stay on screen",
+      "text": "Selecting a person or group used to hide every box you could link it to. Those boxes now stay visible, faded, and light up as you point at them."
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "version": "2.4.414",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "You can now take a delegation away or delete a group from the Manager, and the four removal actions are clearly defined.",
+  "new": [
+    {
+      "title": "Take a delegation away",
+      "text": "A delegation row now has a remove button that takes that exact access away on the next run, then clears the row."
+    },
+    {
+      "title": "Delete a group from the Manager",
+      "text": "Each group row has a bin that deletes the group in Entra ID after commit. It is refused while anyone still has access through it, and names who."
+    },
+    {
+      "title": "Four actions, clearly explained",
+      "text": "Stop managing, Remove, Revoke and Delete are defined once and shown wherever you choose. Each confirmation repeats what survives."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Access map removals really remove access",
+      "text": "Removing a link on the Access map deleted only the row and left the access in place. It now stages the removal that takes the access away."
+    },
+    {
+      "title": "Revoke explains it is temporary",
+      "text": "The revoke screen now says a revoked access comes back on the next run unless you also remove the delegation."
+    },
+    {
+      "title": "Smaller fixes for Windows PowerShell 5.1",
+      "text": "On Windows PowerShell 5.1, PIM Manager's own administrators group no longer shows as drift, and misspelt admin names get their suggestion list again."
+    }
+  ]
+}

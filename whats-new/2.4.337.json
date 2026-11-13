@@ -1,0 +1,21 @@
+{
+  "version": "2.4.337",
+  "date": "2026-09-12",
+  "type": "fix-only",
+  "summary": "Entra role policies are enforced again, and saving an admin reports correctly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Entra role policies enforced again",
+      "text": "The policy job failed on every run after the previous version. Entra role PIM policies are enforced again."
+    },
+    {
+      "title": "Saving an admin reports correctly",
+      "text": "A save that worked no longer shows as failed, on the admin screen and two other save screens."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The Manager column shows the manager, the admin list no longer stalls, the department list loads, and group tags no longer warn as badly named."
+    }
+  ]
+}

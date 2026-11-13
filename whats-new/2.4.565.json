@@ -1,0 +1,13 @@
+{
+  "version": "2.4.565",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "No hidden extra sign-in during setup.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No hidden extra sign-in during setup",
+      "text": "Your one sign-in now also covers the helper steps setup starts, so no hidden sign-in window waits for you."
+    }
+  ]
+}

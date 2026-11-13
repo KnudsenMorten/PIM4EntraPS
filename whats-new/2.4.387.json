@@ -1,0 +1,26 @@
+{
+  "version": "2.4.387",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Policy templates are easy to read and change, and imports can never remove a SuperAdmin.",
+  "new": [
+    {
+      "title": "See every policy template setting",
+      "text": "Opening a policy template lists every setting with its value. Settings that cannot be changed here are shown with the reason."
+    },
+    {
+      "title": "Edit policy templates with dropdowns",
+      "text": "A SuperAdmin can press Edit to change durations, what activation asks for and who is notified. A change to many policies waits for your approval."
+    },
+    {
+      "title": "See where a template is used",
+      "text": "Used by lists every delegation that uses the template, including those that get it as the default, with the total first."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Imports protect SuperAdmins and break-glass",
+      "text": "An import can never overwrite or remove SuperAdmins or Break-glass accounts. Every admin now needs a sign-in name, filled from the tenant's domain when missing."
+    }
+  ]
+}

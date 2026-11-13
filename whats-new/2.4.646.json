@@ -1,0 +1,25 @@
+{
+  "version": "2.4.646",
+  "date": "2026-10-18",
+  "type": "security",
+  "summary": "Installations with a private database move to the least database rights on their own, safely.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Least database rights, set up by itself",
+      "text": "Installations with a private database now move to the least-privilege database model on their own. Broad rights are removed only after clean engine runs, and restored if a check fails."
+    },
+    {
+      "title": "Planned stops are no longer problems",
+      "text": "A run that PIM Manager stops on purpose, such as during an update or a restart, is no longer reported as a problem."
+    },
+    {
+      "title": "Azure role lookups retry",
+      "text": "A failed Azure role lookup gets its own error code and is retried on the next run instead of being called unrecognised."
+    },
+    {
+      "title": "Failing nightly updates are never hidden",
+      "text": "Frequent update checks can no longer hide a failing nightly update, and every engine run report names the first area that failed."
+    }
+  ]
+}

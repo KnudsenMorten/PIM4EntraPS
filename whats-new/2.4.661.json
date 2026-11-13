@@ -1,0 +1,17 @@
+{
+  "version": "2.4.661",
+  "date": "2026-10-21",
+  "type": "fix-only",
+  "summary": "Direct groups for Entra ID roles no longer fail at Commit.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Direct groups for Entra roles no longer fail",
+      "text": "Creating a direct group now asks Role-assignable after you pick the permission groups. A group that reaches an Entra ID role is always role-assignable, so it no longer fails at Commit."
+    },
+    {
+      "title": "Status reports to Invardia arrive in full",
+      "text": "A status detail that looked like a password made Invardia refuse some status fields for a day. That detail is no longer sent."
+    }
+  ]
+}

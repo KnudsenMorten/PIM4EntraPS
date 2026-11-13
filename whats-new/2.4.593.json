@@ -1,0 +1,13 @@
+{
+  "version": "2.4.593",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Script commands are cleaner to copy, and the Licence page needs no extra tools.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Cleaner script commands",
+      "text": "The \"What does this script do\" link now sits under the command, outside the copied text. The Licence page no longer mentions the Azure command line."
+    }
+  ]
+}

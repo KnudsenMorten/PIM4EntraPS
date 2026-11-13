@@ -1,0 +1,17 @@
+{
+  "version": "2.4.552",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "More setup scripts run without extra tools.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "More setup scripts work without Azure CLI",
+      "text": "More setup scripts, such as the update run and the custom Manager address, now work without the Azure CLI."
+    },
+    {
+      "title": "Safer environment rebuilds",
+      "text": "Security improvements for rebuilding an environment and for the custom address certificate."
+    }
+  ]
+}

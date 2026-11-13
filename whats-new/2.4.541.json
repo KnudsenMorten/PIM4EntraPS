@@ -1,0 +1,13 @@
+{
+  "version": "2.4.541",
+  "date": "2026-10-09",
+  "type": "fix-only",
+  "summary": "No more alert mails when Microsoft slows down group activity reads.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No alert when Microsoft slows group reads",
+      "text": "When Microsoft slows group activity reads until they get no answer, PIM Manager keeps the last refresh and sends no alert mail."
+    }
+  ]
+}

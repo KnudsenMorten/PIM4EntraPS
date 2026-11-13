@@ -1,0 +1,13 @@
+{
+  "version": "3.1.10",
+  "date": "2026-11-11",
+  "type": "feature",
+  "summary": "Community installs can choose to connect to Invardia for health reports and updates on request.",
+  "new": [
+    {
+      "title": "Community installs can connect to Invardia",
+      "text": "Choose Connect this install to Invardia to send health reports and get updates on request; Update now then works as in Pro. If you say no, nothing identifying is sent."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,31 @@
+{
+  "version": "2.4.385",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Group and admin names follow your full naming convention, and held policy changes show their impact before you approve.",
+  "new": [
+    {
+      "title": "See a held change's impact",
+      "text": "The approval panel compares each policy's current and new settings, marks each as tightening, loosening or neutral, and groups policies that get the same change."
+    },
+    {
+      "title": "More naming values are settings",
+      "text": "Prefixes, administrative units and service names that were built in are now in Settings > Naming > Group naming values, with new variables you can use."
+    },
+    {
+      "title": "Easier naming page",
+      "text": "The naming page has wider fields, dropdowns and explanations. The admin wizard offers your own admin types and environments."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Names use your whole pattern",
+      "text": "Group names used to keep only the role part of your pattern. Every variable is now filled, and empty ones disappear cleanly. Existing groups keep their names.",
+      "action": "If you saved Settings > Naming conventions on 2.4.382 to 2.4.384, check that your admin word and tenant common name are still set."
+    },
+    {
+      "title": "Clearer mails and job results",
+      "text": "Held-change mails explain what happened in plain words, one mail per change. Job results and naming saves are also more reliable."
+    }
+  ]
+}

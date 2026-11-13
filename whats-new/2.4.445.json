@@ -1,0 +1,21 @@
+{
+  "version": "2.4.445",
+  "date": "2026-09-26",
+  "type": "fix-only",
+  "summary": "You get fewer and clearer alert emails.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The same drift is not emailed repeatedly",
+      "text": "An unchanged drift report is sent once, then at most daily while it lasts. A change is sent at once; repeated identical job failures work the same way."
+    },
+    {
+      "title": "Drift reports name what they found",
+      "text": "An Azure assignment that PIM Manager does not manage is now reported with the account or group and the role, instead of a blank."
+    },
+    {
+      "title": "Duplicate Defender XDR roles are cleaned up",
+      "text": "When Defender XDR answered slowly, a custom role could be created twice. PIM Manager now waits for it and removes its own unused extra copy; your roles are never removed."
+    }
+  ]
+}

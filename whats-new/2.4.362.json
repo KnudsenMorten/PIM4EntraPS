@@ -1,0 +1,30 @@
+{
+  "version": "2.4.362",
+  "date": "2026-09-15",
+  "type": "fix-only",
+  "summary": "Held policy changes show as needing approval, and managed tenants run without secrets and report removals before making them.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Held policy changes show as needing approval",
+      "text": "A run stopped by the policy mass-change safety check now shows amber as needs approval on Jobs and Home, never as failed, and raises an alert."
+    },
+    {
+      "title": "Admin settings reach managed tenants unchanged",
+      "text": "Settings such as create TAP and provisioning dates now travel with each admin to managed tenants exactly as the managing tenant set them."
+    },
+    {
+      "title": "Managed tenant pull runs without a secret",
+      "text": "A managed tenant's scheduled pull now runs as its own managed identity, with the permissions it needs.",
+      "action": "Re-deploy the pull job for each managed tenant without an engine secret to move it onto its own identity."
+    },
+    {
+      "title": "Removals are reported before they happen",
+      "text": "Admins that stop reaching a managed tenant are reported as would remove, and removed only when you allow it, within the removal limit."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The weekly read-link renewal signs in with certificates only, joining the database admin group waits for the directory, and re-deploying the pull job works again."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.665",
+  "date": "2026-10-22",
+  "type": "fix-only",
+  "summary": "Short network errors no longer fail the nightly update or a job.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Short network errors no longer fail runs",
+      "text": "A one-off network error no longer fails the nightly update or a job. PIM Manager tries again up to three times and never repeats a request that may already have run."
+    }
+  ]
+}

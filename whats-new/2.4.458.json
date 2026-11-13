@@ -1,0 +1,29 @@
+{
+  "version": "2.4.458",
+  "date": "2026-09-29",
+  "type": "feature",
+  "summary": "PIM now reaches your on-premises Active Directory, granting AD access only while someone has activated it.",
+  "new": [
+    {
+      "title": "The hybrid worker for on-premises AD",
+      "text": "A small domain-joined Windows server creates your admin accounts in Active Directory and puts people who activate a PIM group into its AD twin within seconds. This is a Pro preview."
+    },
+    {
+      "title": "See the plan before it changes anything",
+      "text": "The hybrid worker has a plan-only mode that shows what it would change, and it updates itself to the version your ring approves."
+    },
+    {
+      "title": "Import all permission templates at once",
+      "text": "Templates now has Import all, plus a quick-start template with the Entra ID role groups, imported with your own naming convention."
+    },
+    {
+      "title": "Create discovered resources in one place",
+      "text": "Access > Create Discovered Resources takes you straight to the new resources Discovery found, ready to create."
+    },
+    {
+      "title": "Your own host name for the Manager",
+      "text": "The setup script can give the Manager a custom host name, and mail links use it once configured."
+    }
+  ],
+  "fixes": []
+}

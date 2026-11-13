@@ -1,0 +1,30 @@
+{
+  "version": "2.4.355",
+  "date": "2026-09-14",
+  "type": "feature",
+  "summary": "Drift has its own fast page, menus are tidier, and queued actions apply without waiting for a long run.",
+  "new": [
+    {
+      "title": "Drift: live vs desired has its own page",
+      "text": "Find it under Reviews & controls. It opens instantly, shows counts per area with the differences per row, and Check now queues a fresh check."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Menus make more sense",
+      "text": "Daily operations joins Reviews & controls, and Manager access, the emergency override, template packs and mail templates are now sections in Settings."
+    },
+    {
+      "title": "Queued actions apply during long runs",
+      "text": "A committed Temporary Access Pass re-issue or session revoke is applied between engine steps instead of after the whole run."
+    },
+    {
+      "title": "The badge counts only what needs you",
+      "text": "Pending changes lists pending entries first. The red badge counts pending or failed entries, and committed ones waiting for the engine show in blue."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Review standing access hides deleted principals by default, the Access map groups related groups together, and a group created in a run is used in that run."
+    }
+  ]
+}

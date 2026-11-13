@@ -1,0 +1,34 @@
+{
+  "version": "2.4.519",
+  "date": "2026-10-07",
+  "type": "feature",
+  "summary": "New installations are complete from day one, and Invardia support can now install PIM Manager for you.",
+  "new": [
+    {
+      "title": "Invardia support can install for you",
+      "text": "Invardia support can now run the installation with its Support app, for your tenant only. At least one named person becomes the PIM Manager administrator."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "New Pro installations update themselves",
+      "text": "A new Pro or trial installation now gets its nightly update from Invardia from day one, on ring 3 by default."
+    },
+    {
+      "title": "Install key in place within minutes",
+      "text": "The installation stores the install key Invardia issued, or claims it within five minutes instead of up to six hours."
+    },
+    {
+      "title": "Managing and managed tenant setup completes",
+      "text": "This setup now also registers the licence, gives Invardia support its access and sets up Pro updates."
+    },
+    {
+      "title": "New managed tenants no longer report failures",
+      "text": "A new managed tenant says \"nothing to apply\" while nothing is published for it yet, instead of failing."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The health check runs on brand-new installations, hand-run updates respect Invardia's rings, and Invardia's contact details and edition wording are corrected."
+    }
+  ]
+}

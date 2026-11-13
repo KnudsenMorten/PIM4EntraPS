@@ -1,0 +1,26 @@
+{
+  "version": "2.4.411",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Approvers see exactly what they approve, and a managed tenant can tell its provider's rows from its own.",
+  "new": [
+    {
+      "title": "Approvals list each assignment",
+      "text": "A revoke approval now shows one readable line per assignment it covers. Raised from the revoke screen, it is filled in for you."
+    },
+    {
+      "title": "See where each row came from",
+      "text": "On a managed tenant, every replicable record type now has a Source column, from the managing tenant or local, with counts in the header."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Fix buttons update the status at once",
+      "text": "Every fix button and Fix all auto-fixable errors now updates the error count and Save gate immediately, so you no longer switch Block-Save off to commit."
+    },
+    {
+      "title": "Clearer replication wording",
+      "text": "Replication wording no longer suggests a value missing from the picker, and rows carried along only as a dependency no longer need a ring."
+    }
+  ]
+}

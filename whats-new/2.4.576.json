@@ -1,0 +1,26 @@
+{
+  "version": "2.4.576",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "You decide where your data lives, and guard alerts link straight to where you act.",
+  "new": [
+    {
+      "title": "You choose the Azure region",
+      "text": "PIM Manager can now be installed in any Azure region. Before anything is created, setup checks every needed service is available there and suggests the nearest region if not."
+    },
+    {
+      "title": "Guard reports link to where you act",
+      "text": "Each guard report now links to the page where you act on it: Approvals for a held change set, otherwise that guard's page."
+    },
+    {
+      "title": "Support sees where your environment lives",
+      "text": "With an install key, the status report now names your environment's public addresses, so Invardia support can reach the right pages faster."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Smaller fixes",
+      "text": "Active Directory DNS records are printed for you instead of written, and closing PIM Manager during setup works more reliably."
+    }
+  ]
+}

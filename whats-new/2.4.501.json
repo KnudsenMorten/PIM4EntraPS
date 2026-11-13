@@ -1,0 +1,17 @@
+{
+  "version": "2.4.501",
+  "date": "2026-10-05",
+  "type": "fix-only",
+  "summary": "Removing a delegation now takes the access away within minutes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Removals go live on the next run",
+      "text": "A removed delegation is now taken away by the next run, minutes after the commit. Earlier removed rows that kept their access show as extras on Drift."
+    },
+    {
+      "title": "Permission templates moved",
+      "text": "Permission templates now live under Audit & Settings > Workload templates, next to the template packs."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "2.4.403",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "You can rename groups safely, and the replication choice is simpler.",
+  "new": [
+    {
+      "title": "Rename a group or administrative unit",
+      "text": "In All records you can rename a group or administrative unit, including its tag. Every row that uses it is updated in the same change when you commit."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Deleting a group shows what else goes",
+      "text": "Before, deleting a group left rows pointing at nothing. You now see exactly which rows use it and can remove them together or cancel."
+    },
+    {
+      "title": "Replication is a simple two-way choice",
+      "text": "Choose Replicate to managed tenants or No replication. The old Follow option meant the same as No replication and is gone; what is sent is unchanged."
+    }
+  ]
+}

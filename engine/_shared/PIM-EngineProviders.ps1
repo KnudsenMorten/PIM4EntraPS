@@ -9665,13 +9665,8 @@ function New-PimDefenderXdrRolesProvider {
             $desired = if ($null -ne $ctx['defDesired']) { @($ctx['defDesired']) } else { @(Get-PimDefenderDesiredBindings -TagToName $tagToName) }
             $roleNameToId = Get-PimDefenderRoleNameToId
             $cat = Get-PimDefenderRoleCatalog
-            # R25-42 (2026-09-26): duplicates PIM made itself are healed HERE, at read time, on a real run (never WhatIf) --
-            # an ambiguous binding never reaches a create/update item, so a heal later in the pipeline never runs.
-            if (-not $ctx['__pimWhatIf'] -and $cat -and $cat.ok) {
-                $specNames = @($desired | Where-Object { Get-PimDefenderRoleSpec -Row $_ } | ForEach-Object { Get-PimRowProp -Row $_ -Names @('RoleDefinitionName', 'RoleName') })
-                $healed = @(Repair-PimDefenderDuplicateRoles -Catalog $cat -Names $specNames)
-                if ($healed.Count) { Clear-PimWorkloadRoleCaches; $script:__pimDefenderRoles = $null; $cat = Get-PimDefenderRoleCatalog -Force; $roleNameToId = Get-PimDefenderRoleNameToId }
-            }
+            # OWNER 2026-11-13 ("we dont own perm in any system"): the R25-42 read-time duplicate heal (a DELETE of PIM-made
+            # duplicate roles) is RETIRED -- PIM never writes a Defender role definition; a duplicate stays DEFENDER-ROLE-AMBIGUOUS.
             $ctx['defRoleNameToId'] = $roleNameToId; $ctx['defGid'] = @{}; $ctx['defRoleCatalog'] = $cat
             $ctx['defRoleAmbiguous'] = Get-PimDefenderAmbiguousRoleNames -Catalog $cat
             # REQ-U wave 2: the Defender workload groups PIM defines. The orphan check reads live even before any
@@ -9711,7 +9706,7 @@ function New-PimDefenderXdrRolesProvider {
                     foreach ($gt in @($gidTags[$pk])) {
                         $live.Add([pscustomobject]@{ principalId = "$pp"; GroupTag = $gt; GroupName = "$($tagToName[$gt.ToLowerInvariant()])"; Workload = 'Defender XDR'
                             RoleDefinitionName = $rn; roleDefinitionId = "$($a.roleDefinitionId)"; assignmentId = "$($a.id)"
-                            appScopeIds = @($a.appScopeIds); principalCount = @($a.principals).Count; roleActions = @(if ($role) { $role.actions }) })
+                            appScopeIds = @($a.appScopeIds); principalCount = @($a.principals).Count; roleActions = @(if ($role) { $role.actions }); roleRestricted = [bool](Test-PimDefenderRoleRestricted -Role $role) })
                     }
                 }
             }
@@ -9740,7 +9735,7 @@ function New-PimDefenderXdrRolesProvider {
             $gt = (Get-PimRowProp -Row $d -Names @('GroupTag')).ToLowerInvariant()
             $gid = $ctx['defGid'][$gt]
             $rn = Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName')
-            # 🔴 REQ-W (2.4.380): a NEW Defender XDR assignment (and the custom role it would create) waits while the
+            # 🔴 REQ-W (2.4.380): a NEW Defender XDR assignment waits while the
             # DefenderXdr prerequisites are not green -- reported HELD, nothing written. Updates / removals are not gated.
             $__held = Get-PimWorkloadAssignmentHold -Workload 'DefenderXdr' -Context $ctx -Item $item -Scope 'DefenderXdrRoles' `
                 -What ("Defender XDR role '{0}' for group '{1}'" -f $rn, $(if ("$($d.GroupName)".Trim()) { "$($d.GroupName)" } else { $gt }))
@@ -9748,18 +9743,41 @@ function New-PimDefenderXdrRolesProvider {
             if (-not $gid) { throw "DefenderXdrRoles: group for tag '$gt' not found" }
             $spec = Get-PimDefenderRoleSpec -Row $d
             # REQ-U wave 2: an AMBIGUOUS role name (two live roles share it) is refused -- never resolved to one of them.
-            # 2026-09-26: a SPEC row's role is PIM's own, and Resolve-PimDefenderSpecRole heals duplicates PIM made itself
-            # (or refuses them the same way) -- so the early refusal applies to a by-name binding of an EXISTING role only.
+            # A SPEC row's ambiguous name is refused inside Resolve-PimDefenderSpecRole (no duplicate heal since 2026-11-13) --
+            # so the early refusal here applies to a by-name binding without a spec only.
             $amb = $ctx['defRoleAmbiguous']
             if (-not $spec -and $amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant())) {
                 throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) -- PIM will not pick one. Rename or delete the extra role in the Defender portal, then the next run binds the one that is left." -f @($amb[$rn.ToLowerInvariant()]).Count, $rn, (@($amb[$rn.ToLowerInvariant()]) -join ', '))
             }
             if ($spec) {
-                # The custom role named like the group: created when missing, its actions PATCHed to the spec.
-                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog']
+                # OWNER 2026-11-13 ("we dont own perm in any system" / "Only add assignments"): the role named like the group is
+                # only LOOKED UP and compared -- never created or patched. Missing = DEFENDER-ROLE-MISSING, the assignment HELD.
+                if ($ctx -is [hashtable] -and -not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+                $__wl = [System.Collections.Generic.List[string]]::new()
+                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -Warnings $__wl
+                if ($ctx -is [hashtable]) { foreach ($__w in $__wl) { [void]$ctx['__pimScopeWarnings'].Add($__w) } }
+                if (-not $rid) {
+                    # missing (DEFENDER-ROLE-MISSING) or WIDER / unknown (DEFENDER-ROLE-WIDER): the assignment is HELD, never added
+                    $__why = @($__wl | Where-Object { "$_" -match '^DEFENDER-ROLE-(MISSING|WIDER):' }) | Select-Object -First 1
+                    $__st = if ("$__why" -match '^DEFENDER-ROLE-WIDER:') { 'role-wider' } else { 'role-missing' }
+                    return [pscustomobject]@{ pimApplied = $false; held = $true; workload = 'DefenderXdr'; state = $__st; reason = "$__why" }
+                }
             } else {
                 $rid = $ctx['defRoleNameToId'][$rn.ToLowerInvariant()]
-                if (-not $rid) { throw "DefenderXdrRoles: Defender role '$rn' not found (Unified RBAC activated? role spelled correctly?)" }
+                if (-not $rid) {
+                    # 2026-11-13: a binding WITHOUT a spec whose role is missing is HELD + DEFENDER-ROLE-MISSING (no permissions
+                    # list: the row names the role, it does not describe it) -- never a throw.
+                    $__m = Get-PimDefenderRoleMissingText -Name $rn
+                    Write-Warning "  [DefenderXdrRoles] $__m"
+                    if ($ctx -is [hashtable]) {
+                        if (-not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+                        [void]$ctx['__pimScopeWarnings'].Add($__m)
+                    }
+                    return [pscustomobject]@{ pimApplied = $false; held = $true; workload = 'DefenderXdr'; state = 'role-missing'; reason = $__m }
+                }
+                # 2026-11-13 (review): a by-name bind is assigned as today (no compare); the run detail says what the role grants.
+                $__cr = $null; try { if ($ctx['defRoleCatalog'] -and $ctx['defRoleCatalog'].byId) { $__cr = $ctx['defRoleCatalog'].byId["$rid".ToLowerInvariant()] } } catch { $__cr = $null }
+                Write-Host ("    [i] Defender XDR role '{0}' (bound by name, no permissions spec): role grants [{1}]" -f $rn, $(if ($__cr) { @(@($__cr.actions) | Where-Object { "$_".Trim() }) -join '; ' } else { 'unknown' }))
             }
             $disp = Get-PimRowProp -Row $d -Names @('AssignmentName'); if (-not $disp) { $disp = "PIM4EntraPS - $rn" }
             # BUG-222 (§33.28): this once sent '#microsoft.graph.unifiedRbacResourceNamespace' (a NAMESPACE type). The
@@ -9775,22 +9793,53 @@ function New-PimDefenderXdrRolesProvider {
             $body = New-PimDefenderAssignmentBody -DisplayName $disp -RoleDefinitionId $rid -PrincipalId $gid -AppScopeIds @($scopes)
             Invoke-PimDefenderAssignmentCreate -Body $body
         }
-        # REQ-U wave 2: a spec'd binding whose live role or assignment differs from the spec. The role's actions are
-        # PATCHed; a data-source difference is a RE-ASSIGN, removal first (never wider than asked, even for a moment).
-        # An assignment shared with other principals is refused -- deleting it would take their access too.
+        # REQ-U wave 2: a spec'd binding whose live role or assignment differs from the spec. OWNER 2026-11-13: the role is
+        # never PATCHed (a difference is reported); a data-source difference is never re-assigned (reported by direction).
+        # (2026-11-13: a data-source difference -- shared or not -- is a report-only warning; nothing is deleted.)
         ApplyUpdate = {
             param($item,$ctx)
             $d = $item.desired; $l = $item.live
             $spec = Get-PimDefenderRoleSpec -Row $d
             if (-not $spec) { return [pscustomobject]@{ pimApplied = $false; reason = 'nothing to update (the row carries no role spec)' } }
             $rn = Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName')
-            # (a spec row -- Resolve-PimDefenderSpecRole heals PIM-made duplicates or refuses them as DEFENDER-ROLE-AMBIGUOUS)
-            $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog']
+            # OWNER 2026-11-13: Resolve-PimDefenderSpecRole only COMPARES (never writes a role definition): a real permission
+            # difference is DEFENDER-ROLE-DIFFERS (narrower) or DEFENDER-ROLE-WIDER (wider / unknown), report-only, own or
+            # not (DEFENDER-ROLE-NOT-OWN is no longer thrown). Actions compare SEMANTICALLY, so a DATA-SOURCE-only difference
+            # never throws: it is the direction-split warning below (Graph has no in-place appScopeIds update).
+            if ($ctx -is [hashtable] -and -not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+            $__wl = [System.Collections.Generic.List[string]]::new()
+            try {
+                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -LiveDataSources @($l.appScopeIds) -Warnings $__wl -Assigned
+            } catch {
+                # 2026-11-13 (review): the group ALREADY holds its assignment -- a duplicate role name is a WARNING here, not a
+                # failed item (nothing is written either way; the create path keeps the refusal).
+                $__am = "$($_.Exception.Message)"
+                if ($__am -notmatch '^DEFENDER-ROLE-AMBIGUOUS:') { throw }
+                Write-Warning "  [DefenderXdrRoles] $__am"
+                if ($ctx -is [hashtable]) { [void]$ctx['__pimScopeWarnings'].Add($__am) }
+                return [pscustomobject]@{ pimApplied = $false; reason = $__am }
+            }
+            if ($ctx -is [hashtable]) { foreach ($__w in $__wl) { [void]$ctx['__pimScopeWarnings'].Add($__w) } }
             $out = [pscustomobject]@{ roleId = $rid; reassigned = $false }
+            # a report-only role difference (narrower = DIFFERS, wider = WIDER: the group already holds it, PIM never removes
+            # it): nothing was written, so the item is NOT counted applied
+            $__dif = @($__wl | Where-Object { "$_" -match '^DEFENDER-ROLE-(DIFFERS|WIDER):' }) | Select-Object -First 1
+            if ($__dif) {
+                $out | Add-Member -NotePropertyName pimApplied -NotePropertyValue $false -Force
+                $out | Add-Member -NotePropertyName reason -NotePropertyValue "$__dif" -Force
+            }
             if (-not (Test-PimWorkloadStringSetEqual -A @($l.appScopeIds) -B @($spec.dataSources))) {
-                if ([int]$l.principalCount -gt 1) {
-                    throw ("DEFENDER-ASSIGNMENT-SHARED: the assignment of role '{0}' (id {1}) also holds {2} other principal(s), so it cannot be re-created with the data sources [{3}] without taking their access. Split it in the Defender portal (or give the group its own assignment), then the next run corrects it." -f $rn, $l.assignmentId, ([int]$l.principalCount - 1), (@($spec.dataSources) -join '; '))
-                }
+                # 2026-11-13 (review, rounds 2 + 4): nothing in this branch writes and nothing in it FAILS the job -- every case
+                # is a WARNING. Its class follows the DIRECTION (Get-PimDefenderDataSourceDirection; '/' or blank = all):
+                #   narrower / equal in effect -> DEFENDER-DATASOURCES-CHANGED (pim-def-0106, report-only, nobody acts): the
+                #                                 group holds no more access than its definition.
+                #   wider, not shared          -> DEFENDER-DATASOURCES-WIDER (pim-def-0107, customer-config): the group holds
+                #                                 MORE access than its definition -- the customer decides.
+                #   wider, shared              -> DEFENDER-ASSIGNMENT-SHARED (pim-def-0105, customer-config), as a warning.
+                $__shared = [int]$l.principalCount -gt 1
+                $__dir = Get-PimDefenderDataSourceDirection -Live @($l.appScopeIds) -Spec @($spec.dataSources)
+                $__lv = @(@($l.appScopeIds) | Where-Object { "$_".Trim() }) -join '; '; if (-not $__lv) { $__lv = '/' }
+                $__sp = @(@($spec.dataSources) | Where-Object { "$_".Trim() }) -join '; '; if (-not $__sp) { $__sp = '/' }
                 # 🔴 OPERATOR 2026-09-20: "we can NOT have removes except if coming from operator" /
                 # "any tings that maybe should be deleted must come in as warning for operator to decide,
                 # newer automatic." This branch used to DELETE the live Defender assignment and re-create
@@ -9804,11 +9853,23 @@ function New-PimDefenderXdrRolesProvider {
                 # It now WARNS and changes nothing. The decision is the operator's: stage an Action=Remove
                 # row for this assignment and commit it, and the next run creates it with the data sources
                 # the row names -- the same committed path every other removal goes through.
-                $__dsMsg = ("DEFENDER-DATASOURCES-CHANGED: '{0}' is assigned for data source(s) [{1}] and the row asks for [{2}]. " +
-                            "Graph cannot change them in place, so applying this would DELETE the live assignment and re-create it. " +
-                            "NOTHING was changed -- PIM never removes an assignment nobody asked to remove. To apply it, stage an " +
-                            "Action=Remove row for this assignment and commit it; the next run then creates it with your data sources.") -f `
-                            $rn, (@($l.appScopeIds) -join '; '), (@($spec.dataSources) -join '; ')
+                if ($__dir -eq 'wider' -and $__shared) {
+                    $__dsMsg = ("DEFENDER-ASSIGNMENT-SHARED: the group of '{0}' has access to MORE Defender XDR data sources than its definition: " +
+                                "assigned [{1}], the definition names [{2}]. The assignment (id {3}) is shared: it also holds {4} other principal(s). " +
+                                "If that is not intended, change the role assignment in the Defender portal or change the definition. " +
+                                "Report only: PIM never changes it.") -f `
+                                $rn, $__lv, $__sp, $l.assignmentId, ([int]$l.principalCount - 1)
+                } elseif ($__dir -eq 'wider') {
+                    # OWNER 2026-11-13 ("we must not touch any of those perm"): the text never suggests PIM removes or changes it.
+                    $__dsMsg = ("DEFENDER-DATASOURCES-WIDER: the group of '{0}' has access to MORE Defender XDR data sources than its definition: " +
+                                "assigned [{1}], the definition names [{2}]. If that is not intended, change the role assignment in the Defender " +
+                                "portal or change the definition. Report only: PIM never changes it.") -f `
+                                $rn, $__lv, $__sp
+                } else {
+                    $__dsMsg = ("DEFENDER-DATASOURCES-CHANGED: '{0}' is assigned for data source(s) [{1}] and the definition names [{2}] -- the group " +
+                                "holds no more access than its definition. Report-only: NOTHING was changed and nothing needs to be done " +
+                                "(Graph cannot change data sources in place).") -f $rn, $__lv, $__sp
+                }
                 Write-Warning ("  [DefenderXdrRoles] " + $__dsMsg)
                 if ($ctx -is [hashtable]) {
                     if (-not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
@@ -9825,7 +9886,7 @@ function New-PimDefenderXdrRolesProvider {
             $aid = "$($item.live.assignmentId)"
             if (-not $aid) { throw "DefenderXdrRoles: no assignment id to remove for '$($item.key)'" }
             # 🔴 SEC-83 (§33.38): the DELETE takes the WHOLE assignment. One that also holds another principal is refused --
-            # deleting it would take their access too (the same rule as the update path, DEFENDER-ASSIGNMENT-SHARED).
+            # deleting it would take their access too (the update path never deletes: it warns, DEFENDER-DATASOURCES-CHANGED).
             Assert-PimWorkloadAssignmentNotShared -Live $item.live -Workload 'Defender XDR' -Key "$($item.key)"
             Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleAssignments/$aid"
         }

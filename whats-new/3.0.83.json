@@ -1,0 +1,13 @@
+{
+  "version": "3.0.83",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "Invardia support now learns about stalled runs without you having to report them.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stalled runs are reported to Invardia support",
+      "text": "A run that stops making progress or takes far longer than usual is now reported to Invardia support as well as on the Jobs page. Nothing is ever stopped or restarted."
+    }
+  ]
+}

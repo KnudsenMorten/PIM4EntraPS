@@ -1,0 +1,17 @@
+{
+  "version": "2.4.520",
+  "date": "2026-10-07",
+  "type": "security",
+  "summary": "Group owner assignments now end after at most 180 days, in line with Microsoft's guidance.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No standing group owners",
+      "text": "The standard PIM for Groups policy now ends active owner assignments after at most 180 days. Owners PIM Manager keeps on its own groups are not affected."
+    },
+    {
+      "title": "Times shown in your local time",
+      "text": "Update times were shown in UTC without saying so. They now use your browser's local time."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "3.0.3",
+  "date": "2026-10-28",
+  "type": "fix-only",
+  "summary": "A Community install's deployment plan now shows the update ring it really gets.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Deployment plan shows the right ring",
+      "text": "A Community install's deployment plan now shows the update ring it really gets."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "A clearer folder layout for the setup scripts, and a security pack that describes the update checks exactly."
+    }
+  ]
+}

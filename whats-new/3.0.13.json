@@ -1,0 +1,13 @@
+{
+  "version": "3.0.13",
+  "date": "2026-11-01",
+  "type": "fix-only",
+  "summary": "The API and MCP reference and API applications are now part of PIM Manager Pro.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "API and MCP reference is part of Pro",
+      "text": "The API and MCP reference page and API applications are now part of PIM Manager Pro, like the AI assistant. The PIM Manager page itself works the same in both editions."
+    }
+  ]
+}

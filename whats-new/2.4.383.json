@@ -1,0 +1,25 @@
+{
+  "version": "2.4.383",
+  "date": "2026-09-20",
+  "type": "fix-only",
+  "summary": "Automatic updates can no longer change your activation policies without an operator agreeing first.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Automatic updates protect your policies",
+      "text": "An overnight update that would change the activation policy baseline now stops and reports what would change. Normal updates are unaffected."
+    },
+    {
+      "title": "Admin account domain list works",
+      "text": "On tenants with many verified domains, the picker showed one long option. It now lists each domain separately."
+    },
+    {
+      "title": "Records tables show all rows",
+      "text": "Long tables were cut off at the window height with no way to scroll. All rows are visible again."
+    },
+    {
+      "title": "Admin accounts uses the full screen",
+      "text": "The Admin accounts table now fills wide displays instead of sitting in a narrow column."
+    }
+  ]
+}

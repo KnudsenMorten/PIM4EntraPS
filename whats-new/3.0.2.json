@@ -1,0 +1,26 @@
+{
+  "version": "3.0.2",
+  "date": "2026-10-28",
+  "type": "feature",
+  "summary": "PIM Manager Community now keeps itself up to date from the signed public release.",
+  "new": [
+    {
+      "title": "Community updates itself",
+      "text": "PIM Manager Community updates itself at night from the signed public release, or when you start it by hand. Either way the release is checked before anything changes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Single-tenant installs stay single-tenant",
+      "text": "A single-tenant install no longer switches on MSP features."
+    },
+    {
+      "title": "Removed items stay hidden",
+      "text": "Removed admins, groups and administrative units no longer show in reports, search or the Home counts."
+    },
+    {
+      "title": "No automatic major version jumps",
+      "text": "An update never moves to a new major version on its own."
+    }
+  ]
+}

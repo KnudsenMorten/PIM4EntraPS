@@ -1,0 +1,17 @@
+{
+  "version": "2.4.305",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "The nightly update now updates every part of the environment and leaves your own work alone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Every part of the environment is updated",
+      "text": "The nightly update finds every PIM Manager component that is deployed and updates them all. A component left behind fails the update."
+    },
+    {
+      "title": "Your own work is left alone",
+      "text": "Anything else in the same resource group is left untouched, and skipped items are reported with the reason."
+    }
+  ]
+}

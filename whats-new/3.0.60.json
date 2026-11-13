@@ -1,0 +1,21 @@
+{
+  "version": "3.0.60",
+  "date": "2026-11-08",
+  "type": "fix-only",
+  "summary": "No more false missing permissions after the identity move.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false missing permission after a move",
+      "text": "The update check now reads the permissions of the engine's own identity, so no false missing permission shows after the identity move. The Manager finds the engine by its new name."
+    },
+    {
+      "title": "Old database users removed only on request",
+      "text": "Old database users that own nothing and hold no rights are removed only when you ask."
+    },
+    {
+      "title": "Web front move is proven",
+      "text": "Moving the web front's identity now proves that the sign-in page answers and that anonymous access is still refused."
+    }
+  ]
+}

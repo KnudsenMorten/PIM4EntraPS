@@ -1,0 +1,17 @@
+{
+  "version": "2.4.631",
+  "date": "2026-10-14",
+  "type": "security",
+  "summary": "Security hardening for PIM Manager's pages and its database rights.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger protection for every page",
+      "text": "Every PIM Manager page carries extra browser security settings."
+    },
+    {
+      "title": "Fewer rights for the web app",
+      "text": "PIM Manager's web app runs with fewer database rights."
+    }
+  ]
+}

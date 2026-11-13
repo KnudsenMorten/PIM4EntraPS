@@ -1,0 +1,17 @@
+{
+  "version": "3.0.78",
+  "date": "2026-11-10",
+  "type": "security",
+  "summary": "PIM Manager moves to Microsoft software that is supported until November 2028.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Runs on supported .NET 10 and PowerShell 7.6",
+      "text": "PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS, supported to November 2028, and is patched at every build. The older versions reached end of support on 10 November 2026."
+    },
+    {
+      "title": "Home permission check works again",
+      "text": "The permission check on the Home page no longer fails with an error at some installations."
+    }
+  ]
+}

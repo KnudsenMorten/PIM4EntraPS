@@ -1,0 +1,13 @@
+{
+  "version": "2.4.627",
+  "date": "2026-10-14",
+  "type": "feature",
+  "summary": "PIM Manager can add its groups to your Power BI workspaces after one setup step.",
+  "new": [
+    {
+      "title": "Power BI workspaces in one setup step",
+      "text": "One setup line, run by a person who signs in, adds PIM Manager to the Power BI workspaces it manages. PIM Manager then adds the PIM groups itself, and only adds."
+    }
+  ],
+  "fixes": []
+}

@@ -391,6 +391,7 @@ $script:PimFailureRules = @(
 
     # 2026-09-26: a Defender custom role whose create was answered (redirect) but is not listed yet -- the engine does NOT post
     # it again (that is how a test tenant got two roles of one name); the next run binds it once Defender lists it.
+    # KEPT BUT UNREACHABLE since 3.1.21 (PIM never creates a Defender role): pinned key, frozen code pim-def-0101.
     @{ code = 'DEFENDER-ROLE-CREATE-PENDING'
        match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-CREATE-PENDING' }
        title = 'The Defender XDR role was created and is not listed yet'
@@ -574,7 +575,8 @@ $script:PimFailureRules = @(
        match = { param($m, $row) $m -match '(?i)DEFENDER-PERMISSION-PREREQUISITE' }
        title = 'Defender XDR refused a permission its prerequisite is missing for'
        cause = 'The tenant would not store the custom role with these permissions ("not a valid permission for storage"). A permission group whose prerequisite is not in place is refused -- Data Operations needs a Microsoft Sentinel workspace onboarded to Defender XDR. Nothing was created for this row.'
-       remedy = 'Run tools\setup\Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr (it checks the prerequisite and says what to fix); the next run creates the role and its assignment.'
+       # KEPT BUT UNREACHABLE since 3.1.21 (PIM never creates a Defender role, so Defender never refuses one): pinned key, frozen code.
+       remedy = 'Run tools\setup\Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr (it checks the prerequisite and says what to fix); create the role in the Defender portal once it is in place, and the next run assigns it.'
        retryable = $true; severity = 'environment'
        fixes = @() }
 
@@ -587,19 +589,71 @@ $script:PimFailureRules = @(
        fixes = @() }
 
     # 100.122 F5 (owner 2026-10-13): a Defender role is changed only when it is PIM Manager's own.
+    # KEPT BUT UNREACHABLE since 3.1.21 (owner 2026-11-13: own or not makes no difference; a real difference is
+    # DEFENDER-ROLE-DIFFERS / DEFENDER-ROLE-WIDER): pinned key, frozen code pim-def-0104.
     @{ code = 'DEFENDER-ROLE-NOT-OWN'
        match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-NOT-OWN' }
        title = 'A Defender XDR role of this name exists and was not created by PIM Manager -- not changed'
        cause = 'The workload template names a custom Defender XDR role, and a live role already has that name with other permissions. It was not created by PIM Manager (it is built-in, or does not carry PIM Manager''s description), so its permissions were not replaced.'
-       remedy = 'Rename or delete that role in the Defender portal (Settings > Permissions > Roles) so PIM Manager creates its own, or set the template to the permissions the role already has.'
+       remedy = 'Change that role in the Defender portal (Settings > Permissions > Roles) -- PIM Manager never changes a Defender role -- or set the template to the permissions the role already has.'
        retryable = $true; severity = 'environment'
        fixes = @() }
 
+    # OWNER 2026-11-13 ("we dont own perm in any system" / "Only add assignments", 3.1.21; the wizard decision with examples:
+    # own or not makes no difference): PIM never creates, patches or deletes a Defender XDR role definition. Report codes
+    # replace the writes (anchored like the data-source ones); the job never fails on them.
+    @{ code = 'DEFENDER-ROLE-MISSING'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[DefenderXdrRoles\]\s*)?DEFENDER-ROLE-MISSING:' }
+       title = 'The Defender XDR role a binding names does not exist -- the assignment waits'
+       cause = 'The workload binding names a Defender XDR role that does not exist in the tenant. PIM Manager never creates a Defender role, so the group''s assignment is held until the role exists.'
+       remedy = 'Create the role in the Defender portal (Settings > Permissions > Roles) with that name and the permissions the warning lists; the next run assigns the group.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+    @{ code = 'DEFENDER-ROLE-DIFFERS'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[DefenderXdrRoles\]\s*)?DEFENDER-ROLE-DIFFERS:' }
+       title = 'A Defender XDR role has fewer permissions than its definition -- assigned, reported'
+       cause = 'The Defender XDR role the definition names has fewer permissions than the definition. PIM Manager never changes a Defender role; the group is assigned (it gets less than defined, never more).'
+       remedy = 'If that is not intended, change the role in the Defender portal (Settings > Permissions > Roles) or the definition.'
+       retryable = $true; severity = 'data'
+       fixes = @() }
+    @{ code = 'DEFENDER-ROLE-WIDER'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[DefenderXdrRoles\]\s*)?DEFENDER-ROLE-WIDER:' }
+       title = 'A Defender XDR role grants more than its definition -- not assigned, reported'
+       cause = 'The Defender XDR role the definition names grants more than the definition (or carries excluded actions / a condition, so PIM Manager cannot tell). Assigning it would give the group more than defined, so PIM Manager did not assign it; an assignment the group already holds is left as it is (PIM Manager never removes it).'
+       remedy = 'Change the role in the Defender portal (Settings > Permissions > Roles) or the definition.'
+       retryable = $true; severity = 'data'
+       fixes = @() }
+
+    # 2026-11-13 (Invardia, 3.1.21): a Defender binding whose role is equal to the template (semantically: a sub-action
+    # the wildcard grants counts as present) and whose ASSIGNMENT has other data sources. Report-only: nothing is written,
+    # nothing fails, no customer action -- the product decides (severity info = product-defect fix kind, never
+    # customer-config; DEFENDER-ROLE-NOT-OWN stays ONLY for a role PIM did not create whose permissions really differ).
+    # Round 4: anchored to the START of the text (optionally after the scope tag) -- a failed run whose text also holds a
+    # 403 / 5xx keeps its real cause; only the warning itself is this class. ONLY the narrower / equal-in-effect case.
+    @{ code = 'DEFENDER-DATASOURCES-CHANGED'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[DefenderXdrRoles\]\s*)?DEFENDER-DATASOURCES-CHANGED:' }
+       title = 'A Defender XDR assignment has fewer data sources than the template -- reported, not changed'
+       cause = 'The role matches the workload template (an action a wildcard already grants counts as present), and the assignment covers the same or fewer data sources than the template names, so the group holds no more access than its definition. Graph cannot change the data sources of an assignment in place, so PIM Manager reports it and changes nothing.'
+       remedy = 'Nothing to do: report-only, no ticket. PIM Manager compares again on every run; a repeating difference reaches Invardia as one report-only drift item.'
+       retryable = $true; severity = 'info'
+       fixes = @() }
+
+    # Round 4 (2026-11-13, 3.1.21): the assignment is WIDER than the definition (live '/' vs an explicit list, or a source
+    # the definition lacks) and not shared -- the group holds MORE access than defined: a WARNING the customer acts on.
+    @{ code = 'DEFENDER-DATASOURCES-WIDER'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[DefenderXdrRoles\]\s*)?DEFENDER-DATASOURCES-WIDER:' }
+       title = 'A Defender XDR group has access to more data sources than its definition -- not changed'
+       cause = 'The group reaches more Defender XDR data sources than its definition names. Report only: PIM Manager never changes it.'
+       remedy = 'If that is not intended, change the role assignment in the Defender portal or change the definition.'
+       retryable = $true; severity = 'data'
+       fixes = @() }
+
+    # Round 4: since 3.1.21 raised only as a WARNING (a WIDER data-source difference on a shared assignment); nothing fails.
     @{ code = 'DEFENDER-ASSIGNMENT-SHARED'
        match = { param($m, $row) $m -match '(?i)DEFENDER-ASSIGNMENT-SHARED' }
        title = 'The Defender XDR assignment is shared with other principals'
-       cause = 'The group''s role assignment has the wrong data sources, but the same assignment also holds other principals. Re-creating it with the right data sources would remove their access, so nothing was changed.'
-       remedy = 'Give the group its own assignment (or split the shared one) in the Defender portal; the next run sets its data sources.'
+       cause = 'The group reaches more Defender XDR data sources than its definition names, and its role assignment also holds other principals. Report only: PIM Manager never changes it.'
+       remedy = 'If that is not intended, change the role assignment in the Defender portal (for example give the group its own assignment) or change the definition.'
        retryable = $true; severity = 'environment'
        fixes = @() }
 
@@ -764,7 +818,8 @@ function Get-PimFailureFixKind {
 #               upstream-error, held-for-approval (NOT a failure, never an alert), not-converged, permission,
 #               platform-timeout, too-large, missing-licence, no-data-source, settings-unreachable; 'unclassified' only
 #               for the generic code of a failure nobody has classified yet (itself a PIM defect, framework 8.16).
-#   whoActs     customer | support | product | nobody
+#   whoActs     customer | support | product | nobody -- 'nobody' means NO follow-up (no ticket, Action none), whatever the
+#               cause class says by default (pim-def-0106: not-converged + nobody = report-only drift).
 #   fixedIn     the PIM version that fixes a PRODUCT cause ('' = none known); it makes the Action 'fixed-in'.
 # ---------------------------------------------------------------------------------------------
 function Get-PimFailureCodeTable {
@@ -818,6 +873,13 @@ function Get-PimFailureCodeTable {
         ,@('DEFENDER-ROLE-AMBIGUOUS',          'pim-def-0103',   'customer-config',   'customer', '',      '2.4.638')
         ,@('DEFENDER-ROLE-NOT-OWN',            'pim-def-0104',   'customer-config',   'customer', '',      '2.4.638')
         ,@('DEFENDER-ASSIGNMENT-SHARED',       'pim-def-0105',   'customer-config',   'customer', '',      '2.4.638')
+        # whoActs 'nobody' (Invardia 2026-11-13): report-only, opensTicket FALSE -- repeating drift surfaces through Invardia's
+        # REPORT-ONLY-DRIFT as one item, never a ticket per run (errors.json derives opensTicket from whoActs).
+        ,@('DEFENDER-DATASOURCES-CHANGED',     'pim-def-0106',   'not-converged',     'nobody',   '',      '3.1.21')
+        ,@('DEFENDER-DATASOURCES-WIDER',       'pim-def-0107',   'customer-config',   'customer', '',      '3.1.21')
+        ,@('DEFENDER-ROLE-MISSING',            'pim-def-0108',   'customer-config',   'customer', '',      '3.1.21')
+        ,@('DEFENDER-ROLE-DIFFERS',            'pim-def-0109',   'customer-config',   'customer', '',      '3.1.21')
+        ,@('DEFENDER-ROLE-WIDER',              'pim-def-0110',   'customer-config',   'customer', '',      '3.1.21')
         ,@('POWERBI-ENGINE-NOT-IN-WORKSPACE',  'pim-pbi-0101',   'permission',        'customer', '',      '2.4.638')
         ,@('POWERBI-ADMIN-NOT-GRANTED',        'pim-pbi-0102',   'permission',        'customer', '',      '2.4.638')
         ,@('POWERBI-WORKSPACE-NOT-FOUND',      'pim-pbi-0103',   'target-missing',    'customer', '',      '2.4.638')
@@ -911,6 +973,8 @@ function Get-PimFailureClassOwnText {
     switch ("$Class".Trim().ToUpperInvariant()) {
         'RUN-STALLED' { return @('A PIM Manager run has made no progress for a while, or is running far longer than usual. It keeps running and nothing was stopped; Invardia support has been told.',
                                  'Nothing to do for you: Invardia support looks at it. This clears by itself when the job runs normally again.') }
+        'DEFENDER-DATASOURCES-CHANGED' { return @('A Defender XDR role assignment covers other data sources than the workload template names. PIM Manager reported it and changed nothing; the access stays as it is.',
+                                 'Nothing to do. PIM Manager compares again on every run.') }
     }
     return $null
 }
@@ -1129,7 +1193,7 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing was created for this row. Everything else is applied.'
             steps = @('Onboard a Microsoft Sentinel workspace to Defender XDR (the Data Operations permissions need it).',
                       'Or take that permission out of the role in Workload templates and commit.')
-            after = 'The next run creates the role and its assignment, and the status turns OK by itself.' }
+            after = 'Create the role in the Defender portal once it is in place; the next run assigns it, and the status turns OK by itself.' }
         'DEFENDER-ROLE-AMBIGUOUS' = @{ short = 'two Defender XDR roles have the same name'
             what = 'Two Defender XDR roles have the same name, so PIM Manager does not choose one: {item}.'
             affected = 'Nothing was assigned for this row. Everything else is applied.'
@@ -1138,9 +1202,24 @@ function Get-PimFailureSolutionCatalog {
         'DEFENDER-ROLE-NOT-OWN' = @{ short = 'a Defender XDR role of that name exists and was not created by PIM Manager'
             what = 'A Defender XDR role with the name of the workload template already exists and was not created by PIM Manager, so its permissions were not changed: {item}.'
             affected = 'The role keeps the permissions it had. Nothing was changed, and everything else is applied.'
-            steps = @('In the Defender portal open Settings > Permissions > Roles and rename or delete that role, so PIM Manager creates its own.',
+            steps = @('In the Defender portal open Settings > Permissions > Roles and change the permissions of that role (PIM Manager never changes a Defender role).',
                       'Or set the permissions of the role in Workload templates to the ones the existing role has, and commit in Pending changes.')
             after = $next }
+        'DEFENDER-ROLE-MISSING' = @{ short = 'the Defender XDR role a binding names does not exist, so the group is not assigned yet'
+            what = 'The Defender XDR role a workload binding names does not exist in the tenant, and PIM Manager never creates a Defender role: {item}.'
+            affected = 'The group is not assigned to that role yet (the assignment waits). Nothing was changed, and everything else is applied.'
+            steps = @('In the Defender portal open Settings > Permissions > Roles and create the role with exactly that name and the permissions the warning lists.')
+            after = 'The next run finds the role, adds the group''s assignment, and the warning clears by itself.' }
+        'DEFENDER-ROLE-DIFFERS' = @{ short = 'a Defender XDR role has fewer permissions than its definition'
+            what = 'A Defender XDR role has fewer permissions than its definition; PIM Manager never changes a Defender role: {item}.'
+            affected = 'The group is assigned to the role, so it gets less than defined, never more. Nothing was changed on the role. Report only.'
+            steps = @('If that is not intended, change the role in the Defender portal (Settings > Permissions > Roles), or set the permissions in Workload templates to the ones the role has and commit in Pending changes.')
+            after = 'The next run compares again, and the warning clears by itself once the role and the definition agree.' }
+        'DEFENDER-ROLE-WIDER' = @{ short = 'a Defender XDR role grants more than its definition, so PIM Manager did not assign it'
+            what = 'A Defender XDR role grants more than its definition (or has excluded actions or a condition PIM Manager cannot compare), so PIM Manager did not assign it to the group: {item}.'
+            affected = 'The group is not assigned to that role (an assignment it already holds is left as it is). Nothing was changed on the role. Everything else is applied.'
+            steps = @('Change the role in the Defender portal (Settings > Permissions > Roles) so it grants no more than the definition, or set the permissions in Workload templates to the ones the role has and commit in Pending changes.')
+            after = 'The next run compares again; once the role grants no more than the definition, the group is assigned and the warning clears by itself.' }
         'DUPLICATE-GROUP-NAME' = @{ short = 'two groups in Entra ID have the same name, so PIM Manager touches neither'
             what = 'Two groups in Entra ID have the same name, so PIM Manager does not choose one and touches neither: {item}.'
             affected = 'Nothing was changed on either group. Every item that names the group waits; everything else is applied.'
@@ -1162,11 +1241,18 @@ function Get-PimFailureSolutionCatalog {
             affected = 'Nothing was changed on either administrative unit. Every item that names it waits; everything else is applied.'
             steps = @('In the Microsoft Entra admin center, rename or delete the administrative unit that is not the one PIM Manager should use (Jobs > Engine logs & errors names both object ids).')
             after = 'The next run finds the administrative unit that is left, applies the waiting items, and the status turns OK by itself.' }
-        'DEFENDER-ASSIGNMENT-SHARED' = @{ short = 'the Defender XDR assignment is shared with others, so it was not changed'
-            what = 'A Defender XDR role assignment is shared with other people or groups, so it was not changed: {item}.'
-            affected = 'Nothing was changed, so nobody lost access. The group keeps the data sources it had.'
-            steps = @('In the Defender portal give the group its own assignment (or split the shared one).')
-            after = 'The next run sets the data sources of that assignment, and the status turns OK by itself.' }
+        'DEFENDER-ASSIGNMENT-SHARED' = @{ short = 'the group has access to more Defender XDR data sources than its definition, and its assignment is shared'
+            what = 'A group has access to more Defender XDR data sources than its definition, and its role assignment is shared with other people or groups, so it was not changed: {item}.'
+            affected = 'Nothing was changed, so nobody lost access. The group keeps the data sources it has, which are more than its definition names.'
+            steps = @('If that is not intended, change the role assignment in the Defender portal (for example give the group its own assignment).',
+                      'Or change the definition: set the data sources of the binding in Workload templates to the assigned ones and commit in Pending changes.')
+            after = 'Report only: PIM Manager never changes it. The next run compares again, and the warning clears by itself once the assignment and the definition agree.' }
+        'DEFENDER-DATASOURCES-WIDER' = @{ short = 'the group has access to more Defender XDR data sources than its definition'
+            what = 'A group reaches more Defender XDR data sources than its definition names: {item}.'
+            affected = 'Nothing was changed. Report only: PIM Manager never changes it, and the group keeps the wider access.'
+            steps = @('If that is not intended, change the role assignment in the Defender portal.',
+                      'Or change the definition: set the data sources of the binding in Workload templates to the assigned ones and commit in Pending changes.')
+            after = 'The next run compares again, and the warning clears by itself once the assignment and the definition agree.' }
         'REMOVE-BUDGET-HELD' = @{ short = 'more removals than the safety limit allows in one run were held back'
             what = 'More removals than the safety limit allows in one run were held back: {item}.'
             affected = 'Nothing was removed in that area. The access is still there.'

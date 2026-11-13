@@ -1,0 +1,13 @@
+{
+  "version": "2.4.579",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "Move a public environment to a private network with one guided command.",
+  "new": [
+    {
+      "title": "Convert to private with one command",
+      "text": "One command now runs every step of converting a public environment to private. It shows the plan first, can resume after a stop, and pauses where your network team must act."
+    }
+  ],
+  "fixes": []
+}

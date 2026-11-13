@@ -1,0 +1,25 @@
+{
+  "version": "2.4.476",
+  "date": "2026-10-02",
+  "type": "fix-only",
+  "summary": "Setup and update messages now tell you exactly what happened and what to do.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updater shows the real version",
+      "text": "The update log now shows the running version, or says why it is unknown, instead of a long code."
+    },
+    {
+      "title": "Clear reason when Azure refuses setup",
+      "text": "When a policy blocks public network access, setup stops with Azure's own message and points to the private endpoint."
+    },
+    {
+      "title": "Mail sender setup stays time-bound",
+      "text": "Setup explains how to assign Exchange Administrator manually and time-bound, and flags an assignment that runs longer as standing privilege."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Clearer guidance for signed-in setup on Azure VM hosts, and managed tenants name the version they pulled."
+    }
+  ]
+}

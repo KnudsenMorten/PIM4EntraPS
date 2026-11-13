@@ -1,0 +1,17 @@
+{
+  "version": "3.0.47",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Setup and updates now give the database job its access by themselves, with no manual step.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Database job access is set up for you",
+      "text": "Setup and every update add the database job to the database admin group through PIM, check it before the job starts, and renew it before it ends."
+    },
+    {
+      "title": "Clearer status after a new membership",
+      "text": "Right after a new membership, a refused database sign-in shows as waiting, not as a failure."
+    }
+  ]
+}

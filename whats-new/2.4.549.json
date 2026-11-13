@@ -1,0 +1,13 @@
+{
+  "version": "2.4.549",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Installing and updating PIM Manager no longer needs the Azure CLI.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup works without Azure CLI",
+      "text": "Setup and install scripts for hosting, deployment, sign-in and updates now work without the Azure CLI, using a browser sign-in, the Invardia Support app or a certificate."
+    }
+  ]
+}

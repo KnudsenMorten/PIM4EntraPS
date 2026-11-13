@@ -1,0 +1,13 @@
+{
+  "version": "2.4.437",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "Managed tenants carry out removals, renames and session revokes from the managing tenant again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Managed tenants act on central decisions",
+      "text": "A managed tenant ignored every removal, rename and session revoke from the managing tenant as expired. They are now carried out; only decisions older than 30 days are ignored."
+    }
+  ]
+}

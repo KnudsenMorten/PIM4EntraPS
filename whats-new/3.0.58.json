@@ -1,0 +1,17 @@
+{
+  "version": "3.0.58",
+  "date": "2026-11-08",
+  "type": "fix-only",
+  "summary": "The updater's ownership proof no longer stays pending, and the sign-in front always matches the release.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Ownership proof no longer stays pending",
+      "text": "The updater checks its app registration ownership proof up to six times, so a slow directory answer no longer leaves it pending."
+    },
+    {
+      "title": "Sign-in front matches the release",
+      "text": "An opted-in installation always builds the sign-in front at this release's version, never a newer shared one."
+    }
+  ]
+}

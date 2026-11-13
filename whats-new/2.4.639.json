@@ -1,0 +1,21 @@
+{
+  "version": "2.4.639",
+  "date": "2026-10-15",
+  "type": "fix-only",
+  "summary": "Alert mails are fewer and more useful, and PIM Manager runs with fewer database rights.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Alert mails point to the fix",
+      "text": "An alert mail now names the error code with a link to its page. Licence gaps, throttling and problems already fixed no longer send an alert mail."
+    },
+    {
+      "title": "Long quiet steps are not called stopped",
+      "text": "A long step that reports nothing for a while is no longer mistaken for a stopped run."
+    },
+    {
+      "title": "Fewer database rights needed",
+      "text": "The engine and the portal run with fewer database rights."
+    }
+  ]
+}

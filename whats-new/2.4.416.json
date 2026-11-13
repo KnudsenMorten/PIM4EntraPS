@@ -1,0 +1,13 @@
+{
+  "version": "2.4.416",
+  "date": "2026-09-23",
+  "type": "fix-only",
+  "summary": "Admins who have not signed in yet no longer receive a new Temporary Access Pass every day.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No more daily Temporary Access Pass mails",
+      "text": "Each admin now gets one Temporary Access Pass. When it expires nothing happens automatically; click Reset TAP for that admin to send a new one."
+    }
+  ]
+}

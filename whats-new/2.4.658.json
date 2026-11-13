@@ -1,0 +1,22 @@
+{
+  "version": "2.4.658",
+  "date": "2026-10-21",
+  "type": "feature",
+  "summary": "The sign-in front works again, and support scripts sign in in more situations.",
+  "new": [
+    {
+      "title": "Script for least database rights",
+      "text": "A new support script sets PIM Manager's database access to the least rights each part needs."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Sign-in front works again",
+      "text": "The previous sign-in front update failed on every page. It now works and keeps longer-lasting sessions."
+    },
+    {
+      "title": "Support scripts sign in more reliably",
+      "text": "Support scripts reach a private database from inside the network without a firewall rule, and sign in when localhost means IPv6 or a machine identity is present."
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "version": "2.4.581",
+  "date": "2026-10-11",
+  "type": "feature",
+  "summary": "Download a PDF that documents how your PIM Manager is set up, and close public access fully when you go private.",
+  "new": [
+    {
+      "title": "As-built document as a PDF",
+      "text": "Settings > Copy & tools > As-built document downloads a PDF of how this installation is configured. It is made inside your environment and never contains secrets or people.",
+      "action": "On an existing environment, an Owner of the resource group runs the hosting access setup script once after the next update; the update log says so."
+    },
+    {
+      "title": "Support can request the as-built document",
+      "text": "When you grant Invardia support the new as-built access level, support can create the same PDF on request. It is deleted after 24 hours."
+    },
+    {
+      "title": "Going private closes public access too",
+      "text": "Converting an environment to private now also turns off public access to the container registry, and optionally the database, once the private path is proven complete."
+    },
+    {
+      "title": "Progress during the long hosting step",
+      "text": "A tracked multi-tenant install now shows each part of the hosting step as it happens, instead of minutes of silence."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No false Azure SQL warning on new subscriptions",
+      "text": "On a new subscription, the region check now explains that Azure SQL is checked after setup registers it, instead of showing a confusing warning."
+    }
+  ]
+}

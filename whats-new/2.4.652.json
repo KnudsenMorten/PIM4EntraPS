@@ -1,0 +1,13 @@
+{
+  "version": "2.4.652",
+  "date": "2026-10-18",
+  "type": "fix-only",
+  "summary": "Unfinished updates and a missing Pro licence are now explained clearly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Clearer errors for updates and licences",
+      "text": "An update that has not reached every app yet, and a missing Pro licence, now each show their own error code and explanation."
+    }
+  ]
+}

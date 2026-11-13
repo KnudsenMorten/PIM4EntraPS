@@ -1,0 +1,26 @@
+{
+  "version": "2.4.393",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Settings take effect at once and can be copied between environments.",
+  "new": [
+    {
+      "title": "Copy settings to another environment",
+      "text": "Settings > Copy settings exports the sections you pick to a file. On the other environment you see each setting as current and new, and only ticked ones are written."
+    },
+    {
+      "title": "Sort, filter and resize the grid",
+      "text": "Click a column header to sort, type in the filter box to narrow the rows, and drag a column edge to change its width."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Saved settings apply straight away",
+      "text": "Switching a feature off in Settings used to need a restart of PIM Manager. It now applies the moment you save."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Admins are named one consistent way in Who gets which group, the wizards say PIM policy instead of Group policy, and record types show how many changes are pending."
+    }
+  ]
+}

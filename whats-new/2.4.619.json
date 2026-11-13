@@ -1,0 +1,34 @@
+{
+  "version": "2.4.619",
+  "date": "2026-10-13",
+  "type": "feature",
+  "summary": "Deleting and revoking access is more precise and better guarded, with new limits you control.",
+  "new": [
+    {
+      "title": "Limits for bulk revoke and admin delete",
+      "text": "You can set bulk-revoke and admin-delete limits on the Guards page."
+    },
+    {
+      "title": "Central admin delete for MSPs",
+      "text": "In an MSP setup, a central admin can be deleted with the managing tenant SuperAdmin's approval, one per run."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Deletes and revokes act precisely",
+      "text": "An account delete acts once on the exact account, and deleting and revoking follow scope and level everywhere."
+    },
+    {
+      "title": "Sponsors propose, others approve",
+      "text": "A sponsor proposes a change and someone with permission approves it, never the sponsor themselves."
+    },
+    {
+      "title": "Large withdrawals are held",
+      "text": "Withdrawals from managed tenants above the customer limit are held on the Guards page, and a SuperAdmin can release every hold."
+    },
+    {
+      "title": "Mails name the environment",
+      "text": "Mails show the environment name, never a bare tenant id."
+    }
+  ]
+}

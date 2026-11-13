@@ -1,0 +1,13 @@
+{
+  "version": "3.0.85",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "The link to Invardia support now has one clear name everywhere.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One name: Invardia support link",
+      "text": "The link that sends health and run results to Invardia support now has one name everywhere: Invardia support link. Turning it off stops all reports to Invardia support."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.323",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "An update that has to be undone can always be undone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Rollback always works",
+      "text": "Each update keeps what it needs for a rollback, and a rollback is confirmed against what is actually running."
+    },
+    {
+      "title": "Healthy updates are not failed",
+      "text": "An update is no longer failed over a version-number mismatch when the environment runs exactly what was deployed."
+    },
+    {
+      "title": "Fix all fixes all of them",
+      "text": "\"Fix all auto-fixable errors\" now fixes every one, including assignments to an undefined administrative unit, and names anything it cannot repair."
+    }
+  ]
+}

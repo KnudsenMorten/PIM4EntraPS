@@ -1,0 +1,31 @@
+{
+  "version": "2.4.364",
+  "date": "2026-09-16",
+  "type": "feature",
+  "summary": "PIM Manager never deletes an account, and never disables one just because it is missing from your definitions.",
+  "new": [
+    {
+      "title": "Disable date on Admin accounts",
+      "text": "You can see and edit each admin's disable date on the Admin accounts screen, with a flag when it has passed or falls within 14 days."
+    },
+    {
+      "title": "Sponsor department on Admin accounts",
+      "text": "Admin accounts shows each admin's sponsor department, with its owners on hover, and flags a missing department or missing owners."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "PIM Manager never deletes a user account",
+      "text": "Offboarding disables the account, revokes its sessions and access, and sends the notice. The account stays until a person deletes it; Flag for deletion is now Mark for manual removal."
+    },
+    {
+      "title": "Missing accounts are reported, never disabled",
+      "text": "An admin account absent from your definitions is listed on each run but never disabled. Disabling it is your decision.",
+      "action": "If you use a managing tenant, update it and every managed tenant to this version or newer."
+    },
+    {
+      "title": "Admin mail goes to department owners",
+      "text": "Mail about an admin, including the Temporary Access Pass, goes to the owners of their sponsor department. If none is found, PIM Manager says what to set instead of mailing nobody."
+    }
+  ]
+}

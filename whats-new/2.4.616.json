@@ -1,0 +1,13 @@
+{
+  "version": "2.4.616",
+  "date": "2026-10-13",
+  "type": "fix-only",
+  "summary": "Invardia Support keeps the database access it needs to help you.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Invardia Support keeps its access",
+      "text": "When you name a Support app, the installation gives it its own database access and the end-of-install check confirms it. A script gives existing installations the same."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "version": "2.4.513",
+  "date": "2026-10-06",
+  "type": "feature",
+  "summary": "SuperAdmins can now delete admin accounts and import administrators safely.",
+  "new": [
+    {
+      "title": "Delete admin accounts",
+      "text": "A SuperAdmin can delete an account on Admin accounts by typing DELETE. It goes through the offboard approval, and break-glass accounts are never deleted."
+    },
+    {
+      "title": "Import administrators from a file",
+      "text": "Admin accounts > Import administrators shows the format and offers a template. Every line is previewed as new, overwrite, skip or invalid before anything is staged."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Duplicate a group more safely",
+      "text": "Only group types are offered, groups are listed by name, and a name whose tag already exists is refused while you type."
+    },
+    {
+      "title": "Moving an admin between groups works reliably",
+      "text": "Admins load first and are listed by name, and a destination that does not exist or already holds the admin is refused."
+    },
+    {
+      "title": "Clearer auto-disable controls",
+      "text": "The \"Account auto-disable date\" controls change the day the account is disabled, not when its delegations expire."
+    }
+  ]
+}

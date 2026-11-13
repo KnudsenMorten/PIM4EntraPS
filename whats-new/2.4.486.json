@@ -1,0 +1,18 @@
+{
+  "version": "2.4.486",
+  "date": "2026-10-03",
+  "type": "feature",
+  "summary": "Ticketing systems can now switch an admin account on for a set time.",
+  "new": [
+    {
+      "title": "Ticketing systems can enable admins (Pro)",
+      "text": "A ticketing system can enable a disabled admin account for a set time, read the status and cancel it. A proposed change waits for an administrator."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "One database admin group per tenant",
+      "text": "Environments in one tenant share one database admin group again. Each still keeps its own sign-in app, administrators group and mailbox."
+    }
+  ]
+}

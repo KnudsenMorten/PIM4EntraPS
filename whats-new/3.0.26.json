@@ -1,0 +1,17 @@
+{
+  "version": "3.0.26",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "Get Started no longer blocks a SuperAdmin who may approve their own break-glass list.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Approve your own break-glass list",
+      "text": "In Get Started, with self-approval on, the SuperAdmin who raised the break-glass list can approve it right in the step."
+    },
+    {
+      "title": "Templates banner shows where to switch",
+      "text": "The Templates preview banner now names its switch: Settings > Features & edition > Governance preview."
+    }
+  ]
+}

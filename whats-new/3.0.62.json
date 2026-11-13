@@ -1,0 +1,21 @@
+{
+  "version": "3.0.62",
+  "date": "2026-11-08",
+  "type": "fix-only",
+  "summary": "The identity move proves every part correctly, and setup steps say clearly when they wait on you.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Identity move proves each part correctly",
+      "text": "The identity move now proves the updater and the web front correctly after they move to their new identity."
+    },
+    {
+      "title": "Clearer waiting status for setup steps",
+      "text": "A setup step that waits on a support ticket now says waiting for the customer, with the ticket number, instead of showing a gap."
+    },
+    {
+      "title": "Approved exceptions are named",
+      "text": "One job can keep its old identity by an owner-approved exception, and the identity check names it."
+    }
+  ]
+}

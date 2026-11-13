@@ -1,0 +1,26 @@
+{
+  "version": "2.4.530",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "Changes go live sooner because jobs now run side by side, and interrupted runs no longer look like failures.",
+  "new": [
+    {
+      "title": "Jobs run side by side",
+      "text": "Jobs for different areas, such as groups, policies or Azure, now run at the same time. Run now on a busy area is queued and says what it waits for."
+    },
+    {
+      "title": "A clearer Jobs page",
+      "text": "Jobs are grouped into Engine, Maintenance, Reports and Updates, with what needs attention first and one line per job with a details panel."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Interrupted runs no longer show as failures",
+      "text": "A run cut short by an update or restart now shows grey as interrupted and runs again. Only two interruptions in a row turn red."
+    },
+    {
+      "title": "Clearer role assignment error",
+      "text": "When a role is refused because the group is not role-assignable, PIM Manager now names that cause and the fix."
+    }
+  ]
+}

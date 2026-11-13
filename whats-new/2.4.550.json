@@ -1,0 +1,13 @@
+{
+  "version": "2.4.550",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Invardia support sees your guard alerts again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Guard alerts reach Invardia support again",
+      "text": "Guard reports did not reach Invardia support. They arrive again, so support can see guard alerts for your environment."
+    }
+  ]
+}

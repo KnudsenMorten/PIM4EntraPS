@@ -1,0 +1,13 @@
+{
+  "version": "2.4.640",
+  "date": "2026-10-16",
+  "type": "fix-only",
+  "summary": "A short licence read fault no longer looks like a missing licence.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Licence reads retry",
+      "text": "The updater retries a licence read that fails once and names the real cause, instead of saying that no licence is installed."
+    }
+  ]
+}

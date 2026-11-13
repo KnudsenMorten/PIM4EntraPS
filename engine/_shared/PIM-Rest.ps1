@@ -1188,8 +1188,12 @@ function Invoke-PimRest {
         $args = @{ Method = $Method; Uri = $next; Headers = $h; TimeoutSec = (Get-PimRestTimeoutSec) }
         # (see Get-PimRestErrorBody / Get-PimRestErrorDetail above for the failure path)
         if ($null -ne $Body -and $Method -ne 'GET') {
-          $args.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 }
-          $args.ContentType = 'application/json'
+          # MAIL-WIRE-1 (3.1.20, 2026-11-12): the body goes as UTF-8 BYTES with 'charset=utf-8' -- since ~17:55Z Graph sendMail
+          # refuses a JSON body whose non-ASCII text arrives without that charset (HTTP 400 RequestBodyRead "missing parameters:
+          # Message"; an ASCII-only test mail still passed). SI's mail seam already sent this shape and was not hit.
+          $json = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 }
+          $args.Body = [System.Text.Encoding]::UTF8.GetBytes($json)
+          $args.ContentType = 'application/json; charset=utf-8'
         }
         $resp = Invoke-RestMethod @args
         break

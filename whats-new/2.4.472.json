@@ -1,0 +1,30 @@
+{
+  "version": "2.4.472",
+  "date": "2026-10-01",
+  "type": "feature",
+  "summary": "Nobody loses access by accident, and owners see each month what will be extended.",
+  "new": [
+    {
+      "title": "Monthly list of upcoming extensions",
+      "text": "Department owners get a monthly list of permissions about to be extended, and can Approve or Deny on My people. No answer means extended."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Nobody loses access by accident",
+      "text": "Permissions with an empty auto-extend setting were not extended. They now follow a default that is on; FALSE still means never."
+    },
+    {
+      "title": "Extended 14 days before ending",
+      "text": "Extension now happens 14 days before the end instead of 30, adjustable from 1 to 90 days."
+    },
+    {
+      "title": "Access reviews decide extensions",
+      "text": "A person kept in their department's review is extended; one removed in the review is not."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Auto-extend is now a picker in the grid: TRUE, FALSE or empty for the default."
+    }
+  ]
+}

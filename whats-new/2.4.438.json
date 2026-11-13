@@ -1,0 +1,17 @@
+{
+  "version": "2.4.438",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Department owners can confirm, extend or ask to remove their people's access, with an optional regular review by mail.",
+  "new": [
+    {
+      "title": "Keep, Extend or Remove on My people",
+      "text": "Department owners can confirm a person's access, extend it, or request its removal on My people. A PIM administrator approves removals, and the page shows who is due for review."
+    },
+    {
+      "title": "A regular owner review by mail",
+      "text": "The new owner review job mails each department's owners their people with a link to My people. Turn it on under Jobs; it runs every 90 days by default."
+    }
+  ],
+  "fixes": []
+}

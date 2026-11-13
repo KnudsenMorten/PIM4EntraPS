@@ -1,0 +1,22 @@
+{
+  "version": "2.4.424",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "The permission check now works on hosted environments and hands you a ready script to fix what is missing.",
+  "new": [
+    {
+      "title": "A ready script to fix permissions",
+      "text": "When the engine lacks a permission, the Overview banner shows a ready-to-run PowerShell script with a Copy button. A Global Administrator runs it once."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "The permission check works when hosted",
+      "text": "On hosted environments the check always said permissions could not be checked. It now checks the engine's permissions and says why if it cannot run."
+    },
+    {
+      "title": "Access map shows the whole path",
+      "text": "Selecting a permission group on the Access map now lights its whole path, from the people through to the permissions."
+    }
+  ]
+}

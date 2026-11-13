@@ -1,0 +1,21 @@
+{
+  "version": "3.0.25",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "The installer checks your Azure region first, and private installs keep their Key Vault private.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Installer checks the Azure region first",
+      "text": "The installer checks that the chosen Azure region accepts new resources before it creates anything."
+    },
+    {
+      "title": "Private Key Vault stays private",
+      "text": "A private install keeps its Key Vault private, also after a deleted vault is recovered."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The PIM Manager address reaches Invardia from the first update, and every hand-over file is in the checksum list."
+    }
+  ]
+}

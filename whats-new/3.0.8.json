@@ -1,0 +1,18 @@
+{
+  "version": "3.0.8",
+  "date": "2026-10-31",
+  "type": "fix-only",
+  "summary": "Installing no longer creates a mailbox or gives the installing account an Exchange role.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail sender is set up separately",
+      "text": "The installation no longer creates a mailbox, and the installing account gets no Exchange role.",
+      "action": "Have your Exchange administrator set up mail under Get Started > Mail sender."
+    },
+    {
+      "title": "Hybrid worker removal keeps shared servers",
+      "text": "Removing the hybrid worker leaves the server standing when another product's worker runs on it, and removes only PIM Manager's own part."
+    }
+  ]
+}

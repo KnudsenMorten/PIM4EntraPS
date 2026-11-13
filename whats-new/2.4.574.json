@@ -1,0 +1,13 @@
+{
+  "version": "2.4.574",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "A new installation no longer rolls PIM Manager back by mistake.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No unwanted rollback during installation",
+      "text": "A customer installation checks the Manager directly and keeps the version you installed."
+    }
+  ]
+}

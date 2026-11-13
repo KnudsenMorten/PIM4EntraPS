@@ -1,0 +1,13 @@
+{
+  "version": "3.1.17",
+  "date": "2026-11-12",
+  "type": "fix-only",
+  "summary": "The delegation overview loads far faster in tenants with many subscriptions.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The delegation overview loads much faster",
+      "text": "In a tenant with 2,000 subscriptions, eligible Azure roles now load in about 3 minutes instead of 40. Anything missed the first time is read again."
+    }
+  ]
+}

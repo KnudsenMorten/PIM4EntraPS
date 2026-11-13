@@ -1,0 +1,13 @@
+{
+  "version": "3.0.55",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "A Community updater never takes ownership of a Pro app registration in the same tenant.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community updater owns only its own app",
+      "text": "On a Community installation the updater owns only its own sign-in app registration, never a Pro registration in the same tenant."
+    }
+  ]
+}

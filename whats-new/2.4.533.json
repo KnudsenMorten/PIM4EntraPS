@@ -1,0 +1,31 @@
+{
+  "version": "2.4.533",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "You decide exactly who gets the PIM Activator, and large commits finish in seconds.",
+  "new": [
+    {
+      "title": "PIM Activator: you choose who",
+      "text": "The PIM Activator page now gives ready-to-run commands, and you pick the group per channel. Nothing is assigned by default, so nobody signs in until a group is assigned.",
+      "action": "On the PIM Activator page, assign a group for each channel so your admins can sign in."
+    },
+    {
+      "title": "Environment name step in Get Started",
+      "text": "Get Started now has an Environment name step as step 2."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Large commits are fast",
+      "text": "Committing hundreds of rows took minutes and could time out. It now takes seconds, and a slow commit is never wrongly reported as not saved."
+    },
+    {
+      "title": "New group policies no longer fail a run",
+      "text": "When a new group's PIM policy cannot be read yet, PIM Manager waits and retries instead of failing the run."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Admin accounts no longer asks for a manager e-mail, as mail goes to the department's owners. The Edge for Business guide is corrected."
+    }
+  ]
+}

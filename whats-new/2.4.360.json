@@ -1,0 +1,35 @@
+{
+  "version": "2.4.360",
+  "date": "2026-09-15",
+  "type": "feature",
+  "summary": "On the managing tenant you choose, per admin and per group, exactly which managed tenants receive it.",
+  "new": [
+    {
+      "title": "Choose which managed tenants receive each item",
+      "text": "On the managing tenant, every admin, membership, group and binding can say whether it replicates, and to which tenants by ring, tag or name."
+    },
+    {
+      "title": "See how many tenants it reaches",
+      "text": "The Create wizards and the grid show \"This will reach: N of M tenants\" before you commit, with the names on hover."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "MSP settings show only where they matter",
+      "text": "A single tenant no longer shows sync settings, and a managed tenant shows read-only which admins it received."
+    },
+    {
+      "title": "Groups arrive with their memberships",
+      "text": "Department, project and cross-org groups are now sent along with the memberships that need them, and items kept local stay local."
+    },
+    {
+      "title": "Removals are reported first",
+      "text": "A row that stops reaching a managed tenant is reported as would remove and removed only when you allow it.",
+      "action": "If a managed tenant's sync relied on stale rows being removed automatically, run it with removal explicitly allowed."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The managing tenant's view of which tenants an admin reaches is accurate, and admin assignments have a Target column in the grid."
+    }
+  ]
+}

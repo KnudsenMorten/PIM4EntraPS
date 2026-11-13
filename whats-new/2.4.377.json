@@ -1,0 +1,30 @@
+{
+  "version": "2.4.377",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "Admin accounts use each tenant's own domain, and the engine now follows your naming conventions.",
+  "new": [
+    {
+      "title": "Admin account domain per tenant",
+      "text": "Settings > Admin account domain lists this tenant's verified domains. Admins replicated to a managed tenant use that tenant's own domain."
+    },
+    {
+      "title": "Wizards show replication on managed tenants",
+      "text": "On a managed tenant, each create wizard notes that the row is local to this tenant and not replicated."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "The engine follows your naming",
+      "text": "Naming set in Settings was shown in PIM Manager but not used by the engine. The engine now uses the same settings."
+    },
+    {
+      "title": "Imported v1 admins are recognised",
+      "text": "Memberships of imported v1 admins were refused as not defined and blocked Commit. They are now matched correctly."
+    },
+    {
+      "title": "Revoke works for any Entra role assignment",
+      "text": "Revoking an Entra role assigned outside PIM used to fail. Revoke now checks how the role is held and removes it the right way, or explains why not."
+    }
+  ]
+}

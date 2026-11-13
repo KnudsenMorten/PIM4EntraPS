@@ -1,0 +1,21 @@
+{
+  "version": "3.0.57",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "Every update now shows whether your identities follow the standard and whether old ones still hold rights.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates report non-standard identities",
+      "text": "Every update reports whether each identity follows the standard name and whether an old identity still holds rights."
+    },
+    {
+      "title": "Purge protection for the relay password vault",
+      "text": "A Key Vault created by the SMTP relay password setup now has purge protection."
+    },
+    {
+      "title": "Clearer security pack",
+      "text": "The security pack lists the updater's right to change only its own app registrations and describes the database admin group the same way throughout."
+    }
+  ]
+}

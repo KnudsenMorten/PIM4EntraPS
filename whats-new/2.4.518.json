@@ -1,0 +1,13 @@
+{
+  "version": "2.4.518",
+  "date": "2026-10-06",
+  "type": "fix-only",
+  "summary": "Admin accounts is easier to read, so you never press a button for the wrong person.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One clear band per admin",
+      "text": "Admin accounts now separates each admin with a divider and shading, and shows the admin's name above their own buttons."
+    }
+  ]
+}

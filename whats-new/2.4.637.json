@@ -1,0 +1,26 @@
+{
+  "version": "2.4.637",
+  "date": "2026-10-15",
+  "type": "feature",
+  "summary": "A SuperAdmin can cancel a running engine run, and stuck runs are reported.",
+  "new": [
+    {
+      "title": "Cancel a running engine run",
+      "text": "A SuperAdmin can cancel a running engine run from the Jobs page. A cancelled run is final and never resumes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Stuck runs are reported",
+      "text": "A run that makes no progress for an hour is reported while it keeps running."
+    },
+    {
+      "title": "Runs continue on the new version",
+      "text": "After an update, a run still on the old version is stopped and runs again on the new one."
+    },
+    {
+      "title": "Managed-tenant steps start sooner",
+      "text": "The managed-tenant pull and the publish see at once when an earlier run has ended."
+    }
+  ]
+}

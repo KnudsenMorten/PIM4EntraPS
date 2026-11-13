@@ -1,0 +1,25 @@
+{
+  "version": "2.4.351",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Several Manager screens work smoothly again, from committing to creating a new admin.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Commit all includes queued actions",
+      "text": "Commit all now also commits queued actions such as a Temporary Access Pass re-issue or a revoke."
+    },
+    {
+      "title": "New admin and Give access work again",
+      "text": "Both buttons work again, and Role lookup finds roles such as Exchange Administrator on the hosted Manager."
+    },
+    {
+      "title": "Wizards help avoid duplicates",
+      "text": "The Entra role picker hides roles that already have a delegation group, and Workload suggests workloads already in use."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Dialogs open on top, the change queue can show recent commits, and informational notes no longer raise the yellow banner."
+    }
+  ]
+}

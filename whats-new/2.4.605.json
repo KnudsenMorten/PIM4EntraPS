@@ -1,0 +1,26 @@
+{
+  "version": "2.4.605",
+  "date": "2026-10-12",
+  "type": "feature",
+  "summary": "Discovery and gaps is one page, new admins get their mail reliably, and the menu flags only what needs you.",
+  "new": [
+    {
+      "title": "Discovery and gaps in one page",
+      "text": "Discovery and gaps is now one page under Access."
+    },
+    {
+      "title": "New admin wizard asks where mail goes",
+      "text": "The New admin wizard asks where the admin's mail goes, so the Temporary Access Pass reaches the admin."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Menu numbers only when you must act",
+      "text": "The menu shows a number only for an error or a blocking approval."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The policy page shows the recommendation, External companies saves from the row, and Delegation overview and Access map scroll properly."
+    }
+  ]
+}

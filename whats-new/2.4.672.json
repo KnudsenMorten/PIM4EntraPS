@@ -1,0 +1,17 @@
+{
+  "version": "2.4.672",
+  "date": "2026-10-24",
+  "type": "fix-only",
+  "summary": "PIM Manager no longer takes over existing groups without an administrator's approval.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Existing groups are never taken over silently",
+      "text": "A group that matches a name defined in PIM Manager, but was not created by it, now waits until an administrator adopts it on Jobs > Engine logs and errors."
+    },
+    {
+      "title": "Copy button confirms reliably",
+      "text": "On the Engine logs page, the Copy button now confirms every copy."
+    }
+  ]
+}

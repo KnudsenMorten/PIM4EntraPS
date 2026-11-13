@@ -1,0 +1,17 @@
+{
+  "version": "3.0.66",
+  "date": "2026-11-09",
+  "type": "fix-only",
+  "summary": "Mail keeps working after an identity move, with one clear fix when a send is refused.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail fixes name the right identity",
+      "text": "After an identity move, PIM Manager names the identity the engine signs in as. A refused mail send shows one fix command with the real identity, tenant and mailbox."
+    },
+    {
+      "title": "Admin rights stay with the engine",
+      "text": "The identity move never copies User Access Administrator or Owner to any role but the engine."
+    }
+  ]
+}

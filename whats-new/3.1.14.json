@@ -1,0 +1,13 @@
+{
+  "version": "3.1.14",
+  "date": "2026-11-12",
+  "type": "fix-only",
+  "summary": "Old versions are cleaned up after each update.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Old versions are cleaned up after updates",
+      "text": "After a successful update, PIM Manager keeps only the current and previous version plus anything in use."
+    }
+  ]
+}

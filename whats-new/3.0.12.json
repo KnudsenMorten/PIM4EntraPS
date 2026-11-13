@@ -1,0 +1,21 @@
+{
+  "version": "3.0.12",
+  "date": "2026-11-01",
+  "type": "feature",
+  "summary": "Your scripts and AI assistant can now do more, while a person still saves every change.",
+  "new": [
+    {
+      "title": "API and MCP reference in Settings",
+      "text": "Find it under Settings > API and MCP reference, shown for your own role, with a plain description of each route."
+    },
+    {
+      "title": "More AI assistant tools",
+      "text": "The assistant can now decide and end access requests, and read conformance, role permissions, commit history, permissions health and the config backup list."
+    },
+    {
+      "title": "Scripts and services can use PIM Manager",
+      "text": "SuperAdmins can allow named applications to read, prepare changes and run jobs. It is off by default, and a person still saves every change."
+    }
+  ],
+  "fixes": []
+}

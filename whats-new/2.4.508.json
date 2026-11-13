@@ -1,0 +1,13 @@
+{
+  "version": "2.4.508",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "You can now clean up a group's delegations in one step, with or without deleting the group.",
+  "new": [
+    {
+      "title": "Remove a group's delegations",
+      "text": "Per row or for a selection, remove every delegation and keep the group, or also delete the group in Entra ID. Both are staged in Pending changes."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,30 @@
+{
+  "version": "2.4.532",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "SuperAdmins can clear all pending changes at once, and Get Started walks a new environment through setup in a clearer order.",
+  "new": [
+    {
+      "title": "Discard all pending changes at once",
+      "text": "A SuperAdmin can discard every pending change, including colleagues', in one step. The page shows how many and who staged them, asks for a reason and commits nothing."
+    },
+    {
+      "title": "Self-service setup for managed tenants",
+      "text": "You can install a managed tenant with an enrollment key from Invardia. It creates the environment and licence and links it to its managing tenant."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Get Started in a clearer order",
+      "text": "Naming convention is now step 1, then licence, engine permissions, mail sender and the rest. Engine permissions shows done as soon as every permission is held."
+    },
+    {
+      "title": "Templates skip roles your tenant lacks",
+      "text": "Templates leave out roles your tenant does not have and say which, so a commit is no longer blocked. Two Entra role names now match Microsoft's current names."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Pending changes no longer lists the same item twice, Mail alerting points to Get Started, and hosting setup works in an empty Azure subscription."
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "version": "2.4.375",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "Break-glass changes need two people, the emergency override works, and PIM Manager is tidier.",
+  "new": [
+    {
+      "title": "Break-glass changes need two SuperAdmins",
+      "text": "Changing Break-glass accounts now raises a request with your justification. A different SuperAdmin approves or rejects it within 72 hours.",
+      "action": "Make sure each environment has at least two SuperAdmins to change Break-glass accounts in PIM Manager."
+    },
+    {
+      "title": "Emergency override works",
+      "text": "The emergency override card explains what happens and shows whether a passphrase is set. It switches off approval on chosen groups; nothing is granted.",
+      "action": "To use the emergency override, set a passphrase once per environment with the provided operator script."
+    },
+    {
+      "title": "Departments & owners has its own page",
+      "text": "Departments & owners is now a page under Access instead of being buried in Settings."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Smaller improvements",
+      "text": "All records has a compact list with a filter and full-width table, and two unused settings were removed."
+    }
+  ]
+}

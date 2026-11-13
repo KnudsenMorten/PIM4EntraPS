@@ -1,0 +1,42 @@
+{
+  "version": "2.4.499",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "The audit trail is protected and names the real person behind every change.",
+  "new": [
+    {
+      "title": "Audit retention",
+      "text": "The Audit page shows how long rows are kept. By default every row is kept; a SuperAdmin can set a period of 13 months or more."
+    },
+    {
+      "title": "Delegated administrators see their audit",
+      "text": "Delegated administrators can now open Audit and see their own actions and events about what they own."
+    },
+    {
+      "title": "Three more safety alerts",
+      "text": "You are alerted when definitions disappear while live items remain, when a Pro licence no longer covers MSP, and when drift exceeds the removal budget."
+    },
+    {
+      "title": "Request portal easy to find",
+      "text": "The menu has Access requests (RFA portal) and Consultants & companies, with the portal link and a Copy button."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "The audit trail cannot be edited",
+      "text": "Audit rows are protected from change, even outside PIM Manager. Rows only leave through the retention you set."
+    },
+    {
+      "title": "Audit names the real person",
+      "text": "Changes the engine makes for someone's commit now name that person and the approver, not \"engine\"."
+    },
+    {
+      "title": "Licence and updates from Invardia on by default",
+      "text": "Requesting the licence and Pro updates from Invardia are now on by default. Switch them off under Settings > Features."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "More numbers follow your number format."
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "version": "3.0.59",
+  "date": "2026-11-08",
+  "type": "fix-only",
+  "summary": "Community installs stop failing the access review job, and the hybrid worker recovers from a bad update by itself.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community access review job no longer fails",
+      "text": "Community installations no longer fail the access review job every run; it starts only where the edition includes it."
+    },
+    {
+      "title": "Hybrid worker undoes a bad self-update",
+      "text": "After each self-update the hybrid worker tests itself and returns to the previous version if the test fails. This is recorded and shown in its status."
+    },
+    {
+      "title": "Identity move copies only needed rights",
+      "text": "Each role gets only the rights it needs, and the move waits for directory delays before it checks the result."
+    },
+    {
+      "title": "Engine Azure rights can be narrowed",
+      "text": "The engine's User Access Administrator right can be trimmed to the scopes PIM Manager manages."
+    }
+  ]
+}

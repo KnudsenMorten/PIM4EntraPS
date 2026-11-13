@@ -1,0 +1,22 @@
+{
+  "version": "2.4.676",
+  "date": "2026-10-27",
+  "type": "feature",
+  "summary": "You can delete admin accounts from the Administrator accounts list, and refused deletions now tell you what to do.",
+  "new": [
+    {
+      "title": "Delete account button for admins",
+      "text": "The Administrator accounts list now has a Delete account button."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clear answer when group deletion is off",
+      "text": "Deleting a group while group deletion is switched off is now refused and tells you what to do. Before, the change was committed and nothing happened."
+    },
+    {
+      "title": "Clear answer for on-premises AD admins",
+      "text": "Delete account on an on-premises AD admin now says at once that PIM Manager does not delete AD accounts, and what to do instead."
+    }
+  ]
+}

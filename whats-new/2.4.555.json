@@ -1,0 +1,13 @@
+{
+  "version": "2.4.555",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Browser sign-in during setup works reliably and only for your own tenant.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Browser sign-in works reliably",
+      "text": "Azure sign-in during setup no longer fails with a consent error. It opens a private browser window and refuses a sign-in to another tenant."
+    }
+  ]
+}

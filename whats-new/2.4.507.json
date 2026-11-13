@@ -1,0 +1,13 @@
+{
+  "version": "2.4.507",
+  "date": "2026-10-05",
+  "type": "fix-only",
+  "summary": "Group tables now show the group first, so they are quicker to read.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Group tables show the group first",
+      "text": "On group tables such as Departments, the group's name, description and tag come first, then the sponsoring department."
+    }
+  ]
+}

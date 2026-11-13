@@ -1,0 +1,21 @@
+{
+  "version": "2.4.628",
+  "date": "2026-10-14",
+  "type": "fix-only",
+  "summary": "Mail subjects are consistent and Discovery no longer repeats the same mails.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail subjects in one format",
+      "text": "Every mail subject reads environment, severity, what happened and PIM Manager, so you can sort and filter mails easily."
+    },
+    {
+      "title": "No repeated Discovery mails",
+      "text": "Discovery remembers what it has already reported, so the same item is not mailed again."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The data-quality check compares like with like, and the licence request is more robust."
+    }
+  ]
+}

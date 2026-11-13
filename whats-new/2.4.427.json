@@ -1,0 +1,17 @@
+{
+  "version": "2.4.427",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "The permission check no longer falsely reports a missing mail sender.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false \"no mail sender\" warning",
+      "text": "After the Manager restarted, the permission check on Overview could say no mail sender was configured. It now reads the sender first."
+    },
+    {
+      "title": "Clearer wording for mail problems",
+      "text": "A problem that only affects mail is no longer described as the engine missing required permissions."
+    }
+  ]
+}

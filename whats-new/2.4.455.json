@@ -1,0 +1,34 @@
+{
+  "version": "2.4.455",
+  "date": "2026-09-27",
+  "type": "feature",
+  "summary": "You can take admins out of PIM Manager or bring existing ones in, and manage Administrative Units from Drift and Discovery.",
+  "new": [
+    {
+      "title": "Stop managing an admin",
+      "text": "On Admin accounts or the Access map, Stop managing takes an admin out of PIM Manager. Nothing changes in Entra ID; use Mark for manual removal to also remove the access."
+    },
+    {
+      "title": "Import admins PIM Manager does not manage",
+      "text": "Admin accounts now lists admin accounts that exist in the directory but not in PIM Manager. Import stages the admin and the access they hold today for Review & commit."
+    },
+    {
+      "title": "Keep Administrative Units from Drift",
+      "text": "An Administrative Unit found in the tenant but not in PIM Manager can now be kept from the Drift page. PIM Manager never deletes an Administrative Unit."
+    },
+    {
+      "title": "Administrative Units in Discovery",
+      "text": "New Administrative Units appear in Discovery, and Create stages their definition."
+    },
+    {
+      "title": "Create an Administrative Unit card",
+      "text": "A new card defines an Administrative Unit and can give a group Entra roles inside it. Giving a group Entra roles can now be limited to chosen units."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Import administrators accepts its own example",
+      "text": "Import administrators now accepts the format its example shows: sign-in name, display name and department, without a header line."
+    }
+  ]
+}

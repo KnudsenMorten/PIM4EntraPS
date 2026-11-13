@@ -1,0 +1,38 @@
+{
+  "version": "2.4.534",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "See at a glance what waits on you, and choose how mail and the PIM Activator reach your organisation.",
+  "new": [
+    {
+      "title": "Blocking items shown in the menu",
+      "text": "Approvals, held change sets and other items that wait for a person now show a count on their menu entry and a line on the Overview, and clear when decided."
+    },
+    {
+      "title": "Client onboarding with or without Intune",
+      "text": "The Client onboarding page shows two equal ways to give admins the PIM Activator: with Intune, or one script on PCs and servers without Intune."
+    },
+    {
+      "title": "Mail via shared mailbox or your own SMTP",
+      "text": "Get Started > Mail sender and Settings > Mail & alerting offer a shared mailbox or your own SMTP relay. A test mail proves it works."
+    },
+    {
+      "title": "Workload prerequisites checked automatically",
+      "text": "PIM Manager checks its own permissions, licences and workload access daily. Entra ID roles and Intune need no onboarding when the engine has its permissions."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "The engine gets read access to all Azure subscriptions for Discovery, and the Review page hides PIM Manager's own identities, the Support app and break-glass accounts by default."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Commit queue shows only real blockers",
+      "text": "The commit queue now shows only what blocks a commit; warnings stay on Check for problems and no longer show in red."
+    },
+    {
+      "title": "Update ring shown on a fresh install",
+      "text": "On a fresh install, the header shows the configured update ring instead of \"not recorded\"."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.301",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "Installing the updater stops early with a clear message when a version is missing.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Installer checks the version exists",
+      "text": "Before creating anything, the update installer checks that both the version it installs and the one it would upgrade to exist, and stops clearly if not."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.584",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Managed tenant installations no longer stop at the database step.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Database setup signs in correctly",
+      "text": "On a managed tenant install, setting up Azure SQL could fail with a login error. Setup now signs in to the new database correctly."
+    }
+  ]
+}

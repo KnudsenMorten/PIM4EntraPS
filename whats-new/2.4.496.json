@@ -1,0 +1,22 @@
+{
+  "version": "2.4.496",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "You now hear about every time a safety guard protects your data.",
+  "new": [
+    {
+      "title": "See every safety guard that steps in",
+      "text": "When a guard holds something to protect your data, you get a mail, it shows under Jobs, and it is recorded in the audit trail."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Status telemetry on by default",
+      "text": "Status telemetry to Invardia is now on by default. You can switch it off under Settings > Features."
+    },
+    {
+      "title": "Clearer AD group creation errors",
+      "text": "When the hybrid worker cannot create new AD groups, the message now names the missing right and the group to grant it to."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.601",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "External companies save at once and show the saved values right away.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "External companies save from the row",
+      "text": "An open company row has a Save button that saves at once. The list then shows the saved values without reloading the page."
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "version": "3.0.40",
+  "date": "2026-11-05",
+  "type": "feature",
+  "summary": "PIM Manager shows your own environment name everywhere, and new installations give support read-only access.",
+  "new": [
+    {
+      "title": "Your environment name shows everywhere",
+      "text": "PIM Manager shows the environment name you keep in Invardia in mail subjects, exports, the environment report, the header and the browser tab."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Support access is read-only by default",
+      "text": "A new installation gives Invardia support read-only database access, with admin rights only during an open support session."
+    }
+  ]
+}

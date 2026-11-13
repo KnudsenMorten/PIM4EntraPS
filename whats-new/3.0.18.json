@@ -1,0 +1,17 @@
+{
+  "version": "3.0.18",
+  "date": "2026-11-02",
+  "type": "feature",
+  "summary": "One installer now serves every edition, with no edition to choose.",
+  "new": [
+    {
+      "title": "One installer for Community and Pro",
+      "text": "One installer file serves Community, Pro and Trial, with no edition to choose in the command. The update ring defaults to 3."
+    },
+    {
+      "title": "Install through the Invardia Support app",
+      "text": "An install can be run through the Invardia Support app, which gets Troubleshoot access by default."
+    }
+  ],
+  "fixes": []
+}

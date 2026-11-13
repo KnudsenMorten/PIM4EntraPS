@@ -1,0 +1,22 @@
+{
+  "version": "3.1.13",
+  "date": "2026-11-12",
+  "type": "feature",
+  "summary": "You can now create and manage access packages in PIM Manager without touching your existing groups.",
+  "new": [
+    {
+      "title": "Create access packages in PIM Manager",
+      "text": "Use Create > Access package to make one, then list, view, pause or resume it. Packages also show in the Access map."
+    },
+    {
+      "title": "Each package gets its own new groups",
+      "text": "Every package gets new groups ending in -AP, locked to it. Your existing groups are never touched, and a package pauses if anything is unclear."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No orphan-group mails for new installs",
+      "text": "An install with no definitions yet no longer sends orphan-group warnings. Its groups show as not imported yet."
+    }
+  ]
+}

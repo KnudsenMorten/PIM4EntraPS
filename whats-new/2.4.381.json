@@ -1,0 +1,17 @@
+{
+  "version": "2.4.381",
+  "date": "2026-09-19",
+  "type": "fix-only",
+  "summary": "Defender XDR role assignments are created again, and template imports no longer offer duplicate groups.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Defender XDR role assignments work",
+      "text": "Microsoft refused every new Defender XDR role assignment. They are now created, and the next run assigns every group that was waiting for its role."
+    },
+    {
+      "title": "Templates reuse existing groups",
+      "text": "Importing a permission template from Templates now reuses groups you already have instead of offering duplicates, and the card says how many it reuses."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "version": "2.4.338",
+  "date": "2026-09-13",
+  "type": "feature",
+  "summary": "PIM Manager is ready to replace v1, managing Azure resource policies and the full admin lifecycle.",
+  "new": [
+    {
+      "title": "Azure resource PIM policies are managed",
+      "text": "Durations, MFA, justification, notifications and approval come from your policy templates. Approval that is already on is never removed."
+    },
+    {
+      "title": "A safety brake on policy changes",
+      "text": "A run that would change many policies or weaken protection changes nothing and shows the plan for approval in Jobs, Engine logs & errors."
+    },
+    {
+      "title": "Full admin lifecycle",
+      "text": "Admin accounts are created when due and kept in step. Offboarding runs on its own schedule, and disabled admins stay disabled."
+    },
+    {
+      "title": "Workload roles applied",
+      "text": "Defender, Intune, enterprise application, Power BI, Power Platform, Business Central, Azure DevOps and Azure roles in your data are applied, with exemptions."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Your changes are carried out",
+      "text": "Removals, eligible and active switches, duration changes and auto-extend are applied. Bulk removals are held for review."
+    },
+    {
+      "title": "Manager needs its database to start",
+      "text": "Settings, access and templates now live only in the database, and templates upgrade automatically when unchanged.",
+      "action": "Make sure the Manager can reach its database before updating, as it no longer starts without it."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Temporary Access Passes respect a start date, reminders and reports have real content, Pending changes shows real names, and audit times are correct."
+    }
+  ]
+}

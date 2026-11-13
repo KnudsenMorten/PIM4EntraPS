@@ -1,0 +1,13 @@
+{
+  "version": "2.4.606",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Older installations no longer get reminder mails for the new Policies step.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No reminder mail for older installations",
+      "text": "An installation that existed before the Policies step in Get Started no longer gets a reminder mail for it. The step stays open on the page."
+    }
+  ]
+}

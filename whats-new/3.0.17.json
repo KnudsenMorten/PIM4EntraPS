@@ -1,0 +1,26 @@
+{
+  "version": "3.0.17",
+  "date": "2026-11-02",
+  "type": "feature",
+  "summary": "Installing takes two lines, and Trial and Pro licences arrive by themselves.",
+  "new": [
+    {
+      "title": "Your licence arrives by itself",
+      "text": "Trial and Pro installs ask Invardia for their licence right after the install. A trial needs no approval."
+    },
+    {
+      "title": "Install with two lines",
+      "text": "Install with two lines, with every setting as a parameter and no answer file."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Support database access needs your consent",
+      "text": "Time-limited support database access is given only with your consent."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The support session shows its end time in UTC."
+    }
+  ]
+}

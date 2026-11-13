@@ -1,0 +1,13 @@
+{
+  "version": "3.0.53",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "Removing a job identity from the database admin group now works reliably on every group.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Database admin group removal is reliable",
+      "text": "Taking a job identity out of the database admin group now works on role-assignable groups that hide their members, and is checked from both sides."
+    }
+  ]
+}

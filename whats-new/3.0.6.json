@@ -1,0 +1,22 @@
+{
+  "version": "3.0.6",
+  "date": "2026-10-29",
+  "type": "feature",
+  "summary": "Pro can now build a management report as a PowerPoint and mail it every month.",
+  "new": [
+    {
+      "title": "Management report as a PowerPoint",
+      "text": "In Pro, build a PowerPoint under Reports > Management report from the sections and period you pick."
+    },
+    {
+      "title": "Monthly report by mail",
+      "text": "Mail a monthly report to the people you choose. It is off by default."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Missing figures are labelled",
+      "text": "A report figure that cannot be read says so instead of showing 0."
+    }
+  ]
+}

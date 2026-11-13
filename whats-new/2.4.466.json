@@ -1,0 +1,17 @@
+{
+  "version": "2.4.466",
+  "date": "2026-09-30",
+  "type": "fix-only",
+  "summary": "The live view of the PIM for AD sync now shows data, and settled Remove rows are cleared again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The hybrid sync live view shows data",
+      "text": "The live view of the continuous hybrid sync stayed empty. The hybrid worker now sends its live data while the view is open."
+    },
+    {
+      "title": "Remove rows with nothing live are cleared",
+      "text": "A Remove row that found nothing live in the tenant stayed in place for good. It is now cleared once the second check confirms there is nothing to remove."
+    }
+  ]
+}

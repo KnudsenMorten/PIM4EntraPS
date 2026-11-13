@@ -1,0 +1,13 @@
+{
+  "version": "2.4.271",
+  "date": "2026-09-01",
+  "type": "fix-only",
+  "summary": "Smaller fixes and improvements.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Smaller fixes and improvements",
+      "text": "This version contains smaller fixes and improvements."
+    }
+  ]
+}

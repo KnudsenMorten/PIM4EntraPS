@@ -1,0 +1,17 @@
+{
+  "version": "2.4.352",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Reviewing standing access opens instantly and no longer slows the Manager for everyone else.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Standing access opens instantly",
+      "text": "Review standing access, Revoke and the expiring-access tile now use a snapshot taken every 2 hours, and show its time. Before, each opening took minutes."
+    },
+    {
+      "title": "Refresh and revoke update the snapshot",
+      "text": "Refresh queues a new read, and a revoke queues one automatically. A revoked row shows revoke queued until it is gone."
+    }
+  ]
+}

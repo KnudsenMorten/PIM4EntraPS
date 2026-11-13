@@ -1,0 +1,30 @@
+{
+  "version": "2.4.335",
+  "date": "2026-09-12",
+  "type": "feature",
+  "summary": "Queued changes are easy to see, and the admin screen opens without waiting.",
+  "new": [
+    {
+      "title": "Choose the admin word in account names",
+      "text": "You can set the word used for admin accounts, for example \"adm\" instead of \"admin\"."
+    },
+    {
+      "title": "New direct groups ask their type",
+      "text": "Creating a direct group asks whether it is a role, organisation, department, process or resource group."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Queued changes show a counter",
+      "text": "Pending changes shows a counter that updates at once, and within a minute for changes queued by other admins. Three menu entries for the queue are now one."
+    },
+    {
+      "title": "Admin list appears at once",
+      "text": "Temporary Access Pass status is checked per admin with Check, and Edit sits on the admin's own row."
+    },
+    {
+      "title": "Passes go to the forwarding address",
+      "text": "A Temporary Access Pass is mailed to the admin's forwarding address, not their manager. Values that are not email addresses are refused."
+    }
+  ]
+}

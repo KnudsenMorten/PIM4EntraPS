@@ -1,0 +1,17 @@
+{
+  "version": "2.4.439",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Department owners can manage Azure access on their own resources without a central administrator.",
+  "new": [
+    {
+      "title": "Department owners delegate on their resources",
+      "text": "Give a department its Azure scopes, and its owners can create, change and commit the department's Azure permission groups at level 3 and below. This is part of Pro."
+    },
+    {
+      "title": "Clear limits for department owners",
+      "text": "Owners cannot touch other departments, level 2 or above, or tier 0, and every refusal is in the audit trail. A department with no Azure scopes gives no Azure rights."
+    }
+  ],
+  "fixes": []
+}

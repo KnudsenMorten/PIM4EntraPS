@@ -1,0 +1,13 @@
+{
+  "version": "2.4.354",
+  "date": "2026-09-14",
+  "type": "fix-only",
+  "summary": "The faster membership check now sees every existing membership.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Faster checks miss no membership",
+      "text": "Some older group nestings were re-checked one by one, though nothing was changed. PIM Manager now confirms them, and every removal, against the group itself."
+    }
+  ]
+}

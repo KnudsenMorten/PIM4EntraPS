@@ -1,0 +1,17 @@
+{
+  "version": "2.4.611",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Active assignments behaves better on large tenants, and alert mails are short and clear.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Active assignments says what is happening",
+      "text": "On a large tenant, a stored list that cannot be loaded now says so instead of starting a new read. Repeat loads are faster."
+    },
+    {
+      "title": "Alert mails in one short table",
+      "text": "Alert mails show who acts, the status, the problem, what to do, the findings one per line, and where to get support."
+    }
+  ]
+}

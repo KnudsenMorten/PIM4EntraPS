@@ -1,0 +1,30 @@
+{
+  "version": "2.4.401",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "You can undo a link on the Access map, and Pending changes is faster and easier to read.",
+  "new": [
+    {
+      "title": "Undo a staged link",
+      "text": "On the Access map, Ctrl+click a staged link again, drop on it again or press the x to take it back. Committed links must be revoked instead."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No duplicate links",
+      "text": "Repeating a click can no longer stage the same link twice, and repeated messages no longer stack up."
+    },
+    {
+      "title": "Pending changes loads faster",
+      "text": "Discarded entries are loaded only when you tick Show discarded. The counts still cover everything, and failed entries are always shown."
+    },
+    {
+      "title": "Pending changes in plain words",
+      "text": "Entries now say what they do, for example cataloguing a named Entra ID role, instead of showing a technical key."
+    },
+    {
+      "title": "Discovery follows your policy",
+      "text": "Role discovery now respects the Discovery policy you set. With flag, it only reports what it found and queues nothing."
+    }
+  ]
+}

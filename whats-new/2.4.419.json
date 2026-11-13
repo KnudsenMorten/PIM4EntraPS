@@ -1,0 +1,14 @@
+{
+  "version": "2.4.419",
+  "date": "2026-09-23",
+  "type": "fix-only",
+  "summary": "An environment with a private container registry can update itself every night again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Nightly updates work with private registries",
+      "text": "With public registry access turned off, every nightly update failed and the environment stayed on its old version. Updates now build on your own private build pool.",
+      "action": "Build the first update to this version on your private build pool by hand; after that the environment updates itself."
+    }
+  ]
+}

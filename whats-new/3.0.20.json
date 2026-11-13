@@ -1,0 +1,13 @@
+{
+  "version": "3.0.20",
+  "date": "2026-11-03",
+  "type": "security",
+  "summary": "PIM Manager roles are linked to the person, not to the sign-in name.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Manager access follows the person",
+      "text": "Each Manager access entry is linked to the person's Entra object. Nobody loses access during the change."
+    }
+  ]
+}

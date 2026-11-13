@@ -1,0 +1,35 @@
+{
+  "version": "2.4.491",
+  "date": "2026-10-04",
+  "type": "feature",
+  "summary": "The hybrid worker is better protected, and PIM Manager can now report status and take Pro updates from Invardia.",
+  "new": [
+    {
+      "title": "Status reports to Invardia (optional)",
+      "text": "PIM Manager can report job results hourly and its version daily, so support sees a failure before you call. Switch it on under Settings > Features."
+    },
+    {
+      "title": "Pro updates from Invardia (optional)",
+      "text": "A Pro installation can take signed releases for its ring from Invardia, checked before anything moves. Switch it on under Settings > Features."
+    },
+    {
+      "title": "Ready script for the hub network owner",
+      "text": "For a private installation, setup writes the script the hub network team runs to create their side of the connection."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Safer database administrator group",
+      "text": "Setup now only makes a role-assignable group the database administrator. Otherwise it keeps the current one and says how to recreate the group."
+    },
+    {
+      "title": "Hybrid worker without a public address",
+      "text": "The hybrid worker now only connects outward, and nothing can open a connection to it.",
+      "action": "On a hybrid worker installed earlier, run the hybrid worker outbound setup once; it keeps the same address."
+    },
+    {
+      "title": "Admin updates no longer fail after removals",
+      "text": "A run whose changes were already made no longer fails on its follow-up steps; you get a warning instead."
+    }
+  ]
+}

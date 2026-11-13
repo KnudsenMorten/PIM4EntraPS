@@ -1,0 +1,17 @@
+{
+  "version": "3.0.81",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "The mail check gives a complete answer, and you no longer see rights you do not need.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail check reads both sending identities",
+      "text": "The mail check now checks both sending identities instead of showing a line as not checked. If it cannot read them, the Mail sender step no longer stays open."
+    },
+    {
+      "title": "User Access Administrator shown only when needed",
+      "text": "It is no longer mentioned when no Azure resource delegation is defined."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.505",
+  "date": "2026-10-05",
+  "type": "fix-only",
+  "summary": "Every time PIM Manager shows is now in your own time zone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Times in your own time zone",
+      "text": "Every page now shows times in your browser's time zone, daylight saving included. Prints made as evidence name the time zone."
+    }
+  ]
+}

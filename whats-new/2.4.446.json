@@ -1,0 +1,30 @@
+{
+  "version": "2.4.446",
+  "date": "2026-09-26",
+  "type": "feature",
+  "summary": "Discovery becomes one simple list you can act on in a click, and commits are no longer reported as failures while they roll out.",
+  "new": [
+    {
+      "title": "Discovery is one list: Create or Ignore",
+      "text": "Discovery lists what is in your tenant but not yet in PIM Manager. Create or Ignore one item, several, or a whole kind in one click."
+    },
+    {
+      "title": "Create stages a permission group",
+      "text": "Create turns an Azure scope or Power BI workspace into a permission group named by your convention, ready in Review & commit. Nothing is granted to anyone."
+    },
+    {
+      "title": "See and re-add ignored items",
+      "text": "The Ignored view lists ignored items with who ignored them and when, and Re-add brings one back."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No alerts while a commit rolls out",
+      "text": "For 45 minutes after a change, a failed run or drift is not emailed, giving the commit time to finish. Changes waiting for your approval are still reported at once."
+    },
+    {
+      "title": "Duplicate Defender XDR roles are removed",
+      "text": "Duplicate Defender XDR roles are now removed on the next run, also when a group is already bound to one of the copies."
+    }
+  ]
+}

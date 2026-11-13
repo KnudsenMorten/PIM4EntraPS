@@ -1,0 +1,17 @@
+{
+  "version": "2.4.465",
+  "date": "2026-09-30",
+  "type": "feature",
+  "summary": "You set your own Active Directory naming for PIM for AD, and you can watch the sync as it happens.",
+  "new": [
+    {
+      "title": "Your own naming for PIM for AD",
+      "text": "Settings > Hybrid Active Directory sets how PIM groups, admin accounts and per-server groups map to your Active Directory. A preview shows the names the hybrid worker will use."
+    },
+    {
+      "title": "A live view of the hybrid sync",
+      "text": "Jobs > hybrid-ad-sync > Live view follows every pass: members per group, time left in AD against the PIM activation, and every add, correction and removal."
+    }
+  ],
+  "fixes": []
+}

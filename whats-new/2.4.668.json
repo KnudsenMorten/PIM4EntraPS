@@ -1,0 +1,22 @@
+{
+  "version": "2.4.668",
+  "date": "2026-10-23",
+  "type": "feature",
+  "summary": "One administrator can now offboard most admins directly, with a second approval kept for the most sensitive accounts.",
+  "new": [
+    {
+      "title": "One administrator can offboard an admin",
+      "text": "You can now delete, remove, disable or offboard an admin directly. A second administrator approves only for tier 0 admins, break-glass accounts, or when the Pro second approver is on."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Every offboarding step is audited",
+      "text": "Deleting is always done by a person, never automatically, and every such action is in the audit trail."
+    },
+    {
+      "title": "All levels L0-L9 are counted",
+      "text": "Home and the per-level count now include levels L6-L9. An L7 group was counted as L1 before."
+    }
+  ]
+}

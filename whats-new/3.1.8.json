@@ -1,0 +1,26 @@
+{
+  "version": "3.1.8",
+  "date": "2026-11-11",
+  "type": "feature",
+  "summary": "You now see exactly what grants access outside PIM Manager, without the noise of ordinary groups.",
+  "new": [
+    {
+      "title": "See exactly who has access outside PIM Manager",
+      "text": "Review all delegations shows people, apps and deleted accounts with an Entra or Azure role, role-holding groups and their members, and apps with high-privilege permissions."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Less noise in delegation reviews",
+      "text": "Ordinary groups and their members are no longer listed, and the Discovery and gaps report speaks only about PIM groups and PIM admins."
+    },
+    {
+      "title": "Delegation overview reads less",
+      "text": "The delegation overview reads far less, the Azure part once a night, and the page shows when each part was read."
+    },
+    {
+      "title": "Simpler office account creation",
+      "text": "When you create an office account, the steps that do not apply are skipped."
+    }
+  ]
+}

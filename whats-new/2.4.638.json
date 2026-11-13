@@ -1,0 +1,13 @@
+{
+  "version": "2.4.638",
+  "date": "2026-10-15",
+  "type": "feature",
+  "summary": "Support can see what went wrong and how to fix it before you call.",
+  "new": [
+    {
+      "title": "Error codes help support help you",
+      "text": "Every problem a job reports now carries a stable error code and its cause, so support knows the fix before you call. The switch Send error codes and causes to Invardia is on by default."
+    }
+  ],
+  "fixes": []
+}

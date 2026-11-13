@@ -1,0 +1,13 @@
+{
+  "version": "2.4.350",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Policy errors now name the role and scope they concern.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Policy errors name the role and scope",
+      "text": "A failing Azure resource or PIM for Groups policy in Engine logs & errors now names its role, scope and template instead of showing empty fields."
+    }
+  ]
+}

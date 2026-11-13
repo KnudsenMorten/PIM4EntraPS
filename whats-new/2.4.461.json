@@ -1,0 +1,26 @@
+{
+  "version": "2.4.461",
+  "date": "2026-09-29",
+  "type": "feature",
+  "summary": "The hybrid worker can onboard your Windows servers, and the Jobs page shows at once if the worker has stopped.",
+  "new": [
+    {
+      "title": "Server onboarding on the hybrid worker",
+      "text": "Discovery offers each Windows server without a PIM group; Create stages its per-server group. The hybrid worker then adds that group to the server's local Administrators and never removes anyone."
+    },
+    {
+      "title": "The hybrid worker on the Jobs page",
+      "text": "Every on-premises AD job shows where it runs: on the worker (green), plan-only (amber) or worker not seen (red). A stopped worker is visible at once."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clearer rules for custom Manager names",
+      "text": "A custom Manager name is optional. On an environment reachable from the internet it must be a public subdomain you own; private names are refused with the options."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "The hybrid worker's setup now defaults to a 4 GB virtual machine."
+    }
+  ]
+}

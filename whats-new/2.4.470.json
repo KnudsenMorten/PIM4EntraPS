@@ -1,0 +1,21 @@
+{
+  "version": "2.4.470",
+  "date": "2026-10-01",
+  "type": "fix-only",
+  "summary": "Drift now shows every extra item, and Admin accounts always shows department owners.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Drift shows every extra",
+      "text": "Drift now lists every extra item. An area over the removal limit says its removals would be held for review."
+    },
+    {
+      "title": "Department owners shown correctly",
+      "text": "Admin accounts no longer says a department has no owners after you opened Reports or Look up a role."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The connectivity check reaches Azure again, a hand-set registry name is cleaned up, and a repeated message is fixed."
+    }
+  ]
+}

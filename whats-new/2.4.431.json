@@ -1,0 +1,17 @@
+{
+  "version": "2.4.431",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "You learn when a delegation points at an Azure resource or role that no longer exists.",
+  "new": [
+    {
+      "title": "A daily check of delegation targets",
+      "text": "A new daily job checks that the Azure resources, scopes and roles your delegations use still exist. Missing ones are listed at the top of Coverage & gaps; you decide what to remove."
+    },
+    {
+      "title": "Mail when something disappears",
+      "text": "New findings are mailed once to your alert recipients. You can switch the mail off under Alerting and change the schedule on the Jobs page."
+    }
+  ],
+  "fixes": []
+}

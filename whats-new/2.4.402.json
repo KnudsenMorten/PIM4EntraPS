@@ -1,0 +1,13 @@
+{
+  "version": "2.4.402",
+  "date": "2026-09-22",
+  "type": "fix-only",
+  "summary": "New Microsoft Entra roles no longer add needless work to your Pending changes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New Entra roles are reported, not queued",
+      "text": "A newly found built-in Entra role is now reported in the discovery mail instead of being queued. Uncovered roles are listed as gaps on Coverage & gaps, with a proposal."
+    }
+  ]
+}

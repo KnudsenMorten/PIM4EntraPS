@@ -1,0 +1,13 @@
+{
+  "version": "2.4.588",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Managed tenants receive changes from the managing tenant again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Managed tenants receive changes again",
+      "text": "On a managed-tenant installation, the step that pulls changes from the managing tenant no longer refuses to run."
+    }
+  ]
+}

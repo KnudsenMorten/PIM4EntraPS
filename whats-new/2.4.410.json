@@ -1,0 +1,38 @@
+{
+  "version": "2.4.410",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Replicated delegations reach the managed tenants they should, and several dead ends in daily work are gone.",
+  "new": [
+    {
+      "title": "Admins follow the delegations that need them",
+      "text": "An admin account can be set to \"Only where a delegation needs this admin\", so it is created in a managed tenant exactly where a replicated delegation names it."
+    },
+    {
+      "title": "Set replication and ring in bulk",
+      "text": "Tick rows in All records and use Set replication to... and Move to ring... in the selection bar."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Unpublished delegations are listed, not dropped",
+      "text": "A replicated delegation whose admin is not replicated was silently dropped. It is now listed as not published, with the fix in the sentence."
+    },
+    {
+      "title": "Replicated rows must name a ring",
+      "text": "A row set to replicate with an empty ring reached nobody. Saving such a row is now refused."
+    },
+    {
+      "title": "Cloning a row no longer blocks commits",
+      "text": "A cloned row now gets its own group tag. Existing duplicates are listed, with Show me these rows and a one-click fix."
+    },
+    {
+      "title": "Waiting items no longer fail jobs",
+      "text": "An item waiting for a group created in the same cycle is now reported as waiting, not as a failed job. It becomes a failure if it still waits hours later."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Removing an assignment updates the status at once, an already-removed Azure assignment counts as done, and the Access map, Commit selected and Backups / Undo are clearer."
+    }
+  ]
+}

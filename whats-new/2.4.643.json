@@ -1,0 +1,17 @@
+{
+  "version": "2.4.643",
+  "date": "2026-10-16",
+  "type": "fix-only",
+  "summary": "Community installations never ask for a Pro licence, and new installations start with the least database rights.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community never asks for a Pro licence",
+      "text": "A Community installation no longer asks Invardia for a Pro licence."
+    },
+    {
+      "title": "Least database rights from day one",
+      "text": "New installations get the least-privilege database model during setup."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.595",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Large batches of policy changes wait for a SuperAdmin's approval again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Many policy changes wait for approval",
+      "text": "Many policy changes in one run wait for approval again, and a SuperAdmin of the tenant approves them."
+    },
+    {
+      "title": "Warnings are amber, not red",
+      "text": "Warnings now show in amber, so red means a real error."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The Guards page no longer shows a run counter, the Demo mode card appears only in a demo environment, and licensed installations are no longer told they update like Community."
+    }
+  ]
+}

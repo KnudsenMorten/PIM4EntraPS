@@ -1,0 +1,13 @@
+{
+  "version": "2.4.580",
+  "date": "2026-10-10",
+  "type": "feature",
+  "summary": "Installing through Invardia needs just one sign-in.",
+  "new": [
+    {
+      "title": "One sign-in when installing through Invardia",
+      "text": "When Invardia's installer has already signed you in, PIM Manager's installer reuses that sign-in after checking it. The browser opens only for what is missing."
+    }
+  ],
+  "fixes": []
+}

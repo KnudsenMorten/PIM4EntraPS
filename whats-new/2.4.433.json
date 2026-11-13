@@ -1,0 +1,18 @@
+{
+  "version": "2.4.433",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "One session revoke on the managing tenant now signs an administrator out of every managed tenant, which matters most when someone leaves.",
+  "new": [
+    {
+      "title": "One revoke reaches every managed tenant",
+      "text": "When you revoke an administrator's sessions on the managing tenant, the Manager asks whether to revoke them in managed tenants too. Each tenant then does so without its own approval."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Revokes are reliable and safe",
+      "text": "Each tenant carries out a revoke once, and removing the administrator right after no longer cancels it. Break-glass accounts are never revoked."
+    }
+  ]
+}

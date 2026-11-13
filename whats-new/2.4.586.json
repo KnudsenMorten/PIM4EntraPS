@@ -1,0 +1,13 @@
+{
+  "version": "2.4.586",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "A brief network drop no longer stops an installation.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Installs survive a dropped connection",
+      "text": "When the connection to Azure drops for a moment, setup now retries up to three times instead of stopping the installation."
+    }
+  ]
+}

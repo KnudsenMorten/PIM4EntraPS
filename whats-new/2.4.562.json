@@ -1,0 +1,13 @@
+{
+  "version": "2.4.562",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Installing on a brand-new Azure subscription works.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup works on brand-new subscriptions",
+      "text": "On a new Azure subscription, setup now switches on the Azure services it needs before it uses them."
+    }
+  ]
+}

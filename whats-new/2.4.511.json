@@ -1,0 +1,22 @@
+{
+  "version": "2.4.511",
+  "date": "2026-10-06",
+  "type": "feature",
+  "summary": "Every configuration change is now recorded in full, laying the ground for undo.",
+  "new": [
+    {
+      "title": "Every change is recorded",
+      "text": "Every configuration change is now recorded with before and after, who made it and who approved it. The record can never be changed."
+    },
+    {
+      "title": "Admin accounts in the delegations table",
+      "text": "Admins are listed first, each with Remove all delegations and Disable & remove delegations, staged in Pending changes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "External Companies shows departments",
+      "text": "The sponsor department list now loads the first time the page opens, and says so when no department is defined yet."
+    }
+  ]
+}

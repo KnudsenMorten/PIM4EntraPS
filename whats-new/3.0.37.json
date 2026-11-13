@@ -1,0 +1,26 @@
+{
+  "version": "3.0.37",
+  "date": "2026-11-04",
+  "type": "feature",
+  "summary": "You can export and import templates, and nobody needs standing database admin rights any more.",
+  "new": [
+    {
+      "title": "Export and import a template",
+      "text": "Use Settings > Copy & tools > Export and import a template. Every imported row waits for your review in Pending changes."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No person needs database admin rights",
+      "text": "Every installation gets its own in-network database job, kept by updates, and the setup checks report it."
+    },
+    {
+      "title": "Support database access follows your consent",
+      "text": "Invardia support has read-only access, with admin rights only during an open support session and for at most 8 hours."
+    },
+    {
+      "title": "Azure roles use the longest allowed duration",
+      "text": "An Azure role assignment asks for the longest duration the role's PIM policy allows at that scope."
+    }
+  ]
+}

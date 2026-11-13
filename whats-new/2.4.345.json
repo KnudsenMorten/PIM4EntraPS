@@ -1,0 +1,21 @@
+{
+  "version": "2.4.345",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Large PIM for Groups policy changes are always held for approval, and group policy updates are much faster.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Safety brake covers group policies",
+      "text": "Large or weakening PIM for Groups policy changes are now always held for approval, exactly like Entra role and Azure resource policies."
+    },
+    {
+      "title": "Faster group policy updates",
+      "text": "Group policy updates send only what changed, so large policy alignments run many times faster."
+    },
+    {
+      "title": "Governance opens quickly",
+      "text": "The drift check runs only when you click Check for drift (slow), so opening Governance no longer slows the Manager."
+    }
+  ]
+}

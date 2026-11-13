@@ -1,0 +1,22 @@
+{
+  "version": "2.4.494",
+  "date": "2026-10-04",
+  "type": "feature",
+  "summary": "On a managed tenant, access sent by the managing tenant is now clearly marked and protected from change.",
+  "new": [
+    {
+      "title": "Central access marked read-only",
+      "text": "On a managed tenant, everything from the managing tenant is marked CENTRAL and read-only on the Access map and Review current delegations. Central admins can still get local access."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "AD placements in one place",
+      "text": "The admin account OUs moved to Settings > Hybrid AD & workloads, next to the OU for new AD groups."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The environment name examples are now generic."
+    }
+  ]
+}

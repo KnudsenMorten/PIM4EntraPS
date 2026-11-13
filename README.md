@@ -13,7 +13,8 @@
 > **[Install in two lines](#install)** &nbsp;·&nbsp;
 > **[Download the latest release](https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest)** &nbsp;·&nbsp;
 > **[Install guide](https://invardia.com/docs/pim-manager/setup/#community-edition)** &nbsp;·&nbsp;
-> [Community vs Pro](#community-and-pro)
+> [Community vs Pro](#community-and-pro) &nbsp;·&nbsp;
+> [What's new](WHATSNEW.md)
 
 ![PIM Manager Home: engine health, validation findings, break-glass status, delegation by level and expiring access](docs/img/features/home-dashboard-1.png)
 

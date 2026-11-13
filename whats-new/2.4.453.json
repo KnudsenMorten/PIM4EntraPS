@@ -1,0 +1,29 @@
+{
+  "version": "2.4.453",
+  "date": "2026-09-27",
+  "type": "feature",
+  "summary": "Reviewers can remove a single access, you can act on drift directly, and the drift mail follows your schedule.",
+  "new": [
+    {
+      "title": "Remove one access in a review",
+      "text": "In a department access review, tick the access a person no longer needs and choose Remove. Only that access is staged for removal; the account keeps the rest."
+    },
+    {
+      "title": "Unanswered reviews can request removal",
+      "text": "A review rule can now request removal for people still undecided after the reminders. A PIM administrator approves or denies each request; by default undecided people keep access."
+    },
+    {
+      "title": "Delete, Keep or Ignore on Drift",
+      "text": "On the Drift page, an extra item can be deleted after commit, kept so PIM Manager manages it, or ignored in one click. Ignored items can be re-added."
+    },
+    {
+      "title": "Drift mail on your schedule",
+      "text": "The drift alert mail now goes out monthly by default. A SuperAdmin can change it to daily, weekly or quarterly on the Drift page."
+    },
+    {
+      "title": "Access reviews are per department only",
+      "text": "A group's review cycle no longer creates a Microsoft Entra access review per group. Reviews created earlier stay in Entra ID until you remove them."
+    }
+  ],
+  "fixes": []
+}

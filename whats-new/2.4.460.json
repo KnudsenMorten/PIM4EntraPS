@@ -1,0 +1,17 @@
+{
+  "version": "2.4.460",
+  "date": "2026-09-29",
+  "type": "fix-only",
+  "summary": "The hybrid worker's plan is now easy to review before you let it change anything.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The hybrid worker log lists every change",
+      "text": "The worker now writes one line per group or member it would change, or changed, with the reason. The continuous sync writes a new plan only when it changes."
+    },
+    {
+      "title": "Quieter handling of nested groups",
+      "text": "A group that is a member of a PIM group is still skipped, now without an error line in the worker log on every pass."
+    }
+  ]
+}

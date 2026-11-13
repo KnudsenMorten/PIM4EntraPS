@@ -1,0 +1,13 @@
+{
+  "version": "3.0.49",
+  "date": "2026-11-06",
+  "type": "fix-only",
+  "summary": "Updates on very large tenants no longer give up while a long snapshot is still running.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates wait for long snapshots",
+      "text": "An update now waits up to the active-assignments snapshot's usual length, at most 3 hours, instead of 20 minutes. Progress shows every 5 minutes, and a run is never stopped."
+    }
+  ]
+}

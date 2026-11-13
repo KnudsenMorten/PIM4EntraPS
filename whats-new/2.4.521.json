@@ -1,0 +1,26 @@
+{
+  "version": "2.4.521",
+  "date": "2026-10-07",
+  "type": "feature",
+  "summary": "You can now drop a single queued change with one click, and false guard alarms are gone.",
+  "new": [
+    {
+      "title": "Remove an entry from the change queue",
+      "text": "Every pending or failed entry in the change queue has a Remove from queue button. You give a reason; the entry is never applied and stays in the history."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No false removal budget alarm",
+      "text": "Drift no longer raises the removal budget warning on the Guards panel for items the engine never removes on its own."
+    },
+    {
+      "title": "Fresh data right after each update",
+      "text": "After an update, the engine refreshes its data and the drift check at its next run instead of hours later."
+    },
+    {
+      "title": "Record list no longer cut off",
+      "text": "The list of record types now fits the window, so you can reach the last entries."
+    }
+  ]
+}

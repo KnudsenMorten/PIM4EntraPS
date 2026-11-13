@@ -1,0 +1,13 @@
+{
+  "version": "3.0.9",
+  "date": "2026-10-31",
+  "type": "fix-only",
+  "summary": "Browser sign-ins in the setup and PIM Activator scripts now finish without an error page.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Browser sign-ins finish properly",
+      "text": "Browser sign-ins in the setup and PIM Activator scripts no longer end with \"This site can't be reached\"."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "3.0.52",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "The Community release is fully separate from Pro, and managed tenants use least-privilege database access.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community edition runs as before",
+      "text": "The public Community release no longer contains Pro code, and Community installations install, update and run as before. Tenant preparation works in Community."
+    },
+    {
+      "title": "Least-privilege database access on managed tenants",
+      "text": "On a managed tenant, every update gives the job that pulls changes its own least-privilege database user and reports whether it still uses the database admin group."
+    }
+  ]
+}

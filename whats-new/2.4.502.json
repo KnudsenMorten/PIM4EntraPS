@@ -1,0 +1,26 @@
+{
+  "version": "2.4.502",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "You can now enable or disable admin accounts directly, and the request portal is easier to use.",
+  "new": [
+    {
+      "title": "Enable and disable admins",
+      "text": "Admin accounts has Enable and Disable per row or selection. Disable & remove delegations keeps the account but takes its access away on the next run."
+    },
+    {
+      "title": "Your name and support mail on the portal",
+      "text": "Settings > Access requests (RFA) sets the company name and support e-mail the request portal shows."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Request portal finds more people",
+      "text": "The portal finds admins and consultants by admin account, contact e-mail or forward address, and sends the PIN where they read mail."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "The Stop managing dialog says Stop managing instead of Delete, and the portal's sign-in page and header are clearer."
+    }
+  ]
+}

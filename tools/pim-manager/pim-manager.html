@@ -197,6 +197,18 @@
     font-size:10px; font-weight:600;
   }
   .nav-group-item.has-badge .nav-item-badge { display:inline-block; }
+  /* WHATS-NEW-1 (framework): the small "New" label on the What's new entry after an update, until the page is opened once.
+     A word, not a number (menu numbers stay errors / actions only). */
+  .pim-wn-new { display:inline-block; margin-left:6px; padding:0 6px; height:15px; line-height:15px; border-radius:10px;
+    background:#ddf4ff; color:#0969da; border:1px solid #54aeff; font-size:10px; font-weight:600; vertical-align:middle; }
+  .pim-wn-new[hidden] { display:none; }
+  /* WHATS-NEW-1: the shared renderer (tools/pim-manager/whatsnew/whats-new.css, Invardia's, unchanged) themed with PIM
+     Manager's own colours -- ONLY through its --wn-* custom properties. PIM Manager has no dark theme, so this light set
+     also wins over the shared file's dark-scheme defaults (higher specificity). */
+  #whatsnewBody .wn {
+    --wn-accent:#0969da; --wn-fg:#1f2328; --wn-muted:#57606a; --wn-line:#d0d7de; --wn-surface:#ffffff;
+    --wn-radius:8px; --wn-font:-apple-system, "Segoe UI", Roboto, sans-serif;
+  }
   /* Free edition (operator 2026-09-26): a Pro page is listed, dimmed, tagged PRO; a click opens the Free vs Pro page. */
   .nav-group-item.pro-locked, #tabs .tab.pro-locked { opacity:.55; }
   .pro-tag { display:inline-block; margin-left:6px; padding:0 4px; border:1px solid currentColor; border-radius:3px; font-size:9.5px; font-weight:700; letter-spacing:.04em; line-height:14px; vertical-align:1px; }
@@ -1427,6 +1439,7 @@
   <div id="tabs">
     <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e"></span></div>
     <div class="tab" data-tab="docs" title="Documentation: the pages shipped with this version -- architecture, security design, guards, SQL access, releases and every setting.">Documentation</div>
+    <div class="tab" data-tab="whatsnew" title="What's new: the new features and fixes of every release of PIM Manager, newest first.">What's new <span class="pim-wn-new" hidden>New</span></div>
     <div class="tab" data-tab="apiref" title="API and MCP reference: every API route and MCP tool of this version that your role may call.">API and MCP reference</div>
     <div class="tab" data-tab="impact" title="Counters overview: what PIM Manager has done in this environment, cumulative -- each counter with how it is counted.">Counters overview</div>
     <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
@@ -1510,6 +1523,8 @@
   <div id="activatorTab" class="tab-panel"><div id="activatorScrollBody"><div id="activatorBody"></div></div></div>
   <!-- PIM 100.157: Documentation (Settings menu) -- the pages shipped with this version, rendered by the Manager. -->
   <div id="docsTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="docsBody"></div></div>
+  <!-- WHATS-NEW-1 (framework): What's new (Settings menu, beside Documentation) -- drawn by Invardia's shared renderer. -->
+  <div id="whatsnewTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="whatsnewBody"></div></div>
 <div id="apirefTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="apirefBody"></div></div>
   <!-- 100.68: Counters overview (Overview menu) -- the impact counters, each with how it is counted. -->
   <div id="impactTab" class="tab-panel"><div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="impactBody"></div></div>
@@ -3118,6 +3133,8 @@
         // ... and SHIPPED inside each release (owner: "pim must also ship docs inside the gui"), so a private-network install
         // reads them too; the published set stays one link away inside the page.
         { tab: 'docs', label: 'Documentation', desc: 'Architecture, security design, guards, SQL access, releases and every setting -- the pages shipped with this version' },
+        // WHATS-NEW-1 (framework, owner 2026-11-13): What's new -- the Help area of this menu, beside Documentation. Every role.
+        { tab: 'whatsnew', label: "What's new", desc: 'The new features and fixes of every release, newest first' },
         // APIDOC-1 (owner 2026-10-31): the API + MCP reference of the running version, filtered to the signed-in role.
         { tab: 'apiref', label: 'API and MCP reference', desc: 'Every API route and MCP tool of this version that your role may call' },
       ] },
@@ -3236,7 +3253,8 @@
         // the product can tell what is behind it without hovering anything.
         if (proLocked) { item.classList.add('pro-locked'); item.dataset.proLocked = '1'; }
         item.innerHTML = '<span class="nav-item-main">' +
-            '<span class="nav-item-text">' + escapeHtml(spec.label || navTabLabel(tabEl)) + (proLocked ? '<span class="pro-tag" title="Part of PIM Manager Pro">PRO</span>' : '') + '</span>' +
+            '<span class="nav-item-text">' + escapeHtml(spec.label || navTabLabel(tabEl)) + (proLocked ? '<span class="pro-tag" title="Part of PIM Manager Pro">PRO</span>' : '') +
+              (tabKey === 'whatsnew' ? '<span class="pim-wn-new"' + (window.PIM_WN_NEW ? '' : ' hidden') + '>New</span>' : '') + '</span>' +
             '<span class="nav-item-badge" aria-hidden="true"></span>' +
             '<span class="nav-block-badge"></span>' +
           '</span>' +
@@ -3621,6 +3639,7 @@
     try { pimExportRefresh(); pimApplyNameMask(name); } catch (_) { }   // 100.67: the Export menu + hidden names follow the page
     if (name === 'home') renderHome();
     if (name === 'docs') renderDocsPage();   // PIM 100.157
+    if (name === 'whatsnew') renderWhatsNewPage();   // WHATS-NEW-1
     if (name === 'apiref') renderApiRefPage();   // APIDOC-1
     if (name === 'impact') renderImpactPage();   // 100.68
     if (name === 'getstarted') renderGetStarted();
@@ -23419,6 +23438,61 @@
   // PIM 100.157 (owner 2026-10-15: "pim must also ship docs inside the gui"): Settings > Documentation -- the pages SHIPPED
   // with this version (tools/pim-manager/manual), rendered to HTML by the Manager (GET /api/docs, /api/docs/page), so a
   // private-network install reads them with no route to the internet. The published set is one link away.
+  // WHATS-NEW-1 (framework REQUIREMENTS "## WHATS-NEW-1", owner 2026-11-13: "all solutions have a whats new which is human
+  // friendly info from release notes" / "all must have same"): Settings > What's new -- one card per release, newest first,
+  // drawn by Invardia's ONE shared renderer (tools/pim-manager/whatsnew/whats-new.js + whats-new.css, embedded UNCHANGED and
+  // served read-only by the Manager under /app/whats-new/). PIM builds no layout of its own: only its colours are mapped to
+  // the --wn-* custom properties (#whatsnewBody .wn in the style block). The release files come from GET /api/whats-new (the
+  // whats-new/ folder shipped with this version; read-only, every role). The "New" label on the menu entry follows
+  // shouldShowNewBadge / markWhatsNewSeen (this browser): shown after an update until the page is opened once.
+  var PIM_WN_ASSETS = '/app/whats-new/';
+  var PIM_WN_PRODUCT = 'pim-manager';
+  var PIM_WN_MODULE = null;
+  window.PIM_WN_NEW = false;
+  function pimWhatsNewModule() {
+    if (!PIM_WN_MODULE) PIM_WN_MODULE = import(PIM_WN_ASSETS + 'whats-new.js').catch((e) => { PIM_WN_MODULE = null; throw e; });
+    return PIM_WN_MODULE;
+  }
+  function pimWhatsNewCss() {
+    if (document.getElementById('pimWhatsNewCss')) return;
+    const l = document.createElement('link');
+    l.id = 'pimWhatsNewCss'; l.rel = 'stylesheet'; l.href = PIM_WN_ASSETS + 'whats-new.css';
+    document.head.appendChild(l);
+  }
+  function pimWhatsNewRunningVersion() {
+    return String(((document.getElementById('versionBadge') || {}).textContent) || '').trim().replace(/^v/i, '');
+  }
+  function pimWhatsNewApplyBadge(show) {
+    window.PIM_WN_NEW = !!show;
+    document.querySelectorAll('.pim-wn-new').forEach((b) => { b.hidden = !show; });
+  }
+  async function pimWhatsNewBadgeInit() {
+    if (!isServer) return;
+    try {
+      const wn = await pimWhatsNewModule();
+      const v = pimWhatsNewRunningVersion();
+      if (wn.WHATS_NEW_VERSION.test(v)) pimWhatsNewApplyBadge(wn.shouldShowNewBadge(v, { product: PIM_WN_PRODUCT }));
+    } catch (_) { /* no badge is better than a broken menu */ }
+  }
+  async function renderWhatsNewPage() {
+    const body = document.getElementById('whatsnewBody');
+    if (!body) return;
+    if (!isServer) { body.innerHTML = stateEmpty("What's new needs the live Manager", 'Static (read-only) mode cannot read the release files.'); return; }
+    body.innerHTML = stateLoading("Reading what's new");
+    pimWhatsNewCss();
+    let files = [], wn = null;
+    try {
+      const r = await api('GET', '/api/whats-new');
+      files = (r && Array.isArray(r.files)) ? r.files : [];
+      wn = await pimWhatsNewModule();
+    } catch (e) { body.innerHTML = stateError("What's new could not be read", (e && e.message) || String(e)); return; }
+    const opts = { productName: 'PIM Manager', product: PIM_WN_PRODUCT };
+    wn.renderWhatsNew(body, files, opts);
+    // seen = the newer of the running version and the newest file, so the label stays away until the next update
+    const v = pimWhatsNewRunningVersion(), newest = wn.newestWhatsNewVersion(files);
+    wn.markWhatsNewSeen((wn.WHATS_NEW_VERSION.test(v) && (!newest || wn.compareWhatsNewVersion(v, newest) > 0)) ? v : files, opts);
+    pimWhatsNewApplyBadge(false);
+  }
   var PIM_DOCS_PUBLISHED = 'https://invardia.com/docs/pim-manager/';
   async function renderDocsPage(slug) {
     const body = document.getElementById('docsBody');
@@ -40107,6 +40181,7 @@
     }
   })();
   buildNavGroups();
+  try { pimWhatsNewBadgeInit(); } catch (_) { }   // WHATS-NEW-1: the "New" label on Settings > What's new after an update
   initNumberFormatPicker();   // BRAND-2.6: the per-browser number format choice in the status line
   (function navBadgeMirror() {
     const strip = document.getElementById('tabs');

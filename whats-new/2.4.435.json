@@ -1,0 +1,22 @@
+{
+  "version": "2.4.435",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Department owners can extend their people's access before it ends, without waiting for an administrator.",
+  "new": [
+    {
+      "title": "My people: extend access before it ends",
+      "text": "The new My people page shows department owners when each person's access ends. They can extend it, up to a year ahead by default, and every extension is audited."
+    },
+    {
+      "title": "A reminder two days before access ends",
+      "text": "Owners get a reminder two days before a person's access ends, and the mail opens My people at that person."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Central removals reach managed tenants",
+      "text": "Removals, renames and session revokes from the managing tenant now reach managed tenants. Removals recorded in the last 30 days are delivered after this update."
+    }
+  ]
+}

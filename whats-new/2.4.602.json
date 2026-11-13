@@ -1,0 +1,13 @@
+{
+  "version": "2.4.602",
+  "date": "2026-10-12",
+  "type": "feature",
+  "summary": "New admins get their Temporary Access Pass the first time.",
+  "new": [
+    {
+      "title": "Choose where a new admin's mail goes",
+      "text": "The New admin account wizard asks where the admin's mail goes. Forwarding to the owner's office address is on by default, so the Temporary Access Pass arrives the first time."
+    }
+  ],
+  "fixes": []
+}

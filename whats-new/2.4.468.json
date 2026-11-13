@@ -1,0 +1,30 @@
+{
+  "version": "2.4.468",
+  "date": "2026-09-30",
+  "type": "fix-only",
+  "summary": "A stopped run no longer holds up the next one, and wizards can never overwrite your data by mistake.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stopped runs no longer delay the next",
+      "text": "After the platform stopped a run, the next runs waited up to 15 minutes. Now they take over at once.",
+      "action": "Re-run the hosting access setup once so the scheduler can check its own runs."
+    },
+    {
+      "title": "Wizards never stage against an empty list",
+      "text": "If a list failed to load, a wizard now says so and stages nothing, so your existing rows can never be replaced."
+    },
+    {
+      "title": "Drift shows hand-made roles in new areas",
+      "text": "Areas you have not defined yet now list their live extras, marked \"This area has no definitions yet\". PIM Manager never removes them on its own."
+    },
+    {
+      "title": "Fuller Entra ID reference template",
+      "text": "The template now has 76 groups and 168 role links, including 37 task groups and three more role groups."
+    },
+    {
+      "title": "Faster Home page",
+      "text": "The Home page and the job history load faster."
+    }
+  ]
+}

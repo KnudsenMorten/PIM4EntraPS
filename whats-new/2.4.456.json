@@ -1,0 +1,13 @@
+{
+  "version": "2.4.456",
+  "date": "2026-09-27",
+  "type": "fix-only",
+  "summary": "Importing an unmanaged admin now brings their group memberships with them.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Import brings back an admin's memberships",
+      "text": "Import of an unmanaged admin offered only the account. It now reads the admin's current PIM group memberships and offers a row to keep each one."
+    }
+  ]
+}

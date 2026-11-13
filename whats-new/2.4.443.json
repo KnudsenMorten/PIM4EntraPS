@@ -1,0 +1,42 @@
+{
+  "version": "2.4.443",
+  "date": "2026-09-26",
+  "type": "feature",
+  "summary": "Azure delegation levels follow your management-group layout, Community users see what Pro adds, and protection for delegated administration is stronger.",
+  "new": [
+    {
+      "title": "Azure levels follow your management groups",
+      "text": "The Create wizard sets an Azure permission group's level from where its scope sits in your management-group tree. The preview says where the level came from."
+    },
+    {
+      "title": "Community shows what Pro adds",
+      "text": "In Community, every Pro page is listed in the menu, dimmed and marked PRO, with a comparison and a way to buy or register Pro."
+    },
+    {
+      "title": "Update Community with one command",
+      "text": "The Community update script now pulls the latest release and re-runs your deploy with its original settings. Without the apply option it only shows the plan."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Changing access review reviewers works",
+      "text": "Changing who reviews an access review is now accepted by Microsoft, and PIM Manager checks the result."
+    },
+    {
+      "title": "Emergency overrides end on time",
+      "text": "An emergency override now ends on time even when other work is running, and approval is put back on the next run."
+    },
+    {
+      "title": "New installations set up their mailbox",
+      "text": "The one-command deploy no longer stops at the notification mailbox step. An older deploy identity gets the missing right automatically on its next deploy."
+    },
+    {
+      "title": "Stronger protection for delegated administration",
+      "text": "Security hardening for delegated administrators, staged changes, break-glass accounts and managed tenant selection. MSP management is now always part of Pro."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Staged edits are no longer lost, dates keep their exact value, mail links use the Manager's own address, and the daily target check reports unreadable subscriptions correctly."
+    }
+  ]
+}

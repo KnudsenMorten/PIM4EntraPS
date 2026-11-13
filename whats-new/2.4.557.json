@@ -1,0 +1,13 @@
+{
+  "version": "2.4.557",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "A managed tenant install asks you to sign in only once.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One sign-in for a managed tenant install",
+      "text": "The build steps of a managed tenant install now reuse your one sign-in instead of each opening a browser window."
+    }
+  ]
+}

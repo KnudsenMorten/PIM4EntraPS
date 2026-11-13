@@ -1,0 +1,21 @@
+{
+  "version": "2.4.590",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "New installations no longer fail at the database sign-in, and script commands are simpler to copy.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New tenant installs no longer fail",
+      "text": "The installer no longer fails with Login failed at the database step in a new tenant. A refused sign-in is retried for about two minutes."
+    },
+    {
+      "title": "Script commands are two lines",
+      "text": "Every command PIM Manager shows for a published script is now two lines: download the file, run it. The \"What does this script do?\" link sits next to it."
+    },
+    {
+      "title": "Install check suggests portal steps",
+      "text": "Every fix the install check suggests is an Azure portal step or a published script, never an Azure command line."
+    }
+  ]
+}

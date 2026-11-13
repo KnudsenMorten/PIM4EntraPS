@@ -1,0 +1,27 @@
+{
+  "version": "2.4.421",
+  "date": "2026-09-24",
+  "type": "fix-only",
+  "summary": "Renames no longer leave unmanaged copies behind, access reviews can be created, and two misleading failures are gone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A rename renames instead of copying",
+      "text": "Renaming a group or Administrative Unit created a second one in Entra ID, leaving the old one unmanaged. The engine now renames the existing object, keeping its members and roles.",
+      "action": "Remove by hand in Entra ID the old copy of any group you renamed on an earlier version."
+    },
+    {
+      "title": "Access reviews can be created",
+      "text": "Every run that created an access review failed for lack of permission. The deployment now grants a permission to create reviews of group membership.",
+      "action": "Grant the hosting permissions again so access reviews can be created."
+    },
+    {
+      "title": "A new admin's pass no longer fails runs",
+      "text": "When the pass job ran before the new account existed, the run failed. It now waits and issues the Temporary Access Pass on its next run."
+    },
+    {
+      "title": "Clear answer when guests are blocked",
+      "text": "If your tenant allows no guest invitations, PIM Manager now stops at once and names the External collaboration setting to change."
+    }
+  ]
+}

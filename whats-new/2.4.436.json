@@ -1,0 +1,22 @@
+{
+  "version": "2.4.436",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Removing an administrator on the managing tenant now reaches exactly the managed tenants you choose.",
+  "new": [
+    {
+      "title": "Choose where a removal applies",
+      "text": "When you remove a replicated administrator or row on the managing tenant, the Manager asks whether to remove it in every managed tenant, chosen ones, or none."
+    },
+    {
+      "title": "Managed tenants remove the administrator too",
+      "text": "A managed tenant now removes the administrator together with their memberships. Before, only the memberships were removed."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Offboarding still reaches every tenant",
+      "text": "An auto-disable date set on the managing tenant still reaches every managed tenant the administrator is in, without asking. Removals from the last 30 days are applied after this update."
+    }
+  ]
+}

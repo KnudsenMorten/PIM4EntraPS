@@ -1,0 +1,21 @@
+{
+  "version": "3.0.31",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "A private install no longer stops when it cannot reach a central DNS zone.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Private install carries on without DNS rights",
+      "text": "If a private install may not read or link a central DNS zone, it warns, names the task for your network team and carries on."
+    },
+    {
+      "title": "A failed build pool is replaced",
+      "text": "A build pool left failed by an earlier run is removed and made again."
+    },
+    {
+      "title": "Installer advises only safe changes",
+      "text": "Installer messages now suggest only safe changes."
+    }
+  ]
+}

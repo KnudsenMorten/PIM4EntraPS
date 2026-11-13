@@ -1,0 +1,13 @@
+{
+  "version": "2.4.585",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "A stopped installation is easy to resume from any window.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The resume command works in a new window",
+      "text": "The resume command the installer prints now works when you paste it into a fresh PowerShell window."
+    }
+  ]
+}

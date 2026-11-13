@@ -1,0 +1,13 @@
+{
+  "version": "2.4.404",
+  "date": "2026-09-22",
+  "type": "fix-only",
+  "summary": "A group that still grants access can no longer be deleted by accident.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Groups in use cannot be deleted",
+      "text": "Deleting a group is refused while anything still uses it. You are told how many rows use it, so you can remove them deliberately first."
+    }
+  ]
+}

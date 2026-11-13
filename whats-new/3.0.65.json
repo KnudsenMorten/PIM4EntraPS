@@ -1,0 +1,17 @@
+{
+  "version": "3.0.65",
+  "date": "2026-11-09",
+  "type": "fix-only",
+  "summary": "The identity move now respects your allowed-locations policy and keeps database admin rights where they belong.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Identity move respects allowed locations",
+      "text": "A new identity is created where its app or job already runs, so an allowed-locations policy no longer refuses it."
+    },
+    {
+      "title": "Database admin rights stay with the database job",
+      "text": "The identity move never copies database admin group membership to any role but the database job."
+    }
+  ]
+}

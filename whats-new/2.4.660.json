@@ -1,0 +1,21 @@
+{
+  "version": "2.4.660",
+  "date": "2026-10-21",
+  "type": "fix-only",
+  "summary": "New admins are linked to their company and department at once, and setup scripts sign in more reliably.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New admins are linked at once",
+      "text": "A new consultant admin is linked at once to its external company and internal department, and an internal admin to its department."
+    },
+    {
+      "title": "Mail-sender setup no longer fails",
+      "text": "The mail-sender setup reuses what is already in place instead of failing."
+    },
+    {
+      "title": "Setup sign-in works in more cases",
+      "text": "Browser sign-in in the setup scripts works when your PC uses IPv6 for localhost, and an Azure Arc or VM machine identity no longer blocks it."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "2.4.474",
+  "date": "2026-10-01",
+  "type": "feature",
+  "summary": "The Access map shows a group's real path, and you can change many rows in one step.",
+  "new": [
+    {
+      "title": "Filter Access map columns",
+      "text": "Filter each column by All, Assigned or Not assigned to find your way through hundreds of groups."
+    },
+    {
+      "title": "Change many rows at once",
+      "text": "Select rows in a delegation table and set Policy, Duration, Type or Auto-extend for all of them in one step."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Access map shows the path",
+      "text": "Selecting a group now shows its real path with the lines. Possible link targets appear only while you drag or when you switch them on."
+    }
+  ]
+}

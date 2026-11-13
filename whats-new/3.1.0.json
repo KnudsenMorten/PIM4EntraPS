@@ -1,0 +1,29 @@
+{
+  "version": "3.1.0",
+  "date": "2026-11-10",
+  "type": "feature",
+  "summary": "PIM Manager 3.1 runs on long-term supported Microsoft software and brings together the improvements of the 3.0 series.",
+  "new": [
+    {
+      "title": "Runs on supported .NET 10 and PowerShell 7.6",
+      "text": "PIM Manager runs on .NET 10 LTS and PowerShell 7.6 LTS on Microsoft's current image, supported to November 2028. Nothing changes for you."
+    },
+    {
+      "title": "Invardia support link",
+      "text": "Health and run results go to Invardia support. Undelivered reports are retried without mailing you, and the status turns amber only after three failed rounds in a row."
+    },
+    {
+      "title": "New Get Started steps",
+      "text": "Get Started has steps for Azure resources and Workloads, and a Who needs what table shows each identity's rights."
+    },
+    {
+      "title": "Stalled runs are shown and reported",
+      "text": "The Jobs page shows Running far longer than usual, and Invardia support is told. Runs are never stopped."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Error catalogue pages for every error code, Recognised admin names with *, Drift showing only PIM-named objects, Entra access packages, two-line install, and four-eyes approval and evidence export in both editions."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,27 @@
+{
+  "version": "2.4.363",
+  "date": "2026-09-15",
+  "type": "feature",
+  "summary": "One command builds a managing or managed tenant, and every Entra admin gets a Temporary Access Pass.",
+  "new": [
+    {
+      "title": "One command builds an MSP pair",
+      "text": "A single command builds a managing tenant or a managed tenant step by step. It shows the plan first and ends by listing the steps that need a person.",
+      "action": "Build the managing tenant first, then each managed tenant."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Every Entra admin gets a Temporary Access Pass",
+      "text": "The create TAP setting can no longer turn the pass off in any setup. Validation flags a \"no\" and offers a one-click fix."
+    },
+    {
+      "title": "The Manager gets only read permissions",
+      "text": "A deployment now gives the Manager only its read-only set of permissions."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The full deployment now uses your database admin group name and troubleshooting identity, and can create and fill that group itself."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "3.0.46",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Approved updates now reach you within minutes, and pages stay fast after large changes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Approved updates arrive within minutes",
+      "text": "Updates are now checked every 15 minutes on every ring, so an approved version arrives within minutes instead of at night."
+    },
+    {
+      "title": "Pages stay fast after large changes",
+      "text": "PIM Manager keeps its database statistics fresh, so pages stay fast after large writes."
+    }
+  ]
+}

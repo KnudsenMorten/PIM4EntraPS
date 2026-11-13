@@ -1,0 +1,18 @@
+{
+  "version": "2.4.477",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "You can now watch every committed change until it is live, and commits are faster.",
+  "new": [
+    {
+      "title": "Watch your changes go live",
+      "text": "After you commit, a panel follows each change until it is live in Entra ID or Azure, or shows why it is waiting or failed."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Faster commits",
+      "text": "A commit now saves only what really changed, so a small change in a large list commits much faster."
+    }
+  ]
+}

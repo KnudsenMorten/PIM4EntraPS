@@ -1,0 +1,13 @@
+{
+  "version": "2.4.340",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Long scheduled runs no longer overlap with the next one.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Scheduled runs no longer overlap",
+      "text": "A run that takes longer than its 15-minute turn now keeps its turn, and stops making changes if another run has taken over."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.346",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Engine runs finish faster, so your changes reach the tenant sooner.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Faster engine runs",
+      "text": "Scheduled runs spend far less time saving state, handle Microsoft throttling in one go, and reuse lookups. Revokes and the drift check always use fresh data."
+    }
+  ]
+}

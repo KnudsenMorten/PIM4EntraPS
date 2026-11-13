@@ -1,0 +1,30 @@
+{
+  "version": "2.4.348",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Delegations now reach your tenant as you chose them, and errors name the real groups and roles.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Eligible delegations are written Eligible",
+      "text": "Wizards wrote group nestings as Active, which Entra ID refuses for role-assignable groups, so those delegations never arrived. They are now Eligible.",
+      "action": "Use the one-click Set to Eligible fix that validation offers for any existing Active nesting of that kind."
+    },
+    {
+      "title": "New delegations get their policy at once",
+      "text": "A new group's PIM for Groups policy is applied straight away. Changes to policies someone already set are still guarded."
+    },
+    {
+      "title": "Errors name the group, role and scope",
+      "text": "Engine errors say which group, role and scope they concern, with a link to that scope's PIM policies in the Azure portal."
+    },
+    {
+      "title": "Engine changes in the audit trail",
+      "text": "Every membership, role assignment and account change the engine makes is recorded with the real person, group, role and scope."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Run now queues engine jobs and says so, missing engine permissions turn the Home banner red, and Commit counts a fix you just staged."
+    }
+  ]
+}

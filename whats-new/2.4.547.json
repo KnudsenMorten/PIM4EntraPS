@@ -1,0 +1,25 @@
+{
+  "version": "2.4.547",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Older installations get the same safe defaults as new ones, without losing your own choices.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Alert recipients filled in when empty",
+      "text": "An installation with no alert recipients now gets its SuperAdmins' mailboxes on the next update. A list you set is never replaced."
+    },
+    {
+      "title": "Engine starts right after a commit",
+      "text": "When PIM Manager may start the engine, the update switches on the immediate start after a commit, as on new installations. Your own setting is kept."
+    },
+    {
+      "title": "Missing access is named in the update log",
+      "text": "The update now checks the access PIM Manager needs on its own resources and names the setup script that grants anything missing."
+    },
+    {
+      "title": "Installations ahead of their ring stay current",
+      "text": "Installations running ahead of their update ring now also get engine sizing, the database size rule and these checks on every update."
+    }
+  ]
+}

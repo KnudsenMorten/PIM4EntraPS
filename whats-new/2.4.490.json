@@ -1,0 +1,17 @@
+{
+  "version": "2.4.490",
+  "date": "2026-10-04",
+  "type": "fix-only",
+  "summary": "Setup now always works in the right Azure subscription when a tenant has several.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup uses the right subscription",
+      "text": "In tenants with several Azure subscriptions, updates and rollbacks during setup now always use the installation's own subscription."
+    },
+    {
+      "title": "Private DNS zone in the right place",
+      "text": "With the hub network in another subscription, the private DNS zone is now created next to the hub."
+    }
+  ]
+}

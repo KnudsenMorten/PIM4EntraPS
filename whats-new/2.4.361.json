@@ -1,0 +1,26 @@
+{
+  "version": "2.4.361",
+  "date": "2026-09-15",
+  "type": "feature",
+  "summary": "Nightly updates keep running and bring every database change with them, and the database can be administered by a group.",
+  "new": [
+    {
+      "title": "Database administered by a security group",
+      "text": "A setup step makes a security group the database's Entra ID administrator, with the environment's own identities as members. New deployments set this up automatically."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "The nightly updater repairs its own settings",
+      "text": "When the updater is missing its database details, it takes them from the Manager and keeps them, instead of refusing every release."
+    },
+    {
+      "title": "Clear message when the updater cannot sign in",
+      "text": "The message names the updater's identity and the group to add it to. It still never rolls a release it could not check."
+    },
+    {
+      "title": "Database additions reach existing installations",
+      "text": "Each update now applies the shipped database changes, so new settings are present on existing installations. An update that would remove data is refused."
+    }
+  ]
+}

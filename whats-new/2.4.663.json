@@ -1,0 +1,13 @@
+{
+  "version": "2.4.663",
+  "date": "2026-10-21",
+  "type": "fix-only",
+  "summary": "New installations complete again instead of stopping while PIM Manager is built.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New installations finish again",
+      "text": "A new installation no longer stops while building PIM Manager because Azure refused the request."
+    }
+  ]
+}

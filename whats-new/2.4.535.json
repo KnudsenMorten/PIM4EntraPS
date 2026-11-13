@@ -1,0 +1,34 @@
+{
+  "version": "2.4.535",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "A new installation checks itself before it says done, and alerts reach someone from day one.",
+  "new": [
+    {
+      "title": "The install checks itself before finishing",
+      "text": "The last install step shows one table of what is in place, repairs what it can and gives the exact command for anything left."
+    },
+    {
+      "title": "Alert recipients set during install",
+      "text": "The install sets alert recipients to the address you give or your SuperAdmins' mail, so alerts reach someone from the first engine run."
+    },
+    {
+      "title": "Mail checked piece by piece",
+      "text": "Get Started > Mail sender and the Overview check each part of mail separately and show the one-line fix for each missing piece. You can skip mail for now."
+    },
+    {
+      "title": "Pro Business and Pro Enterprise shown",
+      "text": "The header, Licence page and Get Started show your Pro edition. Pro Business warns from 90% of its admin account limit; nothing running is ever switched off."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "New Exchange organisations no longer fail mail setup",
+      "text": "On a brand-new Exchange organisation, the install now waits up to about an hour for Exchange to accept the send right, showing progress."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Installs through the Invardia Support app now report each step to Invardia."
+    }
+  ]
+}

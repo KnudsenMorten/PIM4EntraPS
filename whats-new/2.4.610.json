@@ -1,0 +1,13 @@
+{
+  "version": "2.4.610",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Alert mails are short and show what to do at a glance.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Alert mails in one short table",
+      "text": "Alert mails show who acts, the status, the problem, what to do, the findings one per line, and where to get support."
+    }
+  ]
+}

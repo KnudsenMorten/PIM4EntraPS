@@ -1,0 +1,13 @@
+{
+  "version": "2.4.603",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Delegation overview and Access map show everything without hidden parts.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Nothing hidden behind the detail panel",
+      "text": "In Delegation overview and Access map, the board scrolls above the detail panel and the panel's buttons stay visible. The Delegation overview panel can collapse to one line."
+    }
+  ]
+}

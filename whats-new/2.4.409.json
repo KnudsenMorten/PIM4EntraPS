@@ -1,0 +1,25 @@
+{
+  "version": "2.4.409",
+  "date": "2026-09-22",
+  "type": "fix-only",
+  "summary": "On the Access map, giving and removing access are now separate buttons you cannot confuse.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Give and remove are separate buttons",
+      "text": "Give access is blue and Remove access is red, and each list shows only that direction's choices. A click can never do the opposite of what you pressed."
+    },
+    {
+      "title": "Staged changes are easy to tell apart",
+      "text": "A staged addition is amber and says \"staged add\"; a staged removal is red, struck through and says \"staged remove\"."
+    },
+    {
+      "title": "The selection bar stays in view",
+      "text": "The bar showing your selection and its buttons now sticks to the bottom of the screen, tinted blue while giving and red while removing."
+    },
+    {
+      "title": "Clearer link names",
+      "text": "Links now use the record names shown elsewhere, for example \"Open Service groups in All records\"."
+    }
+  ]
+}

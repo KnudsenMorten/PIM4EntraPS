@@ -1,0 +1,13 @@
+{
+  "version": "3.0.43",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Status reports to Invardia catch up faster.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Status reports catch up faster",
+      "text": "Status reports to Invardia now catch up within one cycle, and your committed changes are still applied while they are sent."
+    }
+  ]
+}

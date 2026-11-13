@@ -1,0 +1,13 @@
+{
+  "version": "2.4.570",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Setup completes the PIM Manager sign-in step again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Storing the sign-in secret works",
+      "text": "Setup could stop while storing PIM Manager's sign-in secret because Azure refused the request. It now works."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.371",
+  "date": "2026-09-18",
+  "type": "fix-only",
+  "summary": "No more false removal alarms, and managed tenants receive updates again.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false removal alerts",
+      "text": "The nightly read-only check sent removal alerts about runs that could not remove anything. It now only logs the finding; nothing was ever removed."
+    },
+    {
+      "title": "Managed-tenant pull works again",
+      "text": "Managed tenants refused every pull after the previous release. The pull works again, and a stop instruction you configure is still checked strictly."
+    },
+    {
+      "title": "Approved updates are found again",
+      "text": "The update tools reported nothing approved even when a version was. They now read the ring correctly."
+    }
+  ]
+}

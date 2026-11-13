@@ -1,0 +1,13 @@
+{
+  "version": "2.4.573",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "PIM Manager is reachable after setup, even after an interrupted run.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "PIM Manager is reachable after setup",
+      "text": "Once sign-in protects it, setup now opens PIM Manager for access, even when an earlier run left it closed."
+    }
+  ]
+}

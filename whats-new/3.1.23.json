@@ -1,0 +1,18 @@
+{
+  "version": "3.1.23",
+  "date": "2026-11-13",
+  "type": "feature",
+  "summary": "A new What's new page shows every PIM Manager release in plain words, newest first.",
+  "new": [
+    {
+      "title": "What's new page",
+      "text": "Open Settings > What's new to see every release, newest first, with what it changes for you. The same list is on invardia.com and in the Community repository."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clearer release notes",
+      "text": "The release notes describe each change by its effect, in plain words."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.599",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "The PIM Manager recommendation is always visible when you choose policy settings.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Recommendation is always shown",
+      "text": "The Policy settings page and the Get Started Policies step always show the PIM Manager recommendation. Keep current can be chosen early and fills in by itself."
+    }
+  ]
+}

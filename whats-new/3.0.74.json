@@ -1,0 +1,13 @@
+{
+  "version": "3.0.74",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "You can now tell a job that is still working from one that has stopped.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Working jobs are easy to tell apart",
+      "text": "Every PIM job now notes what it is doing every 5 minutes while it runs, so a working run can be told apart from one that has died."
+    }
+  ]
+}

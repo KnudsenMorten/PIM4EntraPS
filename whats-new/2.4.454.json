@@ -1,0 +1,26 @@
+{
+  "version": "2.4.454",
+  "date": "2026-09-27",
+  "type": "fix-only",
+  "summary": "Removing one access in a review really removes it, and the Manager stays responsive.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Removing one access in a review works",
+      "text": "In the previous version, removing one access in a review left the membership in the tenant. Once committed, PIM Manager now removes exactly that membership.",
+      "action": "If you committed a one-access removal with version 2.4.453, remove it again, or use Delete on the Drift page."
+    },
+    {
+      "title": "The Manager stays responsive",
+      "text": "The permission check on Overview is now reused for five minutes instead of running on every visit, so other pages no longer wait. Verify permissions still checks at once."
+    },
+    {
+      "title": "Faster audit trail and Pending changes",
+      "text": "The audit trail prepares its summaries only for entries on screen, and Pending changes no longer holds up a commit."
+    },
+    {
+      "title": "Fewer slow-downs on large reads",
+      "text": "When Microsoft asks PIM Manager to slow down, it now pauses between batches, so large drift reads finish with far fewer retries."
+    }
+  ]
+}

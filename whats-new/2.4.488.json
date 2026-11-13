@@ -1,0 +1,30 @@
+{
+  "version": "2.4.488",
+  "date": "2026-10-03",
+  "type": "feature",
+  "summary": "Licences now work only in their own tenant, and installing PIM Manager takes one guided command.",
+  "new": [
+    {
+      "title": "Guided installation (preview)",
+      "text": "Install PIM Manager with one command from Azure Cloud Shell, signed in as yourself. It checks everything first, reports every step and can resume."
+    },
+    {
+      "title": "Grant or remove Invardia support access",
+      "text": "One command gives the Invardia Support app read-only or setup access, and the same command takes it back."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Licences bound to their tenant",
+      "text": "A licence now works only in the tenant it names. Every licence issued so far names its tenant, so you have nothing to do."
+    },
+    {
+      "title": "Access request portal deploys completely",
+      "text": "Deploying the access request portal now also completes its registration and its mail permission."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Setup works from Linux and Azure Cloud Shell, and copying settings between environments can keep newer settings."
+    }
+  ]
+}

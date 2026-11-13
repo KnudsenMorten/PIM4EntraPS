@@ -1,0 +1,18 @@
+{
+  "version": "2.4.633",
+  "date": "2026-10-15",
+  "type": "feature",
+  "summary": "The product documentation is now inside PIM Manager, and each part keeps only the database rights it needs.",
+  "new": [
+    {
+      "title": "Documentation inside PIM Manager",
+      "text": "Settings > Documentation now holds the product documentation, also on installations on a private network."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Least database rights on every update",
+      "text": "Each part of PIM Manager gets only the database rights it needs, and every update keeps it that way."
+    }
+  ]
+}

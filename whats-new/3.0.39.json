@@ -1,0 +1,17 @@
+{
+  "version": "3.0.39",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "The database job shows as in place when it really is.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Database job status is correct",
+      "text": "The database job counts as in place when its last run succeeded."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Clearer documentation wording, and a sign-in front update with wording changes only."
+    }
+  ]
+}

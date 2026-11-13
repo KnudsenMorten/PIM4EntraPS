@@ -1,0 +1,21 @@
+{
+  "version": "2.4.522",
+  "date": "2026-10-07",
+  "type": "fix-only",
+  "summary": "Review current delegations now focuses on access PIM Manager does not manage, so clean-up is easier.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Review shows what still needs cleaning up",
+      "text": "Assignments PIM Manager manages are hidden by default on Review current delegations. Tick show managed by PIM Manager to see them, marked MANAGED."
+    },
+    {
+      "title": "Deleted admin accounts no longer look active",
+      "text": "Deleted accounts are hidden under Show removed and deleted and show no actions. Entra keeps them restorable for 30 days."
+    },
+    {
+      "title": "Setup steps as single downloads",
+      "text": "Setup steps can now be downloaded as single files from Invardia, starting with the step that gives Invardia support its access."
+    }
+  ]
+}

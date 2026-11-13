@@ -1,0 +1,22 @@
+{
+  "version": "2.4.604",
+  "date": "2026-10-12",
+  "type": "feature",
+  "summary": "Discovery and Coverage are now one page where you can ignore or bring back each gap.",
+  "new": [
+    {
+      "title": "Discovery and gaps in one page",
+      "text": "Discovery and Coverage are now one page, Discovery and gaps, under Access. You can Ignore and Bring back each gap."
+    },
+    {
+      "title": "Microsoft default for group policies",
+      "text": "You can now choose the Microsoft default for group policies as well as for Entra roles."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Menu numbers only when you must act",
+      "text": "The menu shows a number only for an error or a blocking approval, and a workload that was not read is shown plainly."
+    }
+  ]
+}

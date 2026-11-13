@@ -1,0 +1,17 @@
+{
+  "version": "2.4.543",
+  "date": "2026-10-09",
+  "type": "fix-only",
+  "summary": "The stale-access check stays current on large tenants, and PIM Activator points users to support.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stale-access check stays current on large tenants",
+      "text": "On large, busy tenants, the group activity behind the stale-access check now catches up run by run instead of staying old."
+    },
+    {
+      "title": "PIM Activator carries the PIM Manager name",
+      "text": "PIM Activator now shows it is part of PIM Manager, with a Support link, and Report bug opens the support portal. Installed browsers update in place."
+    }
+  ]
+}

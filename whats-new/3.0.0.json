@@ -1,0 +1,17 @@
+{
+  "version": "3.0.0",
+  "date": "2026-10-28",
+  "type": "fix-only",
+  "summary": "PIM Manager 3.0 starts a new generation with short version numbers.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A new generation: PIM Manager 3.0",
+      "text": "PIM Manager 3.0 starts a new generation, with short version numbers from now on."
+    },
+    {
+      "title": "Each edition shows its own logo",
+      "text": "Community shows the Community logo in mails and printed reports, as the portal header already does. Pro keeps the Pro logo."
+    }
+  ]
+}

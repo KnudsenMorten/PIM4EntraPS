@@ -1,0 +1,21 @@
+{
+  "version": "3.0.76",
+  "date": "2026-11-10",
+  "type": "security",
+  "summary": "Every identity PIM Manager creates now has a published list of approved rights, and new installs grant fewer rights.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Published rights list for every identity",
+      "text": "PIM Manager now ships an approved list of rights for every identity it creates, so Invardia can check the live rights every day."
+    },
+    {
+      "title": "Fewer rights for the engine on new installs",
+      "text": "New installations no longer give the engine three Microsoft permissions it never needs."
+    },
+    {
+      "title": "Documentation matches the product",
+      "text": "The documentation now describes the two-line install, the Community nightly updater, the free second approver, evidence export and time-limited support database access as they work."
+    }
+  ]
+}

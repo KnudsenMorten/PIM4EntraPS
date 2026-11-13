@@ -1,0 +1,21 @@
+{
+  "version": "2.4.413",
+  "date": "2026-09-22",
+  "type": "fix-only",
+  "summary": "Managed tenants create administrators again, and administrators sent by your provider are no longer reported as missing.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Managed tenants create administrators again",
+      "text": "In the previous version the administrator job on a managed tenant failed every run, so sent administrators were never created. It runs again."
+    },
+    {
+      "title": "Provider administrators are no longer flagged",
+      "text": "Pending changes reported delegations naming your provider's administrators as errors on a managed tenant. They now count as defined; truly undefined accounts are still reported."
+    },
+    {
+      "title": "Admin naming comes from tenant settings",
+      "text": "A tenant's own administrator naming setting now wins over the deployment value, and any disagreement is noted in the job log."
+    }
+  ]
+}

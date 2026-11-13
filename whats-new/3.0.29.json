@@ -1,0 +1,18 @@
+{
+  "version": "3.0.29",
+  "date": "2026-11-04",
+  "type": "feature",
+  "summary": "Four-eyes approval and the evidence export are now part of Community as well as Pro.",
+  "new": [
+    {
+      "title": "Four-eyes approval and evidence export in Community",
+      "text": "The second approver and the evidence and audit export are now part of both Community and Pro. Core security is the same in both editions."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Shorter application access dialog",
+      "text": "The dialog for letting applications ask for access is shorter, with the tier rule under More info."
+    }
+  ]
+}

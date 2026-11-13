@@ -1,0 +1,13 @@
+{
+  "version": "2.4.625",
+  "date": "2026-10-14",
+  "type": "fix-only",
+  "summary": "When Power BI refuses a change, you see its full reason.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Power BI refusals show the full reason",
+      "text": "When Power BI refuses a change, PIM Manager shows Power BI's own answer first, so the reason is never cut off."
+    }
+  ]
+}

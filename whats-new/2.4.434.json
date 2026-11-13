@@ -1,0 +1,13 @@
+{
+  "version": "2.4.434",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "A central session revoke is carried out exactly once in each managed tenant.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Session revokes are never done twice",
+      "text": "A managed tenant now records a central session revoke the same way on every PowerShell edition, so it is never carried out twice."
+    }
+  ]
+}

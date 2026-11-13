@@ -1,0 +1,22 @@
+{
+  "version": "2.4.422",
+  "date": "2026-09-24",
+  "type": "fix-only",
+  "summary": "Renaming a group now renames it in Entra ID, and access reviews get the permission they need.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Group renames reach Entra ID",
+      "text": "A rename still created a second group in the previous version. The engine now renames the group it already has."
+    },
+    {
+      "title": "Access reviews get the right permission",
+      "text": "The deployment now grants the access review permission Microsoft requires, which also covers reading and changing other reviews. Reviews are then created and mail their reviewers.",
+      "action": "Grant the hosting permissions again so the new access review permission takes effect."
+    },
+    {
+      "title": "Reset TAP explains when it cannot work",
+      "text": "Without a mail sender, Reset TAP in Accounts & TAP is now disabled and says why: a pass is only ever sent by mail."
+    }
+  ]
+}

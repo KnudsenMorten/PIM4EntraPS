@@ -1,0 +1,21 @@
+{
+  "version": "3.1.3",
+  "date": "2026-11-11",
+  "type": "security",
+  "summary": "Secrets are kept in your installation's own Key Vault, and break-glass keeps working after an identity move.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Secrets move into your own Key Vault",
+      "text": "Once support has given access, the updater places every secret in the installation's Key Vault, with a check and automatic restore."
+    },
+    {
+      "title": "Rotated secrets are stored in Key Vault",
+      "text": "A rotated secret is now written to the Key Vault too."
+    },
+    {
+      "title": "Break-glass works after an identity move",
+      "text": "Before, break-glass activation could be refused after the web identity moved, until the passphrase was set again. Key Vault access now moves with the identity."
+    }
+  ]
+}

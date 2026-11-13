@@ -1,0 +1,21 @@
+{
+  "version": "2.4.594",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Guards hold only changes that cannot be undone, and the rest become warnings.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Guards hold only lasting changes",
+      "text": "Guards hold for approval only changes that cannot heal, such as weakening policies, mass removals, or the last Global Administrator or SuperAdmin."
+    },
+    {
+      "title": "Other issues in one daily mail",
+      "text": "Large policy alignments and open gaps are warnings in one daily Data quality alert mail."
+    },
+    {
+      "title": "Clearer setup advice",
+      "text": "When a tenant-root permission is refused during setup, you see only the published script to fix it."
+    }
+  ]
+}

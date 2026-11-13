@@ -1,0 +1,17 @@
+{
+  "version": "2.4.307",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "Admins whose names differ only in capitals now show their access.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Access board ignores capitalisation",
+      "text": "The Access board now matches sign-in and group names regardless of capitals, so nobody wrongly looks as if they have no access."
+    },
+    {
+      "title": "Unmatched names are reported",
+      "text": "A name that matches nothing is now reported instead of silently dropped."
+    }
+  ]
+}

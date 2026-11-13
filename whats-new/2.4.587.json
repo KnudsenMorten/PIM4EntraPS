@@ -1,0 +1,21 @@
+{
+  "version": "2.4.587",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Installations recover more gracefully when a step fails.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A resumed install is no longer refused",
+      "text": "Resuming a stopped installation now continues where it stopped, instead of being refused by its own update ring check."
+    },
+    {
+      "title": "A failed side step keeps a healthy app",
+      "text": "When a side step such as the updater or alerting fails, setup no longer rolls a healthy PIM Manager back. A rollback happens only when the app itself fails its health check."
+    },
+    {
+      "title": "Clearer message when an install step fails",
+      "text": "Under Invardia's installer, a failed step now tells you what failed, the fix when known, and the one command to resume."
+    }
+  ]
+}

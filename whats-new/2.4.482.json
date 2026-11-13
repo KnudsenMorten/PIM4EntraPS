@@ -1,0 +1,18 @@
+{
+  "version": "2.4.482",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "An AI assistant can now work in PIM Manager on your behalf, within your own role and approvals.",
+  "new": [
+    {
+      "title": "AI assistant connection (Pro, preview)",
+      "text": "An AI assistant can read PIM Manager, stage changes and commit them, signed in as you, within your role and the normal approvals. Nothing is ever activated."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Access request portal gets updates",
+      "text": "The access request portal now updates with the rest of PIM Manager, and a failed update is shown clearly."
+    }
+  ]
+}

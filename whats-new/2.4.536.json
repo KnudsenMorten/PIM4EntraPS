@@ -1,0 +1,26 @@
+{
+  "version": "2.4.536",
+  "date": "2026-10-09",
+  "type": "feature",
+  "summary": "Install any tenant with just an enrollment key, and health-check an installation whenever you want.",
+  "new": [
+    {
+      "title": "Install a single tenant with an enrollment key",
+      "text": "An enrollment key from Invardia now installs a single-tenant environment too, with its licence included, so no licence file is needed."
+    },
+    {
+      "title": "Managed tenants link to their managing tenant",
+      "text": "The managing tenant now shares its details with Invardia by itself, so tenants enrolled with a key are linked to it without manual steps."
+    },
+    {
+      "title": "Run the end-of-install check any time",
+      "text": "You can now run the end-of-install check on its own as a health check of an existing installation."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Forgotten offboard requests show as blocking",
+      "text": "An approved offboard request that was never queued now counts as a blocking item in the menu badge for 7 days."
+    }
+  ]
+}

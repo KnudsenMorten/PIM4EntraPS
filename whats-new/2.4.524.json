@@ -1,0 +1,17 @@
+{
+  "version": "2.4.524",
+  "date": "2026-10-07",
+  "type": "fix-only",
+  "summary": "Every mail now says which environment it is about, and the menus are easier to scan.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Every mail names its environment",
+      "text": "Mail subjects start with the environment's name, and every mail ends with the environment, tenant, PIM Manager version and a link to it."
+    },
+    {
+      "title": "Shorter, clearer menus",
+      "text": "Audit & Settings is now three menus: Templates, Operations and Settings."
+    }
+  ]
+}

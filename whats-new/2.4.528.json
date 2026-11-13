@@ -1,0 +1,38 @@
+{
+  "version": "2.4.528",
+  "date": "2026-10-08",
+  "type": "feature",
+  "summary": "Rolling out PIM Activator is now a guided page with buttons that do the work for you.",
+  "new": [
+    {
+      "title": "PIM Activator page as guided steps",
+      "text": "Operations > PIM Activator now has five steps, from the Entra apps to servers, each showing whether it is done."
+    },
+    {
+      "title": "Create apps and upload to Intune",
+      "text": "Create / Repair and Upload to Intune work right from the page. You sign in with your own admin account; PIM Manager itself gets no new rights."
+    },
+    {
+      "title": "Edge for Business guide",
+      "text": "One card per extension shows exactly the fields the Microsoft 365 admin center asks for, plus the two settings to paste."
+    },
+    {
+      "title": "Edit button for external companies",
+      "text": "A company reads as text until you click Edit; a new company opens ready to fill in."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Mail works when addresses differ",
+      "text": "Mail sender setup now stores the mailbox's real mail address, so mail no longer fails when its sign-in name and mail address differ."
+    },
+    {
+      "title": "Drift Delete confirms itself",
+      "text": "After Delete the row reads \"queued for removal\", and the same item is never queued twice."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "PIM Activator scripts need no extra PowerShell modules, and \"Delegations - edit in a table\" is now called \"Delegations - all rows\"."
+    }
+  ]
+}

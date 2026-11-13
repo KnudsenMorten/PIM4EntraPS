@@ -1,0 +1,13 @@
+{
+  "version": "2.4.609",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Discovery and gaps opens on the gaps and tells you what your selection will create.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Discovery and gaps opens on gaps",
+      "text": "Discovery and gaps opens filtered on Status = Gap. One line says how many gaps you selected and how many groups and roles that creates."
+    }
+  ]
+}

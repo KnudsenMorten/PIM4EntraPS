@@ -1,0 +1,17 @@
+{
+  "version": "3.0.67",
+  "date": "2026-11-09",
+  "type": "fix-only",
+  "summary": "After an identity move, every check and screen uses the identity each part really runs as.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup checks follow the moved identity",
+      "text": "Every setup check, fix command and grant uses the identity each app or job signs in as, and re-running setup keeps it. No right is removed."
+    },
+    {
+      "title": "Screens name each job clearly",
+      "text": "Screens show each job as its role, its real name and the identity it runs as."
+    }
+  ]
+}

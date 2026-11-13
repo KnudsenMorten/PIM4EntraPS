@@ -1,0 +1,29 @@
+{
+  "version": "2.4.647",
+  "date": "2026-10-18",
+  "type": "fix-only",
+  "summary": "You can see when you run a pre-release version, and new sign-in protections are ready to switch on.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Header shows pre-release versions",
+      "text": "While your installation runs an early version, the header shows Ring N - Pre-release with its name."
+    },
+    {
+      "title": "Display names can read PIM Manager",
+      "text": "Once that option is on, the update renames the display names people read to \"PIM Manager\". New installations can choose short resource names."
+    },
+    {
+      "title": "Stronger protection for app permissions",
+      "text": "Setup now checks the web app's permissions in a stronger way."
+    },
+    {
+      "title": "Sign-in without stored secrets prepared",
+      "text": "PIM Manager can sign in through a shared sign-in front without a stored secret, and changes can carry the signed-in user's proof. Both are off by default."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Closer status reporting to Invardia after an engine update, and corrected test checks."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "2.4.644",
+  "date": "2026-10-16",
+  "type": "fix-only",
+  "summary": "Fewer false warnings, and status reports to Invardia arrive more completely.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Fewer false warnings",
+      "text": "Database access that is already in place is no longer reported as refused, and a new installation no longer logs a false setup failure."
+    },
+    {
+      "title": "Status reports reach Invardia in full",
+      "text": "One refused status field no longer holds back all the others."
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "version": "2.4.596",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Held policy changes look the same everywhere, and audit and report pages are clearer.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Held policy changes look the same everywhere",
+      "text": "Held policy change sets show the same on every page, and a SuperAdmin approves them."
+    },
+    {
+      "title": "Audit rows in plain words",
+      "text": "Audit rows say what changed in plain words."
+    },
+    {
+      "title": "Reports page shows true times",
+      "text": "The Reports page shows the true last sent and next run times."
+    },
+    {
+      "title": "Failed deployment checks alert at once",
+      "text": "A failed deployment check sends its alert at once again."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Warnings and open setup steps are amber, the PIM Activator app needs no user assignment, the as-built document fits the page, and the licence command is two lines."
+    }
+  ]
+}

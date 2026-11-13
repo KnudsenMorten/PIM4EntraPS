@@ -1,0 +1,18 @@
+{
+  "version": "2.4.617",
+  "date": "2026-10-13",
+  "type": "feature",
+  "summary": "A SuperAdmin decides whether PIM Manager may delete groups, and sees how many before confirming.",
+  "new": [
+    {
+      "title": "Switch for group deletion",
+      "text": "A SuperAdmin can switch group deletion on in Settings > Approvals & policy > Group deletion. The confirmation says how many groups will be deleted."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Groups waiting for deletion are clear",
+      "text": "A group marked for deletion shows as waiting to be deleted, with the reason. Texts that pointed at a missing menu now point at the right one."
+    }
+  ]
+}

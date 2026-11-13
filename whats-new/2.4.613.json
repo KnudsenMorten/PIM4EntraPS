@@ -1,0 +1,17 @@
+{
+  "version": "2.4.613",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "Status reports now say who has to act and how to solve the problem.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Status reports say who acts and how",
+      "text": "Every status report says whether it is ok, a warning, held or failed, and who has to act. A configuration problem comes with its solution in plain steps."
+    },
+    {
+      "title": "Hourly status and every update reported",
+      "text": "The status report goes every hour with the setup checks, and every update run is reported."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.561",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "A failed managed tenant install step tells you what went wrong.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Failed install steps show the real error",
+      "text": "On a managed tenant install, a failed step now shows its real error in the installation progress."
+    }
+  ]
+}

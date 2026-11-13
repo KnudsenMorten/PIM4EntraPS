@@ -1,0 +1,13 @@
+{
+  "version": "2.4.506",
+  "date": "2026-10-05",
+  "type": "fix-only",
+  "summary": "After an update you keep your staged changes and reload when you are ready.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "\"A new version is available\"",
+      "text": "After an update you see a calm bar with a Reload button instead of \"Session expired\". Your staged changes are kept and put back after the reload."
+    }
+  ]
+}

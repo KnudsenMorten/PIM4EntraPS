@@ -1,0 +1,22 @@
+{
+  "version": "2.4.368",
+  "date": "2026-09-18",
+  "type": "fix-only",
+  "summary": "Automatic updates never move an environment to an older version, and the ring you choose is the ring you get.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates never go backward",
+      "text": "The nightly update refuses to move an environment to an older version and names both versions. A deliberate rollback must be switched on for that environment."
+    },
+    {
+      "title": "Your chosen ring is applied and verified",
+      "text": "The update ring you choose at installation is now used and checked after deployment, instead of a default ring.",
+      "action": "If an environment has been running on a ring you did not intend, re-run the deployment naming the ring you want."
+    },
+    {
+      "title": "Clearer setup and edition documentation",
+      "text": "The README describes the six supported setups, explains the release ring versus the replication ring, and sets out the Community and Pro editions."
+    }
+  ]
+}

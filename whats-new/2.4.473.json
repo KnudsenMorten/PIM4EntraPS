@@ -1,0 +1,30 @@
+{
+  "version": "2.4.473",
+  "date": "2026-10-01",
+  "type": "feature",
+  "summary": "A Community installation can now move to Pro without reinstalling.",
+  "new": [
+    {
+      "title": "Upgrade Community to Pro in place",
+      "text": "Register a Pro licence on the Licence page and Pro features switch on at once. One command then adds automatic Pro updates."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Pro shown only when it unlocks",
+      "text": "A licence for another tenant, or one that is not Pro, is now refused when you register it."
+    },
+    {
+      "title": "\"Managing tenant\" and \"managed tenant\"",
+      "text": "These names replace the old MSP wording everywhere you read them. Nothing you stored changes."
+    },
+    {
+      "title": "New group roles no longer fail",
+      "text": "A new role-assignable group's first eligibility now shows as waiting and applies on the next run, instead of failing."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Create Discovered Resources now sits right under Create access."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "3.0.32",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "New installations use standard names and clear resource tags.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Standard names for new installs",
+      "text": "A new install uses the standard names and tags its resource group with product, ring, edition, hosting, tenant, owner and purpose. Existing installs keep their names."
+    }
+  ]
+}

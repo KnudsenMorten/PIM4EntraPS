@@ -1,0 +1,13 @@
+{
+  "version": "3.0.75",
+  "date": "2026-11-10",
+  "type": "feature",
+  "summary": "Microsoft Entra access packages can now decide who joins a delegation group, while PIM controls activation.",
+  "new": [
+    {
+      "title": "Entra access packages fill delegation groups",
+      "text": "An access package can decide who joins a delegation group, while PIM still decides how access is activated. It acts only when a package is defined; switching it off hands the groups back to PIM."
+    }
+  ],
+  "fixes": []
+}

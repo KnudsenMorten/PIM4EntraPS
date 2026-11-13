@@ -1,0 +1,21 @@
+{
+  "version": "2.4.510",
+  "date": "2026-10-06",
+  "type": "security",
+  "summary": "Restores from backup are for SuperAdmins and are fully audited.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Restore from backup is SuperAdmin only",
+      "text": "Restoring a table from a backup needs the SuperAdmin role. The audit trail lists what the restore changed and who did it."
+    },
+    {
+      "title": "Job schedule in your local time",
+      "text": "Next pull and next publish times now use your browser's time zone."
+    },
+    {
+      "title": "Discovery has its own menu item",
+      "text": "\"Discovery: create what is new\" is now a normal item under Access."
+    }
+  ]
+}

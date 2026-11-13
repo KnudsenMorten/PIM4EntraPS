@@ -1,0 +1,18 @@
+{
+  "version": "2.4.504",
+  "date": "2026-10-05",
+  "type": "feature",
+  "summary": "External companies and their consultants now have their own page with built-in reviews.",
+  "new": [
+    {
+      "title": "External Companies page",
+      "text": "One row per external company with its contacts, sponsor department, review cadence and consultants. The contacts get the access review mail and confirm or deny each consultant."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clearer portal sign-in field",
+      "text": "The request portal's sign-in field now asks for the Admin Account (UPN) or e-mail address."
+    }
+  ]
+}

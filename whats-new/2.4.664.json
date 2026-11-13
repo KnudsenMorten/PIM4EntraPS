@@ -1,0 +1,13 @@
+{
+  "version": "2.4.664",
+  "date": "2026-10-22",
+  "type": "fix-only",
+  "summary": "PIM Manager behind the sign-in front is no longer wrongly reported as undersized.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false undersized warning",
+      "text": "A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation or in the environment report."
+    }
+  ]
+}

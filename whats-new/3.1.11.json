@@ -1,0 +1,18 @@
+{
+  "version": "3.1.11",
+  "date": "2026-11-12",
+  "type": "feature",
+  "summary": "Every mail now tells you at a glance which environment and tenant it is about.",
+  "new": [
+    {
+      "title": "Every mail names its environment",
+      "text": "Each PIM Manager mail names its environment in the subject and first line, and the tenant in the body."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Invardia support sees database health",
+      "text": "The health report to Invardia support now includes the database tier, size, recent load and statistics health."
+    }
+  ]
+}

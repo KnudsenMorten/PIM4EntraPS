@@ -1,0 +1,13 @@
+{
+  "version": "2.4.659",
+  "date": "2026-10-21",
+  "type": "fix-only",
+  "summary": "People who sign in through the sign-in front stay signed in.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Sessions stay signed in",
+      "text": "The sign-in front no longer sends people back to sign in, and a session no longer ends after about an hour."
+    }
+  ]
+}

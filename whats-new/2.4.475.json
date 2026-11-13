@@ -1,0 +1,17 @@
+{
+  "version": "2.4.475",
+  "date": "2026-10-01",
+  "type": "fix-only",
+  "summary": "Managed tenants cost less to run because they no longer redo work when nothing changed.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Lower running cost for managed tenants",
+      "text": "A managed tenant no longer re-applies an unchanged set on every pull; it records unchanged and stops. Central changes still apply on the next pull."
+    },
+    {
+      "title": "No double runs",
+      "text": "Scheduled runs no longer repeat minutes after a change already covered the same areas."
+    }
+  ]
+}

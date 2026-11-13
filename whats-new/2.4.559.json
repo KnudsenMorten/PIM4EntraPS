@@ -1,0 +1,13 @@
+{
+  "version": "2.4.559",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "You never miss a sign-in window during setup.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Sign-in waits are shown in progress",
+      "text": "The installation progress now shows when setup waits for your browser sign-in, so a sign-in window is never missed."
+    }
+  ]
+}

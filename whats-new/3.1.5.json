@@ -1,0 +1,18 @@
+{
+  "version": "3.1.5",
+  "date": "2026-11-11",
+  "type": "fix-only",
+  "summary": "The mail sender setup now reports ready only when Exchange has really confirmed it.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail sender setup reports ready only when true",
+      "text": "The mail sender setup uses the mailbox's real primary address, reuses a scope that already covers it, and reports ready only once Exchange confirms each sending identity.",
+      "action": "If the mail sender setup ends as pending, re-run it later."
+    },
+    {
+      "title": "Clear stop when converting from Linux",
+      "text": "Converting to private from a Linux shell such as Azure Cloud Shell now refuses the Rebuild route at the start instead of failing halfway."
+    }
+  ]
+}

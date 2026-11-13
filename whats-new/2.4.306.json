@@ -1,0 +1,17 @@
+{
+  "version": "2.4.306",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "Importing your data is reliable and safe to repeat.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Imports complete reliably",
+      "text": "Imports no longer run out of database connections. A file that fails is undone whole, so running the import again is safe."
+    },
+    {
+      "title": "Failed files are named",
+      "text": "A failed file means a failed import, naming every file that failed and how many were imported."
+    }
+  ]
+}

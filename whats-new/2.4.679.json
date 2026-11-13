@@ -1,0 +1,13 @@
+{
+  "version": "2.4.679",
+  "date": "2026-10-27",
+  "type": "fix-only",
+  "summary": "Deleted groups disappear from PIM Manager once they are gone from Entra ID.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Deleted groups no longer linger",
+      "text": "After PIM Manager deletes a group marked for deletion, the group disappears from every view. Deletion counts and warnings count only groups that still exist in Entra ID."
+    }
+  ]
+}

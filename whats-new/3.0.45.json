@@ -1,0 +1,17 @@
+{
+  "version": "3.0.45",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "An undone update now tells you why, and the user count is more reliable.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Undone updates say why",
+      "text": "An update undone after its health check now says why: the app could not be read, or the new version did not start."
+    },
+    {
+      "title": "More reliable user count",
+      "text": "The enabled-user count is read again when it cannot be right, for example while an on-premises sync is still writing."
+    }
+  ]
+}

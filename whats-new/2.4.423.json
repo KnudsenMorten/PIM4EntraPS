@@ -1,0 +1,17 @@
+{
+  "version": "2.4.423",
+  "date": "2026-09-24",
+  "type": "fix-only",
+  "summary": "Held policy changes stay visible for approval, and Reset TAP always responds.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Held changes stay visible under Approvals",
+      "text": "After anyone opened Access reviews, Approvals stopped showing held policy changes until a restart. They now stay visible and can be approved."
+    },
+    {
+      "title": "Reset TAP always answers",
+      "text": "Clicking Reset TAP before the list had loaded did nothing. It now finds the admin anyway, or says so if the admin cannot be found."
+    }
+  ]
+}

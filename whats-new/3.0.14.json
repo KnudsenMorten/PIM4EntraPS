@@ -1,0 +1,13 @@
+{
+  "version": "3.0.14",
+  "date": "2026-11-01",
+  "type": "security",
+  "summary": "Your update key is tied to your own installation.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Update key tied to your installation",
+      "text": "Each installation has its own lasting id with Invardia, and its update key is tied to it. The id is kept across updates and is separate from anonymous telemetry."
+    }
+  ]
+}

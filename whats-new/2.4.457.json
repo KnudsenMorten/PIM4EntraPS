@@ -1,0 +1,25 @@
+{
+  "version": "2.4.457",
+  "date": "2026-09-28",
+  "type": "fix-only",
+  "summary": "The Manager is noticeably faster on Home, Jobs, Commit and Audit, and large reads from Microsoft are throttled less.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Home and Jobs load much faster",
+      "text": "Home now loads in 1 to 3 seconds instead of 4 to 6, and the Jobs page in about 0.7 seconds."
+    },
+    {
+      "title": "Recent changes on Commit appear instantly",
+      "text": "The recent configuration changes on the Commit page now load in a quarter of a second instead of about seven."
+    },
+    {
+      "title": "The Audit tab is faster",
+      "text": "The Audit tab reads the before and after details only for the entries on screen, so it is about a third faster."
+    },
+    {
+      "title": "Fewer slow-downs from Microsoft on large reads",
+      "text": "When Microsoft starts slowing PIM Manager down, it now asks for less at a time. Large reads hit far fewer limits and finish sooner."
+    }
+  ]
+}

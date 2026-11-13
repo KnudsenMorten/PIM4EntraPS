@@ -1,0 +1,13 @@
+{
+  "version": "3.1.9",
+  "date": "2026-11-11",
+  "type": "feature",
+  "summary": "You can now see Entra role holders that were assigned outside PIM.",
+  "new": [
+    {
+      "title": "See Entra roles assigned outside PIM",
+      "text": "Review all delegations now also lists Entra role holders assigned outside PIM, such as partner (GDAP) groups, Microsoft apps and roles scoped to an administrative unit."
+    }
+  ],
+  "fixes": []
+}

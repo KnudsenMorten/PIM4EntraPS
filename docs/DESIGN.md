@@ -12438,3 +12438,9 @@ off, being retired) and the Access packages page shows it in one line, with the 
 **Every change is staged.** Create, pause, resume, a policy change (who may request, approval stages, justification, how long
 access lasts, extension, access review) and retire are staged in Pending changes and written only by the normal audited
 commit. On the access map a package is its own box in the people column, linked to its new groups.
+
+## 34. What's new: one source, three places
+
+Each release ships `whats-new/<version>.json` (written for an admin from its release notes). The Manager shows them in
+Settings > What's new with the shared Invardia renderer, the release hand-over carries the folder to invardia.com, and the
+Community repository carries `WHATSNEW.md` generated from the same files -- the same words in all three places.

@@ -67,6 +67,7 @@
   "PUT /api/discovery-policy": "Save what happens with each kind of newly discovered resource.",
   "GET /api/docs": "The product documentation shipped with this version.",
   "GET /api/docs/page": "One page of the product documentation.",
+  "GET /api/whats-new": "What's new in every release of this product: new features and fixes, one entry per version.",
   "GET /api/downlink": "What the managing tenant sends to each managed tenant.",
   "GET /api/downlink-intents": "The removals the managing tenant has decided for managed tenants.",
   "PUT /api/downlink/policy": "Save what is sent to one managed tenant.",

@@ -1,0 +1,17 @@
+{
+  "version": "2.4.463",
+  "date": "2026-09-29",
+  "type": "fix-only",
+  "summary": "A new admin gets the first Temporary Access Pass straight away instead of up to half an hour later.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The first Temporary Access Pass arrives immediately",
+      "text": "A new admin's first pass was delayed 10 to 30 minutes because Entra ID needs a few seconds after creating the account. PIM Manager now waits briefly and retries in the same run."
+    },
+    {
+      "title": "Server onboarding without a hybrid worker",
+      "text": "Without a hybrid worker and no groups marked for Active Directory, server onboarding no longer shows \"not implemented\". It reports that there is nothing to onboard."
+    }
+  ]
+}

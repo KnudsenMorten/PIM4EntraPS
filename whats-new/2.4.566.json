@@ -1,0 +1,13 @@
+{
+  "version": "2.4.566",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "An installation no longer waits on Exchange to finish.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup no longer waits for Exchange",
+      "text": "If the mail sender cannot be set up yet, setup now continues with a warning instead of waiting, and the mail sender is set up later."
+    }
+  ]
+}

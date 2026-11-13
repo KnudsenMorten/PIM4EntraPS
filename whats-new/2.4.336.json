@@ -1,0 +1,34 @@
+{
+  "version": "2.4.336",
+  "date": "2026-09-12",
+  "type": "feature",
+  "summary": "Failed jobs explain what went wrong and offer a reviewed one-click fix.",
+  "new": [
+    {
+      "title": "Engine logs & errors page",
+      "text": "Jobs now has its own Engine logs & errors page with recent runs, full logs and a Failing now list showing each item, why, and what to do."
+    },
+    {
+      "title": "One-click fixes, still reviewed",
+      "text": "Failing items offer Remove this row or Make it Eligible. The fix goes to Pending changes and applies only when you commit."
+    },
+    {
+      "title": "Project and Cross-org groups",
+      "text": "Direct groups have new Project and Cross-org types. Department and Process groups are created by the engine."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Entra role assignments work again",
+      "text": "Entra role assignments made by the scheduled engine are applied again."
+    },
+    {
+      "title": "Re-issued passes are delivered",
+      "text": "A Temporary Access Pass re-issued from the queue is mailed to the account owner's office email. If mail cannot be delivered, the existing pass is left untouched."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Jobs run on their configured schedule, validation gives definite results, Admin accounts fields are clearer, and the admin word no longer loosens name checks."
+    }
+  ]
+}

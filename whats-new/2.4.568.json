@@ -1,0 +1,13 @@
+{
+  "version": "2.4.568",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "The optional mail sender step no longer stops an installation.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail sender step no longer stops setup",
+      "text": "The optional mail sender step no longer stops the installation because of its own waiting setting."
+    }
+  ]
+}

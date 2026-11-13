@@ -1,0 +1,13 @@
+{
+  "version": "2.4.600",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "The menu flags only what really needs you.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Menu numbers only when you must act",
+      "text": "The menu shows a number only for an error or something waiting for a person. Warnings such as gaps are listed on their page instead."
+    }
+  ]
+}

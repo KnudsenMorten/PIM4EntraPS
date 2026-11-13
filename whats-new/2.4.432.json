@@ -1,0 +1,17 @@
+{
+  "version": "2.4.432",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Changes that someone started but never committed no longer go unnoticed.",
+  "new": [
+    {
+      "title": "A daily reminder of uncommitted changes",
+      "text": "A new daily job finds staged changes and queued actions waiting over a day, with who started them. The list is mailed to your alert recipients with a link to Pending changes."
+    },
+    {
+      "title": "You control the reminder",
+      "text": "Switch the mail off under Alerting. A SuperAdmin can change the interval or turn the job off on the Jobs page."
+    }
+  ],
+  "fixes": []
+}

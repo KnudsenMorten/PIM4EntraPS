@@ -1,0 +1,21 @@
+{
+  "version": "2.4.478",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "You can act on many administrators at once and handle requests to enable admin accounts.",
+  "new": [
+    {
+      "title": "Act on many administrators at once",
+      "text": "Select administrators to link them to a company or department, or queue a new Temporary Access Pass or a sign-out everywhere for each."
+    },
+    {
+      "title": "Access requests page (Pro)",
+      "text": "Approve or deny requests to enable a disabled admin account for a set time, end a window early, or grant an IT override of up to 31 days."
+    },
+    {
+      "title": "Request portal for consultants (Pro)",
+      "text": "Consultants sign in with a one-time PIN to ask for access, and ticketing systems can send requests too. Deploying the portal is a separate step."
+    }
+  ],
+  "fixes": []
+}

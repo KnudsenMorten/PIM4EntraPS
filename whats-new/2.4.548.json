@@ -1,0 +1,26 @@
+{
+  "version": "2.4.548",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Engine actions are fully audited again, and PIM Manager runs without extra PowerShell modules.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Engine audit events are recorded again",
+      "text": "Account creation, Temporary Access Pass, approval, licence and access request events from the engine were missing from the audit trail. They are recorded again."
+    },
+    {
+      "title": "No PowerShell modules, one way to sign in",
+      "text": "PIM Manager no longer loads Microsoft PowerShell modules anywhere it runs for you, and every sign-in follows one path."
+    },
+    {
+      "title": "Setup signs you in through the browser",
+      "text": "Setup scripts no longer borrow an existing Azure CLI sign-in. They use an open Invardia support session or sign you in in the browser.",
+      "action": "Complete the browser sign-in when a setup script asks for it."
+    },
+    {
+      "title": "Hybrid worker needs fewer tools",
+      "text": "Creating the hybrid worker's Active Directory groups and service account no longer needs the Active Directory PowerShell tools."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "2.4.483",
+  "date": "2026-10-03",
+  "type": "security",
+  "summary": "Security improvements for the AI assistant connection.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger sign-in for AI assistants",
+      "text": "The AI assistant connection uses your sign-in and stays off by default.",
+      "action": "If you use the AI assistant connection, re-run its sign-in setup once after the update."
+    },
+    {
+      "title": "AI assistants find the sign-in",
+      "text": "AI assistant clients can now discover how to sign in by themselves."
+    },
+    {
+      "title": "Ticketing connectors show every field",
+      "text": "A connector set up from the live access request description now shows all request fields."
+    }
+  ]
+}

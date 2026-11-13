@@ -1,0 +1,32 @@
+{
+  "version": "2.4.380",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "Groups are always created, permission templates can be imported by script, and the Pro edition is introduced.",
+  "new": [
+    {
+      "title": "Groups are always created",
+      "text": "A permission group is created even when its workload is not ready. Only a new workload role assignment waits until that workload's prerequisites are green, and the GUI shows where.",
+      "action": "Run the workload prerequisite script once for Intune, Defender XDR and Power BI, or their new role assignments wait."
+    },
+    {
+      "title": "Import permission templates by script",
+      "text": "You can import template packs into one or many environments by script. It adds only what is missing, reuses existing groups and takes a snapshot first."
+    },
+    {
+      "title": "The Pro edition",
+      "text": "Single-tenant essentials stay free. Coverage & gaps, extra connectors, Access reviews, managing and managed tenants and more need a Pro licence; Settings > Licence shows your status.",
+      "action": "If you use managed tenants or any Pro feature, install your Pro licence before upgrading."
+    },
+    {
+      "title": "Microsoft Sentinel option",
+      "text": "The workload prerequisite script can now enable Microsoft Sentinel on a dedicated, empty security workspace, if you choose."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Defender XDR role assignments fixed",
+      "text": "Defender XDR role assignments now include what Microsoft requires, and new custom roles are found correctly after creation."
+    }
+  ]
+}

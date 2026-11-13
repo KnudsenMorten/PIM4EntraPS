@@ -1,0 +1,25 @@
+{
+  "version": "2.4.645",
+  "date": "2026-10-17",
+  "type": "fix-only",
+  "summary": "Mails are easy to read on a phone and Active assignments opens fast on large tenants.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mails read well on a phone",
+      "text": "Mails put the summary first, use no tables and give each item its own topic line, so they are easy to read on a phone."
+    },
+    {
+      "title": "Active assignments opens fast",
+      "text": "The Active assignments page opens fast on a large tenant."
+    },
+    {
+      "title": "Least database rights for Community",
+      "text": "Community installations can now use the least-privilege database model too."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Updates can be started at once, and status reports to Invardia carry more counts."
+    }
+  ]
+}

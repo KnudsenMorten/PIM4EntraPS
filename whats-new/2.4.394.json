@@ -1,0 +1,22 @@
+{
+  "version": "2.4.394",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "You can now give people and groups access straight from the Access map.",
+  "new": [
+    {
+      "title": "Grant access from the Access map",
+      "text": "Select a person, a group or a permission group and add people, groups or permissions to it. Nothing reaches your tenant until you commit on Review & Save."
+    },
+    {
+      "title": "The map only adds",
+      "text": "Nothing can be removed from the Access map, so it stays safe to show a reviewer. Linking needs the Admin role; removing access stays on Maintenance & Revoke."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Direct role assignments are kept",
+      "text": "Saving the table of directly assigned roles can no longer drop rows."
+    }
+  ]
+}

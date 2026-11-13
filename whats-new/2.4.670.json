@@ -1,0 +1,17 @@
+{
+  "version": "2.4.670",
+  "date": "2026-10-23",
+  "type": "fix-only",
+  "summary": "Screens show plain names and words instead of internal ids; nothing behaves differently.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Plain names instead of internal ids",
+      "text": "Held policy change sets name each rule in words, such as Maximum activation duration. The Guards page and Features cards show names instead of internal ids."
+    },
+    {
+      "title": "Clearer Workload templates and Drift texts",
+      "text": "The Workload templates page says the packs come with PIM Manager, and the Drift note says plainly what the read-only check finds."
+    }
+  ]
+}

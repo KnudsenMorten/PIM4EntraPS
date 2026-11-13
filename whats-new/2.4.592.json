@@ -1,0 +1,13 @@
+{
+  "version": "2.4.592",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "Graph view and Access map use more of the screen and nothing is covered.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "More room for Graph view and Access map",
+      "text": "The board keeps most of the screen and the page scrolls, so the detail bar no longer covers it. Back to overview is a clear button."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "2.4.407",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "You can now see both update schedules in one place, and every managed tenant can pull on demand.",
+  "new": [
+    {
+      "title": "Both schedules on one page",
+      "text": "The Job schedule page now shows the daily software update beside the definitions pull, with its timing, its ring and where to change it."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Run pull now on every managed tenant",
+      "text": "Before, only locally hosted managed tenants offered Run pull now. Every managed tenant now shows its pull schedule and the button."
+    },
+    {
+      "title": "Clearer replication label",
+      "text": "An empty replication value now reads \"No replication to managed tenants (default)\" instead of \"(blank)\". Your data is unchanged."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "date": "2026-06-02",
+  "type": "feature",
+  "summary": "The first version of the PIM Manager toolkit, with a visual editor for your delegation model and the PIM Activator.",
+  "new": [
+    {
+      "title": "See and edit your delegation model",
+      "text": "PIM Manager shows your delegation model as a graph or grid, and shows every difference before you commit."
+    },
+    {
+      "title": "PIM Activator for bulk activation",
+      "text": "An Edge extension lets you activate several PIM for Groups memberships at once."
+    },
+    {
+      "title": "One-step engine setup",
+      "text": "The engine's app registration is set up in one step."
+    },
+    {
+      "title": "Safer new accounts",
+      "text": "Each new account gets its own random password, with an optional Temporary Access Pass, and WhatIf mode is reliable.",
+      "action": "Grant the engine identity the permission to manage user authentication methods, and re-save your admin definitions to use Temporary Access Passes."
+    }
+  ],
+  "fixes": []
+}

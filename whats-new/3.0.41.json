@@ -1,0 +1,29 @@
+{
+  "version": "3.0.41",
+  "date": "2026-11-05",
+  "type": "security",
+  "summary": "Invardia support keeps read-only access by default, and each PIM component can move to its own identity safely.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Support access stays read-only",
+      "text": "Invardia support keeps read-only database access, with admin rights only inside an open support session."
+    },
+    {
+      "title": "As-built document reaches support directly",
+      "text": "A private installation's as-built document reaches Invardia support straight from the installation, checked on arrival, with no outside access to its storage."
+    },
+    {
+      "title": "Managing tenant builds clean up after themselves",
+      "text": "A managing tenant build removes its own temporary database admin membership when it finishes."
+    },
+    {
+      "title": "Each component can move to its own identity",
+      "text": "A new script moves each PIM component to its own identity, proving the new one works before any old right is removed."
+    },
+    {
+      "title": "Simpler hybrid worker deploy",
+      "text": "The hybrid worker deploy script is now one self-contained, checked file."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.399",
+  "date": "2026-09-21",
+  "type": "fix-only",
+  "summary": "A link made by dragging on the Access map now shows up straight away.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Dragged links show on the map",
+      "text": "A link made by dragging was added but not drawn. It now shows the dashed line and staged marking, exactly like Ctrl+click."
+    }
+  ]
+}

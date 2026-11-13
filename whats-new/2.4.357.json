@@ -1,0 +1,22 @@
+{
+  "version": "2.4.357",
+  "date": "2026-09-14",
+  "type": "feature",
+  "summary": "Job logs show what each run actually did, and jobs that recovered stop showing as failing.",
+  "new": [
+    {
+      "title": "Logs show the full run output",
+      "text": "The Logs button on Jobs shows everything a run checked and changed, with warnings and errors. Live tail shows progress while an engine job runs."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Run now works for every scheduled check",
+      "text": "Run now on the convergence check and discovery jobs queues them for the scheduler instead of reporting not implemented."
+    },
+    {
+      "title": "Recovered jobs no longer show as failing",
+      "text": "Earlier failures of a job that has since recovered show under History. Ack clears all standing failures of a job in one click."
+    }
+  ]
+}

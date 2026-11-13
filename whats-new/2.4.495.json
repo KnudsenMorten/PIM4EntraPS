@@ -1,0 +1,26 @@
+{
+  "version": "2.4.495",
+  "date": "2026-10-04",
+  "type": "fix-only",
+  "summary": "Emergency access reaches Active Directory in seconds, however many servers you have.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Critical AD groups sync in seconds",
+      "text": "The hybrid worker keeps critical groups such as Domain Admins in sync within about 20-30 seconds, however many servers you have.",
+      "action": "On a hybrid worker installed before this version, run the hybrid worker setup's Layout step once."
+    },
+    {
+      "title": "New AD accounts and groups within seconds",
+      "text": "A new or changed AD admin account or AD group is created or updated in Active Directory within seconds of the commit."
+    },
+    {
+      "title": "Server groups sync in parallel",
+      "text": "Per-server admin groups are read in parallel batches, adjustable under Settings > Hybrid AD & workloads."
+    },
+    {
+      "title": "Job timing counts from the finish",
+      "text": "A job is next due its interval after it finished, never while it is still running. The Jobs page says so."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.441",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "Checks on acknowledged warnings and imports work as intended.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Warning and import checks work fully",
+      "text": "Acknowledging a warning now gets the same full check the engine applies, and the import check uses your tenant's roles, groups and scopes as intended."
+    }
+  ]
+}

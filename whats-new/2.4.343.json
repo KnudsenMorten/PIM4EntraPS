@@ -1,0 +1,17 @@
+{
+  "version": "2.4.343",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "The Manager stays fast and stable when many people use it at once.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stable under heavy use",
+      "text": "The Manager no longer runs out of database connections, and its database sign-in renews on time under frequent use."
+    },
+    {
+      "title": "Home no longer freezes the Manager",
+      "text": "The expiring-assignments tile reuses a recent result, so opening Home does not block other users."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "3.0.70",
+  "date": "2026-11-09",
+  "type": "security",
+  "summary": "Invardia support holds database admin rights only while a support session is open.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Support database access is time-limited",
+      "text": "While a support session is open, the Invardia Support app is a database administrator only until the session ends, at most 24 hours."
+    },
+    {
+      "title": "Guards never hold back an update",
+      "text": "Strict mode only lowers PIM Manager's own change limits; it never blocks an update."
+    }
+  ]
+}

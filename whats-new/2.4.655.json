@@ -1,0 +1,13 @@
+{
+  "version": "2.4.655",
+  "date": "2026-10-20",
+  "type": "fix-only",
+  "summary": "Pages load again behind the sign-in front and no longer sign out by themselves.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Pages load behind the sign-in front again",
+      "text": "On installations that opted in to the sign-in front, pages load again and the hourly silent refresh no longer signs a page out."
+    }
+  ]
+}

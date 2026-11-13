@@ -1,0 +1,17 @@
+{
+  "version": "2.4.447",
+  "date": "2026-09-26",
+  "type": "feature",
+  "summary": "Access reviews now run per department on rules you set, and departments without an owner are flagged daily.",
+  "new": [
+    {
+      "title": "Review rules per department",
+      "text": "On Access reviews, Review rules sets how often each department is reviewed, for how long, by whom and with one or two approvers. A department can also opt out."
+    },
+    {
+      "title": "Departments without an owner are reported",
+      "text": "A department without an owner is reported to the alert recipients every day until someone names an owner."
+    }
+  ],
+  "fixes": []
+}

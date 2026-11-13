@@ -1,0 +1,25 @@
+{
+  "version": "2.4.500",
+  "date": "2026-10-05",
+  "type": "fix-only",
+  "summary": "Approval counts are correct again, and menus and the admin wizard are easier to use.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Expired approvals no longer count",
+      "text": "Requests past their 72-hour expiry no longer count on the Approvals badge or the Overview."
+    },
+    {
+      "title": "Admin wizard asks key questions first",
+      "text": "Step 1 starts with the admin type, Company shows only for consultants, and dates are simple dropdowns of common choices."
+    },
+    {
+      "title": "Clearer menus",
+      "text": "Departments & owners sits next to External Companies, Workload templates has its own page, and Discovery is one menu entry."
+    },
+    {
+      "title": "Access requests page in cards",
+      "text": "The page is laid out in cards and picks the admin for an IT override from a list."
+    }
+  ]
+}

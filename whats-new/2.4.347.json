@@ -1,0 +1,18 @@
+{
+  "version": "2.4.347",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Your staged changes are no longer lost when the page reloads or the Manager restarts.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Staged changes survive a reload",
+      "text": "Pending changes are kept in your browser and put back after a reload, on top of any colleague's commit. The page asks before you leave with uncommitted changes.",
+      "action": "Before updating an environment that runs an older version, commit or note your pending changes."
+    },
+    {
+      "title": "Discarded entries hidden by default",
+      "text": "Tick Show discarded to see who discarded queue entries and why."
+    }
+  ]
+}

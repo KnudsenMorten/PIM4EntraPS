@@ -1,0 +1,21 @@
+{
+  "version": "3.0.23",
+  "date": "2026-11-03",
+  "type": "fix-only",
+  "summary": "Every installation reports its setup steps to Invardia, so all installations can be kept the same.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup steps are reported to Invardia",
+      "text": "Every install reports its one-time setup steps to Invardia from a real check on every update, so all installs can be kept the same."
+    },
+    {
+      "title": "As-built report storage respects your policy",
+      "text": "Where a tenant policy forbids public access, the as-built report storage is created private, and a refusal no longer stops the rest of the setup."
+    },
+    {
+      "title": "No more could-not-check message",
+      "text": "The updater no longer says it could not check the engine permissions."
+    }
+  ]
+}

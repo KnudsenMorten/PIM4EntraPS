@@ -1,0 +1,29 @@
+{
+  "version": "2.4.448",
+  "date": "2026-09-26",
+  "type": "feature",
+  "summary": "Department access reviews now run inside PIM Manager, reviewing people rather than groups, with no extra Microsoft licence.",
+  "new": [
+    {
+      "title": "Reviews cover a department's people",
+      "text": "Each round lists every admin account of the department with the access it holds. Reviewers choose Keep or Remove per person on My people."
+    },
+    {
+      "title": "Two approvers, parallel or serial",
+      "text": "In parallel both decide and any Remove wins. In serial approver 1 decides first and approver 2 has the final word."
+    },
+    {
+      "title": "Unanswered reviews are chased",
+      "text": "After the due date reviewers get a weekly reminder three times, then alert recipients are told and the round closes. Undecided people keep their access."
+    },
+    {
+      "title": "Senior administrators can override",
+      "text": "A senior administrator can decide any open person on the Access reviews page. Every decision is recorded in the audit trail."
+    },
+    {
+      "title": "Remove always goes through approval",
+      "text": "Remove never takes access away directly. It raises a removal request that a PIM administrator approves."
+    }
+  ],
+  "fixes": []
+}

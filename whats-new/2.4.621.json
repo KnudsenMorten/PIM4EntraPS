@@ -1,0 +1,22 @@
+{
+  "version": "2.4.621",
+  "date": "2026-10-13",
+  "type": "feature",
+  "summary": "Every Access list shows a State column, so problems stand out at a glance.",
+  "new": [
+    {
+      "title": "State column on Access lists",
+      "text": "Every list under Access now has a State column for accounts and groups, with problems first and in colour. A queued new account is never shown red."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Gone accounts leave the plan",
+      "text": "Deleted admins whose account no longer exists are no longer planned to be created again."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "A notice about AD rights for older hybrid installations, reconcile says Left alone, and AD clean-up times show in local time."
+    }
+  ]
+}

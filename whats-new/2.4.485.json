@@ -1,0 +1,25 @@
+{
+  "version": "2.4.485",
+  "date": "2026-10-03",
+  "type": "fix-only",
+  "summary": "Several environments in one tenant now stay fully separate.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Each environment gets its own sign-in app",
+      "text": "A second environment in the same tenant no longer takes over the first one's sign-in app. Each gets its own app, groups and mailbox."
+    },
+    {
+      "title": "Mail sent from the right mailbox",
+      "text": "Each environment's permission to send notification mail now covers only its own mailbox."
+    },
+    {
+      "title": "Setup with several subscriptions",
+      "text": "Setup now targets the right subscription, stops with the real reason when Azure refuses, and no longer rolls back a healthy deployment."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "AI assistant sign-in now finishes on deployed environments, and the edition lists are corrected."
+    }
+  ]
+}

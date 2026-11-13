@@ -1,0 +1,29 @@
+{
+  "version": "2.4.392",
+  "date": "2026-09-21",
+  "type": "fix-only",
+  "summary": "Job status is always current, commits no longer fail after a template import, and fewer policy changes wait for approval.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Jobs clear themselves when they recover",
+      "text": "A job shows as failing only while its latest run failed. There is nothing to acknowledge, and Jobs, Overview and the menu count always agree."
+    },
+    {
+      "title": "Commit all works after a template import",
+      "text": "Commits could fail after importing a template pack. Commit now runs once, and the import skips groups that already exist and tells you which."
+    },
+    {
+      "title": "Fewer policy approvals",
+      "text": "A policy nobody has ever changed, such as one on a group you just created, gets its template without needing approval. Policies someone set are still held."
+    },
+    {
+      "title": "Temporary Access Pass lasts 8 hours",
+      "text": "When no lifetime is set, a Temporary Access Pass lasts 8 hours, not 48 as the previous release said, and never longer than your tenant allows."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Defender XDR roles no longer show as changed on every run, error messages are clearer, template packs can be imported from Settings, and some labels were corrected."
+    }
+  ]
+}

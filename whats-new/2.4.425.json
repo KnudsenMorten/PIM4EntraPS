@@ -1,0 +1,17 @@
+{
+  "version": "2.4.425",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "Access map lines stay in place, and admins scheduled for later no longer cause false failures.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Access map lines stay in place",
+      "text": "Clicking Remove access or Give access twice threw the lines across the board. The map now redraws its lines once the layout has settled."
+    },
+    {
+      "title": "No false failures for future admins",
+      "text": "Memberships for an admin scheduled for a later date were reported as missing from the tenant. They now wait and are applied right after the account is created."
+    }
+  ]
+}

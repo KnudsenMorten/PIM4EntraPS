@@ -1,0 +1,21 @@
+{
+  "version": "2.4.406",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Removals and renames you decide once on the managing tenant now reach every managed tenant.",
+  "new": [
+    {
+      "title": "Remove a row in managed tenants too",
+      "text": "When you remove a replicated row, you can choose to remove it in the managed tenants as well. Each tenant removes it on its next pull, without separate approvals."
+    },
+    {
+      "title": "Renamed groups stay one group",
+      "text": "Renaming a group now renames it in the managed tenants instead of creating a second group. A rename onto a name a tenant already uses is refused."
+    },
+    {
+      "title": "See and cancel before publishing",
+      "text": "Every authorised removal or rename is listed on Pending changes with what, where and who decided it. You can cancel it before it is published."
+    }
+  ],
+  "fixes": []
+}

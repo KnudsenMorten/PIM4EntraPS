@@ -1,0 +1,30 @@
+{
+  "version": "2.4.379",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "Policy templates are consistent for every kind, can be renamed, and can be chosen wherever you delegate.",
+  "new": [
+    {
+      "title": "Standard and approval templates per kind",
+      "text": "PIM for Groups, Entra ID roles and Azure roles each have a Standard and a RequireApproval template. Azure roles keep exactly the same rules as before.",
+      "action": "Do not roll this environment back to an older version after upgrading; always upgrade forward."
+    },
+    {
+      "title": "Rename policy templates safely",
+      "text": "A SuperAdmin can rename any template on the Policy templates page. Rows keep working, because they refer to the template, not its name."
+    },
+    {
+      "title": "A default template per kind",
+      "text": "The Policy templates page sets one default for groups, Entra ID roles and Azure roles. A row without a template uses its kind's default."
+    },
+    {
+      "title": "Template picker in every wizard",
+      "text": "Every delegation wizard and grid now lets you pick a policy template, showing only templates of the right kind."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Template packs can only be imported once their workload prerequisites are green, the prerequisite script can enable Microsoft Sentinel, and several workload checks read correctly."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.564",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "A resumed installation finishes creating PIM Manager's apps.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Resumed setup creates the apps",
+      "text": "When you resume setup, it now finds what the earlier run created, so the Container Apps are created instead of the step failing."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.395",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Picking what to link on the Access map is faster and nothing is written until you commit.",
+  "new": [
+    {
+      "title": "Pick links from a searchable list",
+      "text": "When you start a link on the Access map, the candidates appear in a list you can filter by name or tag. Click entries to add them, then press Done."
+    },
+    {
+      "title": "See what is already linked",
+      "text": "Items the selection already has are shown as already linked rather than hidden, so a missing group really is missing."
+    },
+    {
+      "title": "Links wait for Review & Save",
+      "text": "Each pick becomes a pending change shown as a dashed line. You commit it on Review & Save, and it is backed up first and applied in your tenant straight away."
+    }
+  ],
+  "fixes": []
+}

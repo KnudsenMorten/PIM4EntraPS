@@ -1,0 +1,26 @@
+{
+  "version": "2.4.471",
+  "date": "2026-10-01",
+  "type": "feature",
+  "summary": "You can now hide unmanaged admin accounts you do not care about, and no requested run is lost.",
+  "new": [
+    {
+      "title": "Ignore unmanaged admin accounts",
+      "text": "On Admin accounts, Ignore hides an unmanaged account for everyone, with an optional reason. Stop ignoring brings it back."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Requested runs are never lost",
+      "text": "Two runs queued at the same moment, such as Run now during a change, no longer overwrite each other."
+    },
+    {
+      "title": "New group memberships no longer fail",
+      "text": "Adding a member right after PIM Manager creates a group now shows as waiting and applies on the next run."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The unmanaged accounts box stays closed until a new account appears."
+    }
+  ]
+}

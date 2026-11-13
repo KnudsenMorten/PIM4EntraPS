@@ -1,0 +1,13 @@
+{
+  "version": "2.4.648",
+  "date": "2026-10-18",
+  "type": "fix-only",
+  "summary": "Moving PIM Manager onto the shared sign-in front is no longer refused by Azure.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Sign-in front move fits Azure limits",
+      "text": "Behind the shared sign-in front, PIM Manager keeps at most 3.75 CPU and 7.5 GB, so Azure no longer refuses the move. Updates never raise it past that."
+    }
+  ]
+}

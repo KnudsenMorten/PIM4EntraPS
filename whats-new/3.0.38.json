@@ -1,0 +1,13 @@
+{
+  "version": "3.0.38",
+  "date": "2026-11-05",
+  "type": "fix-only",
+  "summary": "Every installation now uses the current support access setup.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Support access is brought up to date",
+      "text": "An installation on the earlier support access setup is moved to the current one first. Time-limited admin access for support opens only on the current one."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.622",
+  "date": "2026-10-13",
+  "type": "fix-only",
+  "summary": "The mail-sender setup tells you why Exchange refused a step.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail-sender setup shows Exchange's reason",
+      "text": "When Exchange refuses a step in the mail-sender setup, you now see Exchange's own reason instead of a bare error."
+    }
+  ]
+}

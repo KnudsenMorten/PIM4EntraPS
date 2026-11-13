@@ -1,0 +1,13 @@
+{
+  "version": "2.4.374",
+  "date": "2026-09-19",
+  "type": "fix-only",
+  "summary": "A new admin who has not yet set up sign-in no longer blocks every change.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Missing sign-in methods no longer block commits",
+      "text": "An admin without a strong sign-in method used to block every commit. This is now a warning on Validate, so you can keep working."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "version": "3.0.82",
+  "date": "2026-11-10",
+  "type": "feature",
+  "summary": "Get Started now guides you through Azure resources and Workloads, and shows who needs which rights.",
+  "new": [
+    {
+      "title": "Get Started: Azure resources step",
+      "text": "A new optional step shows the scopes PIM Manager manages and, per scope, the command that gives the engine User Access Administrator."
+    },
+    {
+      "title": "Get Started: Workloads step",
+      "text": "A new optional step shows what is missing for Defender XDR, Intune and Power BI, with Confirm or Not used."
+    },
+    {
+      "title": "Who needs what table",
+      "text": "Engine permissions opens with a table listing each identity by name and object id with its rights."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clearer Settings",
+      "text": "A category click goes to the top, the leftover card reads Remove access when its definition is deleted, and the Emergency override card explains itself and stays off until a passphrase is set."
+    }
+  ]
+}

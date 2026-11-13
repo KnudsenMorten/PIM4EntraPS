@@ -1,0 +1,26 @@
+{
+  "version": "2.4.373",
+  "date": "2026-09-19",
+  "type": "security",
+  "summary": "Disabling an admin always needs a second person, and Azure access is granted through PIM only.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Disabling an admin needs two people",
+      "text": "A grid change that would disable an admin is now held for an offboard approval. The rest of your commit is saved as normal."
+    },
+    {
+      "title": "Azure access is always PIM-eligible",
+      "text": "The Azure workload connector now creates PIM-eligible assignments instead of permanent ones."
+    },
+    {
+      "title": "Security hardening",
+      "text": "Stronger protection for the product itself, and a managing tenant can now publish a signed stop instruction to its managed tenants.",
+      "action": "If you moved log or sync folders away from the defaults, make sure PIM Manager can still write there."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "New environments use scheduled jobs by default, and outdated hosting guidance was removed."
+    }
+  ]
+}

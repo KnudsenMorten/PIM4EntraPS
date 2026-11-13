@@ -1,0 +1,17 @@
+{
+  "version": "3.0.19",
+  "date": "2026-11-02",
+  "type": "feature",
+  "summary": "You can install PIM Manager on a private network, or make an existing install private, with the same two lines.",
+  "new": [
+    {
+      "title": "Private network with the same two lines",
+      "text": "Add the private network option to the two install lines to install privately or to turn an existing public installation private. The database and registry get public access off."
+    },
+    {
+      "title": "Use your own network and hub",
+      "text": "You can use an existing network in another resource group and peer it with your hub. Rights are checked first, and private DNS zones can be linked to the hub."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,21 @@
+{
+  "version": "3.0.33",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "Drift and alerts now show only the groups PIM Manager defines, and private installs stay private.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Drift shows only PIM Manager groups",
+      "text": "Drift, alerts and pages never list a group PIM Manager does not define. Before, a tenant's own groups and their owners showed as drift."
+    },
+    {
+      "title": "Private installs can route through your hub",
+      "text": "A private installation can get a return route for your internal ranges through your hub firewall."
+    },
+    {
+      "title": "Private installs stay private",
+      "text": "A private installation is never opened up, not even for a build or the mail sender setup."
+    }
+  ]
+}

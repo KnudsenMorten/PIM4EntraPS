@@ -1,0 +1,14 @@
+{
+  "version": "2.4.339",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Assignments that exist as both eligible and active are kept unless you decide otherwise.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Both assignment types are kept",
+      "text": "An assignment that is both eligible and active is no longer trimmed automatically, as in v1. Changing a row between eligible and active still replaces the old type.",
+      "action": "To trim leftover types, turn on the Remove type leftovers setting after reviewing what it would remove."
+    }
+  ]
+}

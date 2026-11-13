@@ -1,0 +1,25 @@
+{
+  "version": "2.4.464",
+  "date": "2026-09-30",
+  "type": "fix-only",
+  "summary": "Committed removals always take effect, and the hybrid worker copes with protected groups and existing servers.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A committed removal always does its job",
+      "text": "A removal committed seconds after the access was given could be cleared before it acted. It is now kept until a second check, ten minutes later, confirms nothing is left."
+    },
+    {
+      "title": "Protected AD groups no longer fail hourly",
+      "text": "Groups that Active Directory protects, such as Domain Admins, keep their own name and description. The hybrid worker reports that difference instead of failing every hour; membership is unaffected."
+    },
+    {
+      "title": "Servers set up earlier are recognised",
+      "text": "Discovery now says when creating a server's group adopts the group your earlier PIM for Active Directory scripts made, instead of making a new one."
+    },
+    {
+      "title": "Clearer message when the worker lacks rights",
+      "text": "The hybrid worker now tells \"no access\" on a server apart from \"unreachable\", and names the exact group to add its account to."
+    }
+  ]
+}

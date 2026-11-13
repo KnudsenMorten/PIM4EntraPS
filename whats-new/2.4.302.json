@@ -1,0 +1,13 @@
+{
+  "version": "2.4.302",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "The nightly update runs again instead of stopping at once.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The nightly update runs again",
+      "text": "The updater stopped immediately because it could not find its own program files. It runs again, and names anything missing if that ever happens."
+    }
+  ]
+}

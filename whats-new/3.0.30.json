@@ -1,0 +1,13 @@
+{
+  "version": "3.0.30",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "A private install checks its internet route first instead of creating something that would fail.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Private install checks internet access first",
+      "text": "Before it creates its build pool, a private install checks that the pool can reach the internet. If not, it names your step instead of creating a pool that would fail."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": "2.4.358",
+  "date": "2026-09-14",
+  "type": "fix-only",
+  "summary": "Engine jobs run again in hosted environments.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Engine jobs run again",
+      "text": "On the previous version, engine jobs in hosted environments stopped before applying anything. They run normally again, and their output is still kept for Logs.",
+      "action": "If a hosted environment runs version 2.4.357, update it to this version."
+    }
+  ]
+}

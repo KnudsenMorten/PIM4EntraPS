@@ -1,0 +1,13 @@
+{
+  "version": "2.4.449",
+  "date": "2026-09-26",
+  "type": "fix-only",
+  "summary": "Reviewers who sign in with an admin account now receive their review mails.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Review mails reach admin-account reviewers",
+      "text": "Admin accounts have no mailbox, so review and reminder mails now go to the account's forward address or its department's owners."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "3.0.51",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "Database setup never disturbs a running PIM job.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Database setup works safely during job runs",
+      "text": "While a PIM job runs, database setup only adds users, roles and grants; every other step waits. An update no longer starts full database setup during a running job."
+    }
+  ]
+}

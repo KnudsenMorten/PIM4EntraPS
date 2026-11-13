@@ -1,0 +1,13 @@
+{
+  "version": "2.4.612",
+  "date": "2026-10-12",
+  "type": "fix-only",
+  "summary": "PIM Manager sizes itself correctly on install and update, and keeps a size you set.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Right size set automatically",
+      "text": "Installation and updates set the PIM Manager web app to 4 CPU and 8 GB and the database to the S3 tier. An update keeps a size you set."
+    }
+  ]
+}

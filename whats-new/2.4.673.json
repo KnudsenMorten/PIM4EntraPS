@@ -1,0 +1,13 @@
+{
+  "version": "2.4.673",
+  "date": "2026-10-24",
+  "type": "fix-only",
+  "summary": "Healthy installations are no longer wrongly reported as not fully updated.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Healthy installations report as updated",
+      "text": "The nightly update no longer rewrites parts that are already on the new version. A healthy installation is no longer reported as not fully updated."
+    }
+  ]
+}

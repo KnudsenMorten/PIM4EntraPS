@@ -1,0 +1,13 @@
+{
+  "version": "2.4.558",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "One browser sign-in covers the whole installation.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One sign-in for every setup step",
+      "text": "Every script of the installation now shares your one browser sign-in, so no second prompt appears when the managed tenant build starts."
+    }
+  ]
+}

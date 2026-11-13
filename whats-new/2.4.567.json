@@ -1,0 +1,13 @@
+{
+  "version": "2.4.567",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "You can resume an installation from a different network.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Resume works from another network",
+      "text": "When you resume setup from a different internet address, the temporary database firewall rule now moves to your current address."
+    }
+  ]
+}

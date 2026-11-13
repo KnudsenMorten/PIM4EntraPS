@@ -1,0 +1,13 @@
+{
+  "version": "2.4.654",
+  "date": "2026-10-20",
+  "type": "fix-only",
+  "summary": "Large tenants get a lighter, faster active-assignments refresh.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Lighter refresh on large tenants",
+      "text": "On large tenants, the active-assignments list re-reads only groups that changed, with a full read once a week, instead of every group every 2 hours."
+    }
+  ]
+}

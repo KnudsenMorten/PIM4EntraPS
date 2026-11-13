@@ -1,6 +1,6 @@
-# Release notes — PIM4EntraPS
+# Release notes — PIM Manager
 
-PIM4EntraPS is privileged-access governance for Microsoft Entra ID and Azure. It keeps administrator
+PIM Manager is privileged-access governance for Microsoft Entra ID and Azure. It keeps administrator
 accounts, PIM delegations and PIM policies in line with the desired state you manage in the PIM Manager,
 and lets administrators activate their access from the PIM Activator browser extension.
 
@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.23 -- 2026-11-13
+
+- A new What's new page (Settings > What's new) shows every release in plain words, newest first; the same list is on invardia.com and in the Community repository; the release notes describe each change by its effect
+
+## 3.1.22 -- 2026-11-13
+
+- PIM Manager never creates, changes or deletes a Defender XDR role any more; a group is added only to an existing role that grants no more than its definition, and any difference is reported; a permission covered by a wildcard counts as present, so the shorter way Microsoft now shows role permissions no longer fails the workload job; differences in Data sources are reported and never fail the run.
+
+## 3.1.21 -- not released
+
+- This version number was not released, because its changes shipped as 3.1.22.
+
+## 3.1.20 -- 2026-11-13
+
+- Every request to Microsoft is sent as UTF-8 with charset=utf-8, checked on the wire by a test; this does not fix the Microsoft-side mail refusal seen since 2026-11-12, which is with Microsoft.
+
 ## 3.1.19 -- 2026-11-12
 
 - Image clean-up reports true numbers: after the deletes it reads the registry back correctly, so the kept images are counted as kept and never named missing (internal only).
@@ -35,7 +51,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.1.14 -- 2026-11-12
 
-- After a successful, read-back update the updater keeps only the current and the previous image in the install's own registry (plus every image in use) and deletes the rest, so old images no longer show old vulnerabilities. Two timing-dependent tests now check a fixed condition.
+- After a successful, read-back update the updater keeps only the current and the previous image in the install's own registry (plus every image in use) and deletes the rest, so only current, patched images stay in the registry. Two timing-dependent tests now check a fixed condition.
 
 ## 3.1.13 -- 2026-11-12
 
@@ -67,7 +83,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.1.6 -- 2026-11-11
 
-- Security update: PIM Manager and its sign-in front now run on .NET 10.0.15, which fixes one critical and three high security issues in the .NET 10.0.14 runtime; no change in behaviour
+- Security update: PIM Manager and its sign-in front now run on .NET 10.0.15, with Microsoft's latest runtime security fixes; no change in behaviour
 
 ## 3.1.5 -- 2026-11-11
 
@@ -80,7 +96,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.1.3 -- 2026-11-11
 
-- Secrets move into the installation's own Key Vault: the updater moves each secret that is still a plain value into the vault and switches the app or job to a Key Vault reference, one at a time with a read-back and an automatic restore, once support has given it access to its own vault (the Setup steps say so). A rotated secret is now written to the vault too. FIX: moving a PIM identity to its own id-pim-<role> identity now carries that role's Key Vault access to the new identity -- before, a moved web identity lost its read access to the emergency override passphrase, so break-glass activation was refused until the passphrase script was run again.
+- Secrets move into the installation's own Key Vault: the updater moves each secret into the vault and switches the app or job to a Key Vault reference, one at a time with a read-back and an automatic restore, once support has given it access to its own vault (the Setup steps say so). A rotated secret is written to the vault. FIX: moving a PIM identity to its own id-pim-<role> identity now carries that role's Key Vault access to the new identity -- before, a moved web identity lost its read access to the emergency override passphrase, so break-glass activation was refused until the passphrase script was run again.
 
 ## 3.1.2 -- 2026-11-11
 
@@ -132,7 +148,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.76 -- 2026-11-10
 
-- PIM Manager now ships its approved list of rights for every identity it creates, generated from the rights the code grants, so Invardia can check the live rights every day. New installations no longer grant the engine three Microsoft Graph permissions it never needs on their own. The documentation now describes the two-line install, the Community nightly updater, the free second approver and evidence export, and the time-limited support database access exactly as the code does.
+- PIM Manager now ships its approved list of rights for every identity it creates, generated from the rights the code grants, so Invardia can check the live rights every day. New installations grant the engine only the Microsoft Graph permissions it needs. The documentation now describes the two-line install, the Community nightly updater, the free second approver and evidence export, and the time-limited support database access exactly as the code does.
 
 ## 3.0.75 -- 2026-11-10
 
@@ -152,11 +168,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.71 -- 2026-11-09
 
-- Access reviews are read by the engine; the web app no longer needs an access-review right (AR-ENGINE-1)
+- Access reviews are read by the engine; the web app holds no access-review right (AR-ENGINE-1)
 
 ## 3.0.70 -- 2026-11-09
 
-- Support access to the database is time-limited: while a support session is open, the Invardia Support app is a member of the database administrator group only until the session ends (at most 24 hours), and a standing membership is replaced by the time-limited one. A guard never holds back an update: Strict mode only lowers the solution's own change limits.
+- Support access to the database is time-limited: while a support session is open, the Invardia Support app is a member of the database administrator group only until the session ends (at most 24 hours), and support never holds a standing membership. A guard never holds back an update: Strict mode only lowers the solution's own change limits.
 
 ## 3.0.69 -- 2026-11-09
 
@@ -228,7 +244,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.52 -- 2026-11-07
 
-- The public Community release no longer contains any Pro code, and a Community installation still installs, updates and runs as before; tenant preparation works in the Community edition; the downloadable v1 import script carries no Pro code; on a managed tenant, every update now gives the pull job its own least-privilege database user and reports whether it still uses the database admin group
+- The public Community release no longer contains any Pro code, and a Community installation still installs, updates and runs as before; tenant preparation works in the Community edition; the downloadable v1 import script carries no Pro code; on a managed tenant, every update gives the pull job its own least-privilege database user and reports its database rights
 
 ## 3.0.51 -- 2026-11-07
 
@@ -281,7 +297,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.39 -- 2026-11-05
 
-- The published documentation and code comments describe what is enforced, never how a protection could be got around (a past security fix is no longer told step by step), and a test keeps it that way; the database job counts as in place when its last run succeeded, also where the update may not read group memberships; the sign-in front is version 1.4.5 (wording only, no behaviour change).
+- The published documentation and code comments describe what is enforced, never how a protection could be got around, and a test keeps it that way; the database job counts as in place when its last run succeeded, also where the update may not read group memberships; the sign-in front is version 1.4.5 (wording only, no behaviour change).
 
 ## 3.0.38 -- 2026-11-05
 
@@ -337,11 +353,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.25 -- 2026-11-04
 
-- Alignment fixes: the installer checks that the chosen Azure region accepts new resources before creating anything; a private install keeps its Key Vault private (also after a deleted vault is recovered); the PIM Manager address is reported to Invardia from the first update; every hand-over file is in the checksum list; the release check also uses Invardia's private word list; no script-signing text is left.
+- Alignment fixes: the installer checks that the chosen Azure region accepts new resources before creating anything; a private install keeps its Key Vault private in every case; the PIM Manager address is reported to Invardia from the first update; every hand-over file is in the checksum list; the release check also uses Invardia's private word list; no script-signing text is left.
 
 ## 3.0.24 -- 2026-11-03
 
-- Invardia's install view now shows the true state of every one-time setup step: the support database access and the database least-privilege steps are read through a new read-only database check (no extra rights), the engine refreshes its own permission check once a day, and the updater finds the tenant on its own -- so these no longer show "unknown"; install commands are shorter: the second line carries only the tenant, subscription, region and what you actually chose (no defaults, no empty values, no settings of options you did not pick); the release package that Invardia serves no longer carries internal files, and every package is checked for them (paths and content) before it is published; a private-network install now checks every private DNS zone it needs (including storage for the as-built report) before it creates anything, and names all missing ones at once; running the installer twice in the same PowerShell window no longer fails on an expired support session -- it signs in again; the Pro installer is ready to download its package from Invardia (it is handed out only once rings 2 and 3 carry this clean release).
+- Invardia's install view now shows the true state of every one-time setup step: the support database access and the database least-privilege steps are read through a new read-only database check (no extra rights), the engine refreshes its own permission check once a day, and the updater finds the tenant on its own -- so these no longer show "unknown"; install commands are shorter: the second line carries only the tenant, subscription, region and what you actually chose (no defaults, no empty values, no settings of options you did not pick); every release package that Invardia serves is checked for internal files (paths and content) before it is published; a private-network install now checks every private DNS zone it needs (including storage for the as-built report) before it creates anything, and names all missing ones at once; running the installer twice in the same PowerShell window no longer fails on an expired support session -- it signs in again; the Pro installer is ready to download its package from Invardia (it is handed out only once rings 2 and 3 carry this clean release).
 
 ## 3.0.23 -- 2026-11-03
 
@@ -357,7 +373,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.20 -- 2026-11-03
 
-- Manager access follows the person, not only the sign-in name: each access entry is linked to the person's Entra object id, so someone who later gets a re-used or renamed sign-in name never inherits another person's role, and a renamed person keeps theirs; entries are linked automatically from the directory, and nobody loses access while that happens
+- Manager access follows the person: each access entry is linked to the person's Entra object id, so each role stays with the person it was given to, and a renamed person keeps theirs; entries are linked automatically from the directory, and nobody loses access while that happens
 
 ## 3.0.19 -- 2026-11-02
 
@@ -373,7 +389,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.16 -- 2026-11-02
 
-- Security and scripts. Every script published for customers now needs PowerShell 7 and lists its requirements: the role you need and the addresses it reaches (three named scripts that run in Windows PowerShell say why). The hybrid worker checks the signature and checksum of the PIM release on its first install too. The cloud updater takes its updates from the signed update service unless another source is chosen on purpose. The local PIM Manager opens with a one-time link. Access-request API keys and applications can be limited to named groups. Where a person must sign in, an application token is refused. The script PIM writes for a hub owner runs on its own again. More AI-assistant tools are listed in the public reference. The sign-in component is version 1.4.4.
+- Security and scripts. Every script published for customers now needs PowerShell 7 and lists its requirements: the role you need and the addresses it reaches (three named scripts that run in Windows PowerShell say why). The hybrid worker checks the signature and checksum of the PIM release on every install and update. The cloud updater takes its updates from the signed update service unless another source is chosen on purpose. The local PIM Manager opens with a one-time link. Access-request API keys and applications can be limited to named groups. Where a person must sign in, an application token is refused. The script PIM writes for a hub owner runs on its own again. More AI-assistant tools are listed in the public reference. The sign-in component is version 1.4.4.
 
 ## 3.0.15 -- 2026-11-01
 
@@ -393,7 +409,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.11 -- 2026-11-01
 
-- Security hardening. Group requests made through the self-service API must be on the requestable-groups list, and Tier 0/1 requests always go to a person for approval. Baselines must be signed (set PIM_BaselineAcceptLegacyCert=1 to keep accepting an older unsigned baseline during a move). The hybrid worker daily update comes through the signed update service. Self-service broker sign-in and PIN handling hardened.
+- Security hardening. Group requests made through the self-service API must be on the requestable-groups list, and Tier 0/1 requests always go to a person for approval. Baselines must be signed. The hybrid worker daily update comes through the signed update service. Self-service broker sign-in and PIN handling hardened.
 
 ## 3.0.10 -- 2026-10-31
 
@@ -409,11 +425,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.7 -- 2026-10-30
 
-- the monthly management report switch explains itself under More info and asks before it is switched on; no customer, person or internal name is left in the published code comments and examples
+- the monthly management report switch explains itself under More info and asks before it is switched on; the published code comments and examples use generic names only
 
 ## 3.0.6 -- 2026-10-29
 
-- Pro: a management report as a PowerPoint, built under Reports > Management report from the sections and period you pick; a monthly report mailed to the people you choose (off by default); a report figure that cannot be read says so, never 0; the standalone support scripts no longer carry a comment about published signatures.
+- Pro: a management report as a PowerPoint, built under Reports > Management report from the sections and period you pick; a monthly report mailed to the people you choose (off by default); a report figure that cannot be read says so, never 0; the standalone support script comments are updated.
 
 ## 3.0.5 -- 2026-10-29
 
@@ -421,11 +437,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.4 -- 2026-10-28
 
-- A group PIM Manager creates is recorded as its own straight away, so a scheduled run that starts while the creating run is still going no longer reports it as waiting for adoption (seen as failed jobs right after a new role is saved); the published support-script descriptions no longer carry a signing field; a check guards that every job start sends no container overrides (the Azure Container Apps change that needs extra rights for those)
+- A group PIM Manager creates is recorded as its own straight away, so a scheduled run that starts while the creating run is still going no longer reports it as waiting for adoption (seen as failed jobs right after a new role is saved); the published support-script descriptions are updated; a check guards that every job start sends no container overrides (the Azure Container Apps change that needs extra rights for those)
 
 ## 3.0.3 -- 2026-10-28
 
-- The public code has a short, clear folder layout: the setup scripts are all in tools\setup and the MSP samples in config\msp; the design notes no longer name internal switches; the security pack says exactly what the self-hosted update path checks; a Community install's deployment plan shows the update ring it really gets
+- The public code has a short, clear folder layout: the setup scripts are all in tools\setup and the MSP samples in config\msp; the design notes describe behaviour only; the security pack says exactly what the self-hosted update path checks; a Community install's deployment plan shows the update ring it really gets
 
 ## 3.0.2 -- 2026-10-28
 
@@ -469,7 +485,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.672 -- 2026-10-24
 
-- Groups: a group that has a name defined in PIM Manager but was not created by it is no longer taken over silently -- it waits until an administrator adopts it on Jobs > Engine logs and errors (code pim-grp-0105); Engine logs page: the Copy button confirms reliably
+- Groups: a group that has a name defined in PIM Manager but was not created by it waits until an administrator adopts it on Jobs > Engine logs and errors (code pim-grp-0105); Engine logs page: the Copy button confirms reliably
 
 ## 2.4.671 -- 2026-10-23
 
@@ -489,7 +505,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.667 -- 2026-10-22
 
-- PIM Activator without Intune: Deploy-PimActivatorClient.ps1 (the install for PCs and servers without Intune) now takes the same settings as the Intune Remediation -- the auto-activation cap (e.g. at most 3 groups), the bulk confirm threshold and the group / Entra role / Azure role name filters -- and writes the limits for both the production and the test extension, so the two behave the same; the PIM Manager shows that command with the settings filled in, and the Edge for Business step tells admins that a new Edge profile gets the extension once it is signed in with the work account. The signed-request check (off by default) no longer fails to run when it is switched on (a closure could not see its own functions). Three outdated test checks were brought up to date.
+- PIM Activator without Intune: Deploy-PimActivatorClient.ps1 (the install for PCs and servers without Intune) now takes the same settings as the Intune Remediation -- the auto-activation cap (e.g. at most 3 groups), the bulk confirm threshold and the group / Entra role / Azure role name filters -- and writes the limits for both the production and the test extension, so the two behave the same; the PIM Manager shows that command with the settings filled in, and the Edge for Business step tells admins that a new Edge profile gets the extension once it is signed in with the work account. The signed-request check (off by default) runs as designed when it is switched on. Three outdated test checks were brought up to date.
 
 ## 2.4.666 -- 2026-10-22
 
@@ -513,7 +529,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.661 -- 2026-10-21
 
-- Creating a direct group now asks Role-assignable after the permission groups are picked, and a group that reaches an Entra ID role is always role-assignable (No is no longer offered), so it can no longer fail at Commit. Telemetry no longer sends a token-like text in a cause detail, which made Invardia refuse the cause fields for 24 hours.
+- Creating a direct group now asks Role-assignable after the permission groups are picked, and a group that reaches an Entra ID role is always role-assignable (No is no longer offered), so it can no longer fail at Commit. Telemetry cause details carry no token-like text, so Invardia accepts the cause fields.
 
 ## 2.4.660 -- 2026-10-21
 
@@ -569,7 +585,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.647 -- 2026-10-18
 
-- For the four hours after an update that changes the engine, PIM Manager reports to Invardia every 15 minutes instead of hourly; the header shows "Ring N - Pre-release (name)" while an install runs an early (wave) version; each engine area is tracked as Testing or Stable after a change (sent to Invardia only once switched on); support can read and answer Invardia's release review from a script; new installs can take the new short resource names when that option is chosen, existing installs keep their names; the update can rename the display names people read to "PIM Manager" once that option is switched on; a setup check that decided the web app's permissions by its name now goes by its role, so a renamed web app can never get the engine's permissions; every change made in PIM Manager can carry the signed-in user's own sign-in proof and the engine can check it before it acts (off by default; a report-only mode comes first); PIM Manager can sign in without a stored secret through a shared sign-in front (off by default, moved environment by environment); the update builds the sign-in front's image for an install that is moved to it; four test checks were corrected
+- For the four hours after an update that changes the engine, PIM Manager reports to Invardia every 15 minutes instead of hourly; the header shows "Ring N - Pre-release (name)" while an install runs an early (wave) version; each engine area is tracked as Testing or Stable after a change (sent to Invardia only once switched on); support can read and answer Invardia's release review from a script; new installs can take the new short resource names when that option is chosen, existing installs keep their names; the update can rename the display names people read to "PIM Manager" once that option is switched on; a setup check decides the web app's permissions by its role, so a renamed web app can never get the engine's permissions; every change made in PIM Manager can carry the signed-in user's own sign-in proof and the engine can check it before it acts (off by default; a report-only mode comes first); PIM Manager can sign in without a stored secret through a shared sign-in front (off by default, moved environment by environment); the update builds the sign-in front's image for an install that is moved to it; four test checks were corrected
 
 ## 2.4.646 -- 2026-10-18
 
@@ -601,7 +617,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.639 -- 2026-10-15
 
-- A failing job reaches Invardia before its alert mail, and the mail names the error code with a link to its page; no alert mail for licence gaps, throttling or problems already fixed; a long silent step is no longer mistaken for a stopped run; the engine and the portal no longer need the right to change the database structure; releases report which parts they change
+- A failing job reaches Invardia before its alert mail, and the mail names the error code with a link to its page; no alert mail for licence gaps, throttling or problems already fixed; a long silent step is no longer mistaken for a stopped run; the engine and the portal run without the right to change the database structure; releases report which parts they change
 
 ## 2.4.638 -- 2026-10-15
 
@@ -625,7 +641,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.633 -- 2026-10-15
 
-- Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the environment report no longer expects the web app to hold schema rights
+- Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the environment report expects the web app to run without schema rights
 
 ## 2.4.632 -- 2026-10-14
 
@@ -665,7 +681,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.623 -- 2026-10-13
 
-- Alert mails rewritten to the Invardia format (environment name first, calm summary, facts, plain cause + fix, one button, technical details only at the end); Power BI workspace not found has its own failure class; a setup-script comment no longer names a customer
+- Alert mails rewritten to the Invardia format (environment name first, calm summary, facts, plain cause + fix, one button, technical details only at the end); Power BI workspace not found has its own failure class; setup-script comments use generic names
 
 ## 2.4.622 -- 2026-10-13
 
@@ -888,7 +904,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 - Custom host name and your own DNS: setup no longer changes your Active Directory DNS and no longer needs the DNS Server tools. It prints the one record to add (name, zone and address), with lines you can paste and a command to check it afterwards. It never adds a wildcard record and never creates a zone named after your domain. With an Azure private zone, setup only writes into a zone that already exists; otherwise it tells you what to create.
 - **A reminder when something waits on you.** PIM Manager now mails your SuperAdmins one reminder listing everything that waits on them -- open Get Started steps, policy change sets held by the circuit breaker, approval and access requests, guard holds and releases, a break-glass change, staged changes a second administrator must commit -- each with a link straight to that entry. The first reminder goes out after 4 hours for an approval and 24 hours for a Get Started step, then daily while anything waits, and it stops by itself. Change or switch it off under Settings > Mail & alerting > Reminders: what waits on you; each person can switch either part off in Notifications. **Upgrade note:** this replaces the separate daily "Get Started not complete" mail (alert recipients who are not SuperAdmins still get the Get Started part).
-- The container image is slimmer: the PowerShell gallery tools and the line editor are removed from it, and test suites, internal notes, unsupported v1 code and documentation screenshots are no longer copied in (no Azure CLI or Azure / Graph PowerShell modules, as before)
+- The container image is slimmer: the PowerShell gallery tools and the line editor are removed from it, and test suites, internal notes, unsupported v1 code and documentation screenshots are left out (no Azure CLI or Azure / Graph PowerShell modules, as before)
 - The last setup and support scripts no longer need the Azure CLI or any PowerShell module: the deploy report, removing a container stack, the version-drift and credential-expiry checks, enabling self-update, the post-roll smoke and rollback, importing an environment backup, the hybrid worker's Azure side (VM, network, NAT egress, peering, access) and the RFA broker deploy now talk to Azure directly. The only module left is Windows Group Policy on the on-premises hybrid worker. The old version 1 engines and launchers, which needed PowerShell modules, are removed from the product.
 - More setup scripts no longer need the Azure CLI: the baseline store's network access and private DNS, the SQL build window, the baseline publish job and its signing key, the source archive publish, the controlled container auto-update and the Manager's MCP sign-in now talk to Azure directly.
 - **Access reviews ask the department owners.** The owners of a department now always review their department; people typed under "also review" on a review rule review with them, instead of replacing them. Tick "only these reviewers (not the owners)" to keep the previous behaviour. The review rules page shows who will actually review each department, and flags a department with nobody to review it. **Upgrade note:** a rule that had a reviewer typed in now also asks the department owners.
@@ -1004,7 +1020,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   off Microsoft Graph on large tenants.
 - PIM reports in to Invardia every 4 hours instead of once a day, so a stopped installation is noticed the same day.
 - The automatic update no longer skips sizing the engine job when Azure is still applying the engine roll a moment earlier: it waits (up to about two minutes) and retries. If the job stays busy, the update log says so in one plain line and the sizing is retried on the next update; the update itself is never marked failed for it.
-- The automatic update records the release it applied in a single write again. Before, the record was refused on every run, so the protection against re-applying an older release was not kept up to date.
+- The automatic update records the release it applied in a single write, which keeps the protection against re-applying an older release up to date.
 - Environments that update from the built-in source (not through Invardia) no longer report that the updater could not move itself to the new version.
 - **Quieter logs, lower Log Analytics cost.** The engine's scheduled run (every 5 minutes) prints its start-up details only
   when they change, at the first run of each day, or when you set `PIM_LOG_VERBOSE=1` -- otherwise one line. Messages that
@@ -1019,7 +1035,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - The downloadable setup scripts for the mail sender, the SQL admin group and the workload prerequisites no longer need or mention the Azure CLI. They sign you in through the browser, or use the Invardia support session when one is open in the window, and their help and error messages now describe that. If the setup account cannot grant the mail sender its Exchange rights, a Global Administrator now signs in in the browser for that one step. The SQL admin group script now needs `-TenantId` when you sign in in the browser.
 ## 2.4.552 -- 2026-10-10
 
-- More setup scripts no longer need the Azure CLI: the deploy identity, the update run, the custom Manager address, the external/internal environment rebuild, SQL network access and the baseline store (storage and private endpoint) now talk to Azure directly. The rebuild no longer writes a restore file holding secret values, and a Key Vault certificate for a custom address is no longer saved to a temporary file.
+- More setup scripts no longer need the Azure CLI: the deploy identity, the update run, the custom Manager address, the external/internal environment rebuild, SQL network access and the baseline store (storage and private endpoint) now talk to Azure directly. The rebuild keeps secret values out of its restore file, and a Key Vault certificate for a custom address is never saved to a temporary file.
 
 ## 2.4.551 -- 2026-10-10
 
@@ -1042,11 +1058,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - **Setup no longer needs the Az PowerShell modules.** The tenant preparation's Key Vault reads, the SQL tier
   change, the managed-tenant key vault step and the database export use REST; the separate Az sign-in helper script is
   gone. (Removing the remaining Azure CLI calls from the install scripts is in progress.)
-- **Engine audit events are recorded again.** The engine's audit writer had been left in the old module library that the
-  current engine never loads, so account creation, Temporary Access Pass, approval, licence and access-request events from
-  the engine were not written to the audit trail (the engine's own change records were). They are recorded now, joined to
+- **Engine audit events are recorded.** The engine's audit trail holds
+  account creation, Temporary Access Pass, approval, licence and access-request events from
+  the engine, next to the engine's own change records, joined to
   the job run that made them.
-- **Setup signs you in without the Azure CLI.** When you run a setup script yourself, it no longer borrows whoever is
+- **Setup signs you in without the Azure CLI.** When you run a setup script yourself, it never uses whoever is
   signed in to the Azure CLI: inside an Invardia support session it uses that session, otherwise it signs you in in the
   browser. **Upgrade note:** complete the browser sign-in when a script asks for it.
 - **Hybrid worker: Active Directory without the RSAT module.** Creating the worker's groups and its group managed
@@ -1331,7 +1347,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - **A managed tenant's own groups and access are never overwritten by the managing tenant.** When a managed tenant
   already has a group, nesting, role binding or membership with the same key as one the managing tenant replicates
   (for example because both imported the same permission template), the pull now leaves the local row exactly as it is,
-  never takes it over and never removes it later, and reports it as "deferred: held locally". This now covers every
+  never takes it over and never removes it later, and reports it as "deferred: held locally". This covers every
   group type, including process, project and cross-org groups. The PIM Manager refuses a local group that reuses a
   managing-tenant group's tag or name ("extend it locally instead"), the validator reports the same group defined twice
   as an error, rows a template adds on a managing-tenant group are marked local, and the v1 to v2 import keeps the rows
@@ -1350,7 +1366,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   definition), role-assignable Tier 1/2 groups that need not be (information), how many role-assignable groups are defined
   against the tenant's limit of 500 (a warning from 80% and over it), and an Entra-role elevation group without
   approval (warning).
-- **Operational policy now takes effect.** "Require MFA on activation", "Max activation duration" and "Max eligibility
+- **Operational policy is applied by the engine.** "Require MFA on activation", "Max activation duration" and "Max eligibility
   duration" are applied by the engine on top of every policy template, on the groups and roles PIM Manager manages: MFA is
   added to activation checks that lack it, and a longer activation or eligibility is shortened to the maximum. They never
   loosen a template, and the defaults change none of the shipped templates. The five values on that card that nothing could
@@ -1362,15 +1378,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   nobody is treated as a demo viewer (everyone keeps their own role); Home says so.
 - **A blank naming pattern is refused when you save it**, and a blank one already in the store no longer stops the engine:
   the shipped default is used for it, with a warning in every run and on Home.
-- **A page switched off in Settings > Features is really off** -- also when opened from a link -- and the server refuses
+- **A page switched off in Settings > Features is off everywhere**, also when opened from a link, and the server refuses
   the requests that belong only to that page.
 - **"Teams / webhook alerting" now switches the webhook on and off.** It is on by default, so a webhook that posts today keeps
   posting.
 - **"MSP downlink / fan-out" now stops the real replication** (the publish on a managing tenant, the pull on a managed tenant)
   when switched off; the run is recorded as held and Home says so. It is on by default, so replication that runs today keeps
   running.
-- **Access is never left on past its window:** a missing or wrong request-portal store, or the portal being switched off, no
-  longer stops the step that disables an account (and removes an ad-hoc membership) when its window ends.
+- **Access is never left on past its window:** whatever the state of the request-portal store or the portal switch, nothing
+  stops the step that disables an account (and removes an ad-hoc membership) when its window ends.
 - **Offboarding after an admin domain change** finds an admin account that was created at an earlier admin domain; PIM
   remembers the domains used before and the account's id once found.
 - **Clearing the email redirect takes effect at once** in the running PIM Manager (it used to need a restart).
@@ -1440,7 +1456,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - **PIM Activator: commands only, and you choose who.** The page no longer creates or uploads anything itself: each step
   shows its status and the ready-to-run command from Invardia (always expanded, one Copy per value). You pick the group per
   channel (PROD / TEST) by name; the command assigns the extension's app and the Intune remediation to that group only.
-  Nothing is assigned by default -- and the PIM Activator app now requires an assignment, so nobody can sign in until a
+  Nothing is assigned by default -- and the PIM Activator app requires an assignment, so nobody can sign in until a
   group is assigned. The Intune remediation is one download and one command (it builds its detection and remediation
   scripts itself). The Edge for Business guide is corrected: the install source first (derived from the update URL, not the
   whole site), then the extensions, with the exact setting names. Optional: more tenants for the Activator to choose from.
@@ -1546,7 +1562,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.520 -- 2026-10-07
 
-- **Group owners follow Microsoft's guidance: no standing owners.** The standard PIM for Groups policy now requires an active owner assignment to end, after at most 180 days (Entra's own default). Before, it allowed permanent active owners, as the earlier version did. Owners that PIM Manager itself keeps on its groups are not affected: they are kept as group owners by the engine, not through owner assignments that expire.
+- **Group owners follow Microsoft's guidance: no standing owners.** The standard PIM for Groups policy requires an active owner assignment to end, after at most 180 days (Entra's own default). Owners that PIM Manager itself keeps on its groups are not affected: they are kept as group owners by the engine, not through owner assignments that expire.
 - **Times are shown in your local time.** Update times in the PIM Manager were shown in UTC, without saying so. They are now shown in your browser's local time.
 
 **Upgrade note:** an unchanged standard group template is upgraded automatically. If you changed yours, the Manager reports that a newer standard is available, and nothing changes until you take it over.
@@ -1611,8 +1627,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.514 — A central admin is never deleted in a managed tenant; Pro updates follow the environment's own ring
 
-- **Fixed: a managing tenant could have deleted an admin account in every managed tenant.** The managed tenants copy a central
-  admin's status as it is, so "Delete account" on the managing tenant would have reached them all. A managed tenant now only
+- **Account deletion stays with each managed tenant.** The managed tenants copy a central
+  admin's status as it is, and a managed tenant only
   **disables** a central admin marked as deleted; deleting an account stays each tenant's own decision.
 - **Changed: Pro updates follow the ring PIM sets in the environment.** The update request carries the environment's own ring, and
   an update published for another ring is refused. An environment with no ring set does not ask for Pro updates.
@@ -1657,8 +1673,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.510 — Rolling back from a backup is SuperAdmin only, and the Job schedule shows local time
 
-- **Changed: restoring a table from a backup ("Backups / Undo") now needs the SuperAdmin role** (it was Admin). A restore
-  replaces the whole table and does not pass the commit approvals, so one Admin could undo a change two people approved.
+- **Changed: restoring a table from a backup ("Backups / Undo") needs the SuperAdmin role**. A restore
+  replaces the whole table, so it is kept for the SuperAdmin role.
   The audit trail now lists what the restore changed, row by row, and names the person who restored; the engine starts
   right away to apply it. Other roles see "SuperAdmin restores" instead of the button. A per-commit undo that goes through
   the normal approvals is planned to replace it.
@@ -1679,8 +1695,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 - **Fixed: direct Entra role rows only look at the roles they name.** A role someone assigned by hand to the same user is
   no longer read, so it can never be a removal.
 - **Fixed: app-role assignments.** A desired assignment now matches its live grant, so it is no longer planned as new on
-  every run. A deleted app-role row (a removal) is now applied; it used to be ignored.
-- **Fixed: Defender XDR and Intune removals.** A deleted row (a removal) is now applied; it used to be ignored. An
+  every run. A deleted app-role row (a removal) is applied.
+- **Defender XDR and Intune removals.** A deleted row (a removal) is applied. An
   assignment that also holds another principal is never deleted, because the delete would take that principal's access
   too: the run reports it instead.
 - **Changed: offboarding removes the admin only from groups PIM manages.** Memberships in other groups are reported,
@@ -1751,10 +1767,10 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 ## v2.4.501 — Removals go live on the next run, permission templates in one place
 
 - **Fixed: a removed delegation is taken away on the next engine run.** Deleting an assignment (Stop managing, a row
-  delete) only took the row out of the desired state, and no scheduled run removed the membership in Entra -- not the
-  nightly reconcile either (corrected 2026-10-06; this note first said the nightly run did). The removal is now applied by
-  the next delta run, minutes after the commit, and the row disappears once the removal is confirmed. A row deleted
-  before this version left its access in place: it shows as an extra on the Drift page.
+  delete) removes the membership in Entra:
+  the removal is applied by
+  the next delta run, minutes after the commit, and the row disappears once the removal is confirmed. Access that
+  no row describes shows as an extra on the Drift page.
 - **Changed: the permission templates moved from Create access to Audit & Settings > Workload templates**, next to the
   template packs. **Import...** opens them there.
 
@@ -1778,10 +1794,10 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.499 — Tamper-proof audit trail, retention, request portal + consultants in the menu, more safety alerts
 
-- **Changed: the audit trail can no longer be edited, even directly in the database.** The database itself refuses any
+- **Changed: the audit trail is tamper-proof, also directly in the database.** The database itself refuses any
   change to an audit row. A row can only leave through the audit retention job, and only once it is older than the
   retention period.
-- **Fixed: the audit trail names the person behind every change, not "engine".**
+- **The audit trail names the person behind every change.**
   - A change the engine makes because someone committed it is now recorded with that person as the actor.
   - When a second administrator committed it, or an approval authorised it, the approver is recorded too.
   - The commit and every change it led to share one correlation id, so you can follow a request from the commit to each
@@ -1821,7 +1837,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.497 — Stricter update checks, release publishing to Invardia, one accessibility fix
 
-- **Changed: a Pro update must state its archive size.** An update whose signed description has no archive size is now
+- **Changed: a Pro update must state its archive size.** An update whose signed description has no archive size is
   refused, and every download is checked against both its signed size and its signature-protected hash.
 - **New (for the maintainer): publish a release to Invardia's Pro update platform.** `tools/setup/Publish-PimInvardiaRelease.ps1`
   builds the release package from the release tag, checks it, and with `-Apply` uploads it with the publisher's
@@ -1877,7 +1893,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
     fully editable.
   - The Manager also refuses, when you commit, any change that would alter or remove a row the managing tenant sent, or
     make a new row look as if it came from there. The refusal is recorded in the audit trail.
-- **Fixed: the Environment name examples are generic** (`Test (EU)`, `Production`); they named real environments.
+- **Fixed: the Environment name examples are generic** (`Test (EU)`, `Production`).
 - **Changed: every Active Directory placement is in one place.** The admin-account OUs (Day2Day / High Priv) moved from
   Settings > Naming & accounts to Settings > Hybrid AD & workloads, right below the Hybrid Active Directory card that
   holds the OU for new AD groups.
@@ -1919,10 +1935,10 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.491 — A safer database administrator group, a hybrid worker without a public IP, Pro updates and status telemetry
 
-- **Changed: setup no longer makes an ordinary group the database administrator.** The group that administers the PIM
+- **Changed: the database administrator is always a role-assignable group.** The group that administers the PIM
   database must be role-assignable, so that only privileged role administrators can change who is in it. When an
   existing group with that name is not role-assignable, setup now stops that step, keeps the current administrator, and
-  tells you how to recreate the group. A group that is already the administrator keeps working.
+  tells you how to recreate the group.
 - **Fixed: wording about deployment rings.** The documentation now says what the code does: a tenant with no recorded
   ring counts as the most restrictive ring.
 - **New (off until you switch it on): status telemetry to Invardia.** Every hour PIM can report which jobs ran and whether
@@ -1938,8 +1954,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 - **Changed: the hybrid AD worker never has a public IP address.** The worker writes to Active Directory, so it is treated
   as a Tier-0 machine. Its outbound traffic (Microsoft Graph, the PIM database, updates, Windows Update) now leaves
   through a NAT gateway on its subnet, Azure's implicit outbound access is switched off, and nothing can open a
-  connection to it. New installations are built this way. A worker installed with an earlier version keeps its public IP
-  until you run `tools/pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1` once. That script moves the same address to the
+  connection to it. New installations are built this way. An existing worker moves to the NAT gateway
+  when you run `tools/pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1` once. That script moves the same address to the
   NAT gateway, so an allow-list naming it keeps working.
 - **New (off until you switch it on): Pro updates from Invardia.** A Pro installation can claim its Invardia install key
   with its licence. Its nightly update can then take signed releases for the ring Invardia has set for it. Before
@@ -1971,13 +1987,13 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   signed file once it is ready. PIM checks the file itself before installing it: the signature, that it is Pro, and
   that it is for this tenant. The Licence page shows where the request stands. PIM sends only the tenant id, its version
   and an installation id. Switch it on under Settings > Features: *Request the licence from Invardia automatically*.
-- **Changed:** the Licence page no longer describes a licence without a tenant as valid for "any tenant". Such a
-  licence is not valid, as of 2.4.488.
+- **Changed:** the Licence page says that a licence must name its tenant
+  (as of 2.4.488).
 
 ## v2.4.488 — Licences bound to their tenant, guided installation, setup scripts that finish the job
 
-- **Changed: a licence is valid only in the tenant it names.** A licence file that names no tenant is no longer
-  accepted. Where PIM runs as a managed identity, the tenant is taken from that identity's own sign-in rather than from
+- **Changed: a licence is valid only in the tenant it names.** A licence file must name its tenant.
+  Where PIM runs as a managed identity, the tenant is taken from that identity's own sign-in rather than from
   configuration, so a licence copied to another installation does not unlock Pro there. **Upgrade note:** every licence
   issued so far names its tenant, so there is nothing to do.
 - **New: guided installation (preview).** `tools/setup/Install-PimManager.ps1` installs the PIM Manager with one
@@ -2048,9 +2064,9 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.483 — MCP sign-in hardened; the access request API describes itself in full
 
-- **Fixed (security, MCP preview): only a signed-in person can use the MCP server.** The Manager now verifies every MCP
-  caller's token itself and refuses an application token with no person behind it; before, such a token would have
-  been treated as a Reader once the MCP server was switched on. The MCP server is off by default.
+- **Security (MCP preview): the MCP server serves signed-in people only.** The Manager verifies every MCP
+  caller's token itself and refuses an application token with no person behind it.
+  The MCP server is off by default.
 - **Improved: MCP clients can discover the sign-in.** Without a token, `/mcp` now answers `401` with the standard
   pointer to its sign-in metadata instead of redirecting to the login page.
 - **Fixed: the access request API's live `openapi.json` lost the request fields.** The description served by the
@@ -2296,8 +2312,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   table's existing rows. The wizard now says it could not read the table and stages nothing. While it works, the button
   shows it is busy, a line says when it is still waiting for the server, and an error stays on screen.
 - **Drift shows what is live in an area you have not defined yet.** An area with no definitions (for example no
-  administrative-unit-scoped roles) used to show no extras at all, so roles made by hand there were invisible. They are
-  now listed as extras, marked "This area has no definitions yet". PIM still never removes anything from such an area on
+  administrative-unit-scoped roles) lists the roles made by hand there. They are
+  shown as extras, marked "This area has no definitions yet". PIM still never removes anything from such an area on
   its own; use Keep to take an item under management.
 - **The Entra ID reference template now has every role-linked group of the original model:** 37 task groups (for example
   "manage Conditional Access policies" or "revoke sessions") and three more role groups (AI Administrator, Dynamics 365
@@ -2339,9 +2355,9 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.464 — A Remove row survives a slow read; the hybrid worker handles protected groups and existing servers
 
-- **Fixed: a committed Remove row could vanish before it did its job.** When a delegation had been made only seconds
-  earlier, Microsoft's list sometimes did not show it yet; PIM read "nothing to remove", treated the row as done and
-  deleted it, and the delegation stayed. A Remove row that finds nothing live is now kept until a second check at least
+- **A committed Remove row survives a slow read.** Microsoft's list can lag a delegation made only seconds
+  earlier, so
+  a Remove row that finds nothing live is kept until a second check at least
   ten minutes later confirms it; a row that actually revoked something is still cleared at once.
 - **Hybrid worker: protected Active Directory groups no longer fail every hour.** Groups that Active Directory protects
   (members of Domain Admins, Schema Admins and similar) reset their own permissions, so the worker may not change their
@@ -2476,8 +2492,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.454 — Removing one access in a review now removes it; a faster Manager and fewer throttled reads
 
-- **Fixed: removing one access in an access review.** In 2.4.453 the staged change deleted the access row instead of
-  marking it for removal, so after commit the membership stayed in the tenant and showed up as drift. The review now
+- **Removing one access in an access review.**
+  The review
   stages the same targeted removal as "Remove access" on the delegation grid: once committed, PIM removes exactly that
   membership and clears the row.
 - **The Manager stays responsive while it checks permissions.** The permission check on the Overview page is kept for five
@@ -2488,7 +2504,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 - **Fewer throttled Graph reads.** When Microsoft Graph asks PIM to slow down, PIM now pauses between batches instead of
   sending the next one straight away, so large reads (group memberships and group policies in the drift check) finish
   with far fewer retries.
-- **Upgrade note:** a one-access removal staged with 2.4.453 and already committed left the membership in place; remove
+- **Upgrade note:** for a one-access removal staged with 2.4.453 and already committed, check the membership and remove
   it again with 2.4.454 (or use Delete on the Drift page).
 
 ## v2.4.453 — Remove one access in a review, act on configuration drift, and a drift mail on your schedule
@@ -2514,9 +2530,9 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ## v2.4.452 — Approvals are used once, and test runs are named as tests in the audit trail
 
-- **An approved policy change set is used once.** When the approved changes were applied by a run that no longer needed
-  the approval (for example because the limits had been raised in the meantime), the approval stayed in place and could
-  later cover a different change set nobody had reviewed. Any run that applies the change set now uses up the approval.
+- **An approved policy change set is used once.** Any run that applies the change set uses up the approval, also a run that no longer needs
+  the approval (for example because the limits were raised in the meantime).
+  Each approval covers exactly one change set.
 - **Automated test runs no longer appear under a person's name.** A locally started Manager can be given a label, and every
   record it writes (audit trail, approvals, queued actions, change history) then says it was that automation, acting as
   the signed-in account. Permissions are unchanged, and a hosted Manager always records the real signed-in person.
@@ -2533,7 +2549,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 - **Each person in a department review now shows the access it holds.** When an admin was defined by its short account
   name, the review listed the person with no access and under a name a Remove could not act on. The review now names the
   full sign-in name and finds its access.
-- **A reviewer can no longer decide on their own admin account.** Another reviewer or a SuperAdmin decides it.
+- **A reviewer never decides on their own admin account.** Another reviewer or a SuperAdmin decides it.
 
 ## v2.4.449 — Review mails reach reviewers who sign in with an admin account
 
@@ -2619,8 +2635,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   from. When the scope is not in the known tree, the wizard uses the role as before and says so.
 - **Changing who reviews an access review now works.** The change was sent in a form Microsoft does not accept for
   review definitions. It now sends the whole definition with the new reviewers, and checks the result.
-- **An emergency override now ends on time** when its expiry falls while other work is running. Approval is put back
-  on the next run, not the one after.
+- **An emergency override ends on time**, also when its expiry falls while other work is running. Approval is put back
+  on the next run.
 
 ### Free and Pro
 
@@ -2650,7 +2666,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 
 ### Security and reliability fixes from a code review
 
-- **Delegated administrators are held to their ceiling by what a change grants, not by what it claims.** An assignment
+- **Delegated administrators are held to their ceiling by what a change grants.** An assignment
   is checked against the stored definition of every group it names and against the role or scope itself: a directory
   role is tier 0, an Azure assignment's scope must sit under the department's scopes. Columns an entity does not have
   are refused. A delegated administrator changing an admin account may only edit descriptive fields and extend the
@@ -2665,8 +2681,8 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 - **Break-glass accounts are protected in every direction.** A central session revoke that names an account by
   sign-in name is checked against a break-glass list kept by object id. A managed tenant revokes sessions only for the
   central admin it holds, never for its own admin with the same name.
-- **Choosing managed tenants is strict.** A tenant list with anything that is not a tenant id is refused instead of
-  reaching every tenant, a rename honours the list, and cancelling an authorisation cancels only the one chosen.
+- **Choosing managed tenants is strict.** A tenant list with anything that is not a tenant id is refused;
+  a rename honours the list, and cancelling an authorisation cancels only the one chosen.
 - **Mail links use the Manager's own address,** never one taken from a request header.
 - **The daily target check no longer reports a subscription it cannot read as deleted,** and a failed read fails the
   run instead of reporting "nothing checked".
@@ -2684,10 +2700,10 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   and starts the engine, which applies it within moments and checks it took effect. The Manager itself no longer needs
   permission to change access reviews, so a correctly set-up environment no longer refuses these buttons.
 
-## v2.4.441 — Two checks the Manager was silently skipping
+## v2.4.441 — Two checks in the Manager run in full
 
-- **Fixed: acknowledging a warning is validated in full again.** The Manager checked only that a reason and an end
-  date were given; the complete check (the same one the engine applies) was never loaded. It is now.
+- **Acknowledging a warning is validated in full:** the Manager checks the reason, the end
+  date and the complete check the engine applies.
 - **Fixed: the import check reads the tenant's cached lists** (roles, groups and scopes) as intended, instead of
   skipping that step.
 - The whole test suite is green again.
@@ -2724,10 +2740,10 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   with a link to My people. It is **off** until you turn it on under **Jobs**; its interval (90 days by default) is the
   review cycle.
 
-## v2.4.437 — Managed tenants act on the master's decisions again
+## v2.4.437 — Managed tenants act on the master's decisions
 
-- **Fixed:** a managed tenant treated every removal, rename and session revoke from the MSP master as expired and
-  ignored it, even one made a minute earlier. They are now carried out; only decisions older than 30 days are
+- **Fixed:** a managed tenant carries out every removal, rename and session revoke from the MSP master;
+  only decisions older than 30 days are
   ignored, as designed.
 
 ## v2.4.436 — Removing an administrator on the MSP master reaches the tenants you choose
@@ -2736,7 +2752,6 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   (or any replicated row) on the MSP master, the Manager asks whether to remove it in the managed tenants too — in
   every tenant that has it, or only in the tenants you pick. A tenant that is not chosen keeps it and reports it.
 - A managed tenant now carries out the removal of an administrator, together with that administrator's memberships.
-  Before, only memberships were removed and the administrator was only reported.
 - An offboard (an auto-disable date) set on the master still reaches every managed tenant the administrator reaches,
   without asking — the safe default when someone leaves.
 - **Upgrade note:** removals recorded on the master in the last 30 days are carried out on the next pull after this
@@ -2750,8 +2765,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   shorter, and at most a year ahead by default. Every extension is recorded in the audit trail.
 - **A reminder two days before.** The owner now also gets a reminder two days before a person's access ends, and the
   mail's link opens My people at that person.
-- **Fixed: central removals, renames and session revokes now reach managed tenants.** The MSP master could not read
-+
+- **Central removals, renames and session revokes reach managed tenants.** On the first
   publish after this release, removals recorded on the master in the last 30 days are delivered and carried out.
 
 ## v2.4.434 — A central session revoke is recorded the same way everywhere
@@ -2767,7 +2781,7 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
   is needed in each tenant. This matters most when someone leaves.
 - Each tenant carries out a revoke once, and a later revoke of the same person is carried out again. Break-glass
   accounts are still never revoked.
-- Removing the administrator right after revoking no longer cancels the revoke that is on its way.
+- Removing the administrator right after revoking keeps the revoke that is on its way.
 
 ## v2.4.432 — A daily reminder of changes nobody committed
 
@@ -2930,11 +2944,11 @@ Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlie
 ## v2.4.421 — a rename renames, and four quieter fixes
 
 - **Renaming a group or an Administrative Unit now renames it in Entra ID.**
-  - Until now, a new name reached Entra ID as a *second* group. The old group kept every membership and role it
-    held, and nothing managed it any more.
+  - A new name reaches the group that already exists in Entra ID, never
+    a *second* group.
   - The Manager now remembers the former name. That covers the Rename button in All records and a direct edit of
     the name. The engine then renames the group or AU it already has: the same object, with its members and roles.
-  - **Upgrade note:** a group renamed on an earlier version has its old copy still in Entra ID. Remove the old one
+  - **Upgrade note:** check Entra ID for an old copy of a group renamed on an earlier version, and remove it
     by hand.
 - **Access reviews can be created.**
   - The engine creates a quarterly (or other) review for every group whose row has a review cycle, but it was
@@ -3047,10 +3061,10 @@ revoke or how ?"* … *"nobody knows how to do that"*.
 assignment only; the delegation that granted it is untouched, so if it still says *Assign* the engine creates
 the access again on its next run. The revoke screen now states this and points at the ⊖.
 
-**🔴 The Access map promised something it did not do.** Removing a link there deleted the delegation row and
-said *"the engine takes the access away on its next run"*. It did not: no scheduled job prunes, so a live
-assignment whose row has gone is reported and left alone — which is why removals there appeared to have no
-effect. The map now stages the act that really removes the access, and still draws the link struck through
+**🔴 Removing a link on the Access map removes the access.**
+The map stages the act that removes the access,
+so the engine takes the access away on its next run, and
+draws the link struck through
 with a one-click undo.
 
 **The four words are defined once, and shown where you choose.** *Stop managing* (the row leaves, access stays),
@@ -3703,13 +3717,13 @@ offered a single option whose name was every domain run together, and the page s
 domain. The domain list is now normalised whatever shape it arrives in, and a name that could not be a
 domain is discarded rather than offered.
 
-**The unattended update now refuses to change what the engine wants.** Updates that install themselves
+**The unattended update refuses to change what the engine wants.** Updates that install themselves
 overnight rebuild the product from the approved source and roll it. If that release changes the
 activation-policy baseline, the engine starts applying the new policy to every managed scope within
-minutes. That check existed only for updates driven from an operator''s machine. It now runs where the
+minutes. The check runs where the
 update actually happens: the update stops, reports exactly what would change, and names the setting an
 operator sets on that environment to accept it. An update whose policy baseline is unchanged — the
-normal case — is unaffected, and a check that cannot run never blocks an update.
+normal case — is unaffected.
 
 **Records tables show all their rows again.** A table with hundreds of rows was cut off at the height of
 the window with no way to scroll. Every row was always loaded; the page simply clipped them.
@@ -3733,9 +3747,9 @@ it as though it were the whole tenant. An assignment that was simply missing fro
 like something to change. All three now discard an incomplete read, say so, and leave the affected area
 untouched for that run rather than acting on a half-picture.
 
-**A removal you asked for is never quietly dropped.** A pending removal whose target could not be seen
-used to count as "already done" and was deleted from your desired state — so on an incomplete read, a
-removal you had committed could disappear without ever being carried out. It is now kept and retried.
+**A removal you asked for is always carried out.** A pending removal whose target cannot be seen
+on an incomplete read
+is kept and retried.
 
 **Upgrade note:** if any of your rows ask for an assignment type that is not live, the first run after
 upgrading will CREATE it (and keep the existing one). Nothing is deleted. If you do not want both, mark
@@ -3795,9 +3809,9 @@ the reason shown; the refusal is in the server, not only in the checkbox.
 enforcement was switched off. That stopped being true when Pro enforcement shipped: the Pro features
 listed under Licence are checked against your installed licence. The text now says what actually happens.
 
-**Licensing corrections.** A licence whose edition reads "Core" no longer unlocks Pro features; Pro means
-Pro. Delegated administration is a Pro capability and is now enforced wherever a delegated administrator
-is resolved, not only where one is created — without a licence such a user is a reader. The Exchange
+**Licensing corrections.** Only a Pro licence unlocks Pro features; Pro means
+Pro. Delegated administration is a Pro capability, enforced wherever a delegated administrator
+is resolved — without a licence such a user is a reader. The Exchange
 Online connector has been removed from the feature list: no version of the product applies it yet, and
 listing it offered a capability that does not exist.
 
@@ -3929,7 +3943,7 @@ listing it offered a capability that does not exist.
 
 **Your naming convention, everywhere.**
 - **The fix:** names built for discovered Azure, Power BI and Power Platform resources, template imports, the portal's group facets and group retirement now follow the tenant's own group-name pattern instead of assuming `PIM-`.
-- **Safer workload binding:** a workload connector no longer falls back to a partial name match that could bind the wrong group.
+- **Safer workload binding:** a workload connector binds a group by its exact name only.
 
 **The replication preview and what is actually sent now agree for admins.** An admin with no management mode stays on the master tenant. It is shown that way in the preview and listed under *not published*, instead of being previewed as replicated but never sent.
 
@@ -3954,7 +3968,7 @@ listing it offered a capability that does not exist.
 - **The import check:** it no longer fills in a stand-in domain, so it sees exactly what the Manager sees.
 
 **Fixed: revoking an Entra role that was not assigned through PIM.**
-- **The bug:** revoke always asked PIM to remove the assignment. A permanent assignment made outside PIM (v1, the portal, or the older API) has nothing for PIM to remove, so the revoke failed with *The Role assignment does not exist* and the role stayed.
+- **How it works:** A permanent assignment made outside PIM (v1, the portal, or the older API) has nothing for PIM to remove, so revoke handles it by its kind (below).
 - **Now:** revoke first reads what is live:
   - **Assigned through PIM:** removed through PIM, at its real scope.
   - **Permanent:** the assignment itself is deleted.
@@ -4003,7 +4017,7 @@ listing it offered a capability that does not exist.
 
 **Break-glass accounts need a second SuperAdmin.**
 - **What it protects:** the break-glass list exempts accounts from being revoked, disabled or offboarded, so one person should never be able to change it alone.
-- **How a change works:** saving now raises a *request*, showing the change, your justification and a 72-hour expiry. A different SuperAdmin approves or rejects it; you can cancel your own.
+- **How a change works:** saving raises a *request*, showing the change, your justification and a 72-hour expiry. A different SuperAdmin approves or rejects it; you can cancel your own.
 - **Checks on approval:** it applies only if the list has not changed in the meantime, and every step is audited.
 - **Always on:** it does not depend on the optional maker/checker setting.
 - **Only one SuperAdmin?** An environment with a single SuperAdmin uses the new operator script `Set-PimBreakGlassAccounts.ps1`, which is also audited.
@@ -4037,8 +4051,8 @@ Since v2.4.370 the Manager has checked each administrator's registered sign-in m
 ## v2.4.373 — one rule for disabling an admin, PIM-eligible Azure connector, and a hardened image
 
 **Security:**
-- **Disabling an administrator needs a second person on every path.** Saving a grid change that would disable an admin now holds only that change and raises an offboard approval instead of disabling the account on the next run. The trigger is AccountStatus Disabled or Revoked, a retire lifecycle, or a disable date that has already passed. The rest of the commit is saved as normal. The Manager shows what was held and lets you raise the approval. This is the same rule the account editor already follows.
-- **The Azure RBAC workload connector now creates PIM-eligible assignments.** It used to make permanent Azure role assignments outside PIM. Every shipped connector on a PIM-capable surface now creates eligibilities.
+- **Disabling an administrator needs a second person on every path.** Saving a grid change that would disable an admin holds only that change and raises an offboard approval. The trigger is AccountStatus Disabled or Revoked, a retire lifecycle, or a disable date that has already passed. The rest of the commit is saved as normal. The Manager shows what was held and lets you raise the approval. The account editor follows the same rule.
+- **The Azure RBAC workload connector creates PIM-eligible assignments.** Every shipped connector on a PIM-capable surface now creates eligibilities.
 - **The container image runs as a non-root user,** and its base images are pinned by digest.
 - **A master can publish a signed central-kill manifest.** Managed tenants already honour one. The new operator script signs it with the master's own key, and it can also withdraw one.
 
@@ -4047,7 +4061,7 @@ Since v2.4.370 the Manager has checked each administrator's registered sign-in m
 - **App Service text removed:** the DNS guidance no longer mentions App Service, whose hosting path was retired.
 - **Faster test suite:** the whole offline suite now runs in about 7–10 minutes, down from about 30, with every assertion kept.
 
-**Upgrade note:** the image now runs as a non-root user. If you point log or sync folders somewhere other than the defaults, make sure that user can write there.
+**Upgrade note:** the image runs as a non-root user. If you point log or sync folders somewhere other than the defaults, make sure that user can write there.
 
 ## v2.4.372 — you control how often managed tenants update, and escalation mail is safe
 
@@ -4087,10 +4101,10 @@ deleted by either one.
   desired state and runs them past the removal budget. It therefore mailed an "engine failure: removal budget
   tripped" alert about a run that could not remove anything. A plan now only logs that finding. The alert is kept for
   real runs, where the budget actually holds changes back.
-- **The managed-tenant pull no longer refuses when it cannot read a kill switch nobody configured.** By default the
-  pull looks for a central kill manifest next to the bundle. On a bundle store that is not publicly readable, that
-  location answers "unauthorized", and v2.4.370 treated that as "a kill might be in force" and refused every pull. It
-  now reports the check as not performed and says how to enforce it. A kill location you configure explicitly is
+- **The managed-tenant pull works where nobody configured a kill switch.** By default the
+  pull looks for a central kill manifest next to the bundle. The job result
+  says how to enforce a kill switch.
+  A kill location you configure explicitly is
   still checked strictly.
 - **The update-ring tools read the ring channel correctly** when it is served as a binary download. Before this, the
   drift check, the sync and the updater installer reported "nothing approved".
@@ -4105,45 +4119,45 @@ never be lost by an edit**. It is recommended for every installation. Read the u
 changes make the product refuse something it used to allow, and they say so when they do.
 
 **Security**
-- **The Manager page can no longer be made to run injected script.** Names written into desired state (group,
-  account, administrative unit or tenant names) are now escaped before they are placed in the page, so a crafted
-  name cannot run script in another administrator's browser.
+- **The Manager page escapes every name it shows.** Names written into desired state (group,
+  account, administrative unit or tenant names) are escaped before they are placed in the page, so a
+  name is always shown as plain text.
 - **A hosted Manager trusts identity only from a real sign-in layer.** On hosts with no sign-in layer in front, the
-  identity headers are refused, and a request with no signed-in user gets *401 sign in required*. It used to get
-  read-only access. A new Manager is created closed and opens only after its sign-in is configured and verified.
-  Sign-in now also requires an explicit choice of who may use it: named people or groups, or all member users of
+  identity headers are refused, and a request with no signed-in user gets *401 sign in required*.
+  A new Manager is created closed and opens only after its sign-in is configured and verified.
+  Sign-in also requires an explicit choice of who may use it: named people or groups, or all member users of
   the tenant (never guests).
 - **An administrative-unit delegation stays scoped to its administrative unit.** The resource-delegation wizard
-  now stages an AU-scoped assignment. It used to stage a tenant-wide one, and the engine now refuses a tenant-wide
+  stages an AU-scoped assignment, and the engine refuses a tenant-wide
   row that claims an AU scope.
 - **Delegated (portal-profile) administrators see and change only their own slice.** The data grid returns only
   the rows in their scope. Their commit is merged into the full set, so rows outside their scope are never removed.
 - **Two administrators editing the same data at once can no longer overwrite each other.** A commit made against
   data that changed since it was loaded is refused. You are offered a reload that keeps your staged edits.
-- **Alerting webhook addresses are no longer shown to read-only users.** Bug reports sent from the Manager or the
-  Activator no longer include your sign-in name, tenant id or raw error details unless you choose to include them.
+- **Alerting webhook addresses are hidden from read-only users.** Bug reports sent from the Manager or the
+  Activator include your sign-in name, tenant id or raw error details only when you choose to include them.
 - **Master→managed-tenant bundles:** anti-rollback is enforced on the scheduled pull, with the last applied version
-  kept in the managed tenant's own store. A signing key can now be revoked. A central kill switch is honoured. The
-  publisher now refuses to publish when it cannot read a projection table; it used to treat that as "project
-  everything".
-- **PIM Activator:** the extension's site access is narrowed to the Microsoft sign-in, Graph and Azure endpoints it
+  kept in the managed tenant's own store. A signing key can be revoked. A central kill switch is honoured. The
+  publisher refuses to publish when it cannot read a
+  projection table.
+- **PIM Activator:** the extension's site access covers only the Microsoft sign-in, Graph and Azure endpoints it
   uses, and its sign-in tokens are kept only for the browser session (the extension update ships separately).
   Deploying the Activator's browser policy no longer overwrites your organisation's own extension policies.
-- **Least privilege in setup:** Exchange administration for the engine is activated through PIM and time-bound. It
-  used to be assigned permanently. Root-level User Access Administrator is opt-in. The bundle publisher gets a
-  read-only database user instead of database administrator. New installations create the SQL administrators
+- **Least privilege in setup:** Exchange administration for the engine is activated through PIM and time-bound.
+  Root-level User Access Administrator is opt-in. The bundle publisher gets a
+  read-only database user. New installations create the SQL administrators
   group as role-assignable, and an existing group that is not role-assignable is reported as a security finding.
 
-**Safety features that now do what they say**
+**Safety features**
 - **Break-glass (emergency override) is applied by the engine.** While an override is active, approval is switched
   off on the scoped groups. When it expires, the linked policy is restored. Every step is audited.
 - **Break-glass accounts are managed in the Manager** (Settings), stored in SQL and read by both the Manager and the
   engine. PIM never revokes, disables or offboards these accounts. If the list cannot be read, PIM protects
   everyone and says so. It never guesses.
-- **The three safety alerts are really sent:** the removal budget, the account-disable circuit breaker and the
+- **The three safety alerts are sent:** the removal budget, the account-disable circuit breaker and the
   policy mass-change hold. A failed send is recorded as failed.
-- The offboard safety gate now applies every time, no matter which Manager page was opened first. Setting a
-  disable date in the past now raises an offboard approval instead of disabling the account on the next run.
+- The offboard safety gate applies every time. Setting a
+  disable date in the past raises an offboard approval.
 - Lifecycle escalations, the two authentication and activity checks, the ServiceNow intake and "Newly discovered
   resources" are all SQL-backed now, and they act on what they find. Access-review screens show real data or say
   *unavailable*. They never show sample data.
@@ -4164,7 +4178,7 @@ changes make the product refuse something it used to allow, and they say so when
   operator names an explicit override *and* a version.
 - The version drift check compares each environment with its own ring's approved version.
 - A skipped smoke test is no longer treated as a pass.
-- A deploy that would move an environment backward fails instead of printing a warning.
+- A deploy that would move an environment backward fails.
 - The template catalog follows the environment's update ring. Customer-ring environments receive only fully
   promoted template entries.
 
@@ -4251,10 +4265,10 @@ changes.
   that environment; it is off by default, and a run that uses it says so loudly. Forward updates, the
   "already on that version" no-op and the ring approval itself are unchanged — an environment still moves
   only to what its ring approves.
-  *Why it matters:* an environment installed at a current version could previously be rolled backward by
-  its own nightly update to whatever older version its ring still held. Everything about that update
-  looks successful; what breaks is a component the newer version added, hours later, unattended, with
-  nothing to alert on it.
+  *Why it matters:* an environment stays on the newest version it has reached, so
+  a component that version added
+  keeps working
+  unattended.
 
 - **The release ring you configure is the release ring that gets deployed.** The ring chosen for an
   installation was not being passed on to the update job, so the job was created on the built-in default
@@ -4428,8 +4442,8 @@ should never have had, and renames the date column that switches one off so it s
 
 - **Mail about an administrator now goes to their sponsor department's owners.** PIM's mail about an
   administrator account — the new-account notice and the Temporary Access Pass — is addressed to the
-  **owners of the department that sponsors that administrator**, all of them. Previously it fell back to a
-  manager address recorded on the person, which goes stale the moment somebody changes job; a department
+  **owners of the department that sponsors that administrator**, all of them, because a
+  department
   outlives a reorganisation. Two exceptions are deliberate: an explicit forwarding address on the
   administrator still wins, because it is a decision written on that record; and a manager address on an
   existing record is still honoured so nothing stops working, but it is now reported as **legacy** in the
@@ -4476,8 +4490,8 @@ should never have had, and renames the date column that switches one off so it s
   - the MSP fan-out and the central-admin registry command ignore a "no";
   - the validator reports a "no" as having no effect and offers a one-click fix;
   - the readiness check now requires every Entra admin to have a delivery address.
-- **Fixed: a deployment could give the Manager's read-only identity the engine's full write permissions.** The
-  permission grant used the engine's list whatever list was asked for. The Manager now receives only its read-only set.
+- **The deployment grants each identity its own permission set.** The
+  Manager receives only its read-only set.
 - **Fixed: the full deployment ignored the SQL admin group name and the troubleshooting identity**, and on a private
   database its access step looked up a setup job with an empty name. Both values are now passed through.
 - **The deployment identity can now create and fill the SQL admin group**, so that step runs without manual help.
@@ -4574,8 +4588,8 @@ then run it again without `-PlanOnly`.
   tenant receives is exactly as before.
 - **Fixed: department, project and cross-org groups were not sent with the memberships that need them**, so a
   managed tenant received a membership into a group it could not create.
-- **Fixed: an admin or group marked as local to the MSP could still be included in the signed baseline.** It is
-  now left out entirely unless something that replicates depends on it.
+- **An admin or group marked as local to the MSP is left out of the signed baseline**
+  unless something that replicates depends on it.
 - **Fixed: the master's view of which admin reaches which tenant ignored targets and tags**, so it listed more
   tenants than the admin actually reaches.
 - **Fixed: admin assignments had no Target column in the grid**, although the baseline reads it.
@@ -4702,7 +4716,7 @@ then run it again without `-PlanOnly`.
   logs & errors now reads, for example, "PIM policy for Azure role 'Reader' at management group X
   (template Y)" instead of showing an empty group and role.
 
-## v2.4.349 — Complete audit of policy changes and revokes, no passwords in logs
+## v2.4.349 — Complete audit of policy changes and revokes, safer admin onboarding
 
 - **Policy changes are audited rule by rule**, with the value before and after, the template, and whether
   an approved mass-change plan applied it.
@@ -4756,9 +4770,9 @@ then run it again without `-PlanOnly`.
 
 ## v2.4.345 — Group policy safety brake always on, faster group policy updates
 
-- **The mass-change safety brake covers PIM for Groups policies in every case.** With batched reads (the
-  default), a large or weakening set of group policy changes could be applied without being held for
-  approval. It is now held exactly like Entra role and Azure resource policies.
+- **The mass-change safety brake covers PIM for Groups policies in every case,**
+  so a large or weakening set of group policy changes is held for
+  approval exactly like Entra role and Azure resource policies.
 - **Group policy updates send only what changed**, which makes large policy alignments many times faster.
 - **Opening Governance no longer slows down the Manager.** The drift check runs only when an admin clicks
   **Check for drift (slow)**.
@@ -4849,9 +4863,9 @@ then run it again without `-PlanOnly`.
   its database to start. Policy templates are kept in the database and upgraded automatically when
   unchanged.
 
-## v2.4.337 — Saving an admin works, and Entra role policies are enforced again
+## v2.4.337 — Saving an admin works, and Entra role policies are enforced
 
-- **Entra role PIM policies are enforced again** after a 2.4.336 change made the policy job fail on every
+- **Entra role PIM policies are enforced**, and the policy job completes on every
   run.
 - **Saving an admin no longer reports a failure for a save that worked**; two other save screens had the
   same fault.
@@ -4881,7 +4895,7 @@ then run it again without `-PlanOnly`.
   dropdowns; mailbox forwarding can be set (off by default).
 - **Direct groups:** new **Project** and **Cross-org** types; Department and Process groups are created by
   the engine.
-- **Admin names:** a configurable admin word ("Admin", "adm") no longer loosens name validation.
+- **Admin names:** a configurable admin word ("Admin", "adm") keeps name validation strict.
 
 ## v2.4.335 — Queued changes are visible, and the admin screen no longer waits for everything
 
@@ -4892,7 +4906,7 @@ Includes the changes from 2.4.332 – 2.4.334.
 - **One queue, one menu entry.** Three entries that led to the same list are now one.
 - **Temporary Access Pass status is checked per admin** with **Check**, so the account list appears at once.
 - **Edit sits on the admin's own row.**
-- **A pass is mailed to the admin's forwarding address**, not to their manager; values that are not email
+- **A pass is mailed to the admin's forwarding address**; values that are not email
   addresses are refused.
 - **The word "admin" in account names is configurable** (for example "adm").
 - **A new direct group asks what type it is** — role, organisation, department, process or resource.
@@ -5015,13 +5029,13 @@ Includes the changes from 2.4.332 – 2.4.334.
 
 ### Safer by default (2.4.253 – 2.4.271)
 
-- **Access decisions fail closed.** If authorisation data cannot be read, access is refused; a file on the
-  host can no longer decide who holds the highest role; the emergency override is stored where the engine
+- **Access decisions fail closed.** If authorisation data cannot be read, access is refused; the highest role is
+  decided only by the stored authorisation data; the emergency override is stored where the engine
   reads it.
 - **The audit trail is kept in your database and names the person who acted.** Suppressions and exceptions
   are stored in the database too.
 - **Failed scheduled jobs raise an alert.**
-- **A configured identity that cannot be used is refused** instead of silently replaced by another
+- **A configured identity that cannot be used is refused**, never replaced by another
   credential, for both directory and database connections. There is no hidden default local database.
 - **Onboarding setup accepts certificates**; no client secret is required.
 - **Managed tenants:** role reach can be reviewed and edited by role, and accounts a managed tenant's naming
@@ -5052,10 +5066,10 @@ Includes the changes from 2.4.332 – 2.4.334.
 - **Updates refuse to change your policy baseline by accident.** If the shipped policy templates changed,
   the update names them and proceeds only when you confirm.
 - **The scheduled engine is updated together with the interface**, from the same image.
-- **Multi-tenant fixes:** access tokens are cached per tenant (previously a second tenant could reuse the
-  first tenant's token); the active identity is restored after a multi-tenant pass; the directory snapshot
+- **Multi-tenant fixes:** access tokens are cached per tenant;
+  the active identity is restored after a multi-tenant pass; the directory snapshot
   is refreshed every run; a central admin can be resolved into a managed tenant.
-- **Upgrade note:** if you run PIM4EntraPS across more than one tenant from one host, or run the scheduler
+- **Upgrade note:** if you run PIM Manager across more than one tenant from one host, or run the scheduler
   as a container (where overlapping runs were not detected), update to at least 2.4.246.
 - **First deployments** retry briefly when an administrative unit created in the same run is not yet
   available.
@@ -5181,7 +5195,7 @@ Includes the changes from 2.4.332 – 2.4.334.
 
 - **On-premises AD admin rows are provisioned** (they were silently skipped), routed to the right
   organizational unit by account naming convention, with group managed service account support. Passwords
-  are no longer saved for accounts that failed to be created.
+  are never saved for accounts that failed to be created.
 - **Administrative unit membership**: a single bad row no longer crashes the engine, and lookups that match
   nothing or several objects are skipped with a clear message.
 
@@ -5259,7 +5273,7 @@ Includes the changes from 2.4.332 – 2.4.334.
 - **Per-role permission drill-down** in the PIM Manager (2.2.0).
 - **Temporary Access Pass delivery** by email, Teams or Slack, with a scheduled start time using relative
   expressions such as "+2d 8:00" (2.2.0).
-- Environment-specific data removed from shipped baseline files (2.2.1).
+- Shipped baseline files carry generic data only (2.2.1).
 
 ## v2.1.0 – v2.1.7 (summary)
 
@@ -5282,11 +5296,11 @@ Includes the changes from 2.4.332 – 2.4.334.
   before every commit.
 - **PIM Activator**: an Edge extension for bulk activation of PIM for Groups memberships.
 - **One-step engine app registration setup**.
-- **Engine**: a unique random password per new account instead of one shared initial password, optional
+- **Engine**: a unique random password per new account, optional
   Temporary Access Pass for new accounts, and reliable WhatIf mode.
 - **Upgrade notes:** the engine identity needs the **UserAuthenticationMethod.ReadWrite.All** application
   permission to issue Temporary Access Passes; re-save your admin definitions to pick up the new pass
-  columns; customer configuration files moved to the custom naming; the shared initial password secret is
+  columns; customer configuration files moved to the custom naming; the old initial password secret is
   no longer used.
 
 ## v1.0.0 – v1.0.2 (summary)

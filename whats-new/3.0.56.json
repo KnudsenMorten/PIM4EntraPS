@@ -1,0 +1,17 @@
+{
+  "version": "3.0.56",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "Community installations get a clear message on Pro-only pages, and the Community edition has a new licence.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Clear message on Pro pages in Community",
+      "text": "On a Community installation, Pro-only pages show one plain line: This is part of PIM Manager Pro. Your installation is Community."
+    },
+    {
+      "title": "New Community licence",
+      "text": "The Community edition is now licensed under the PolyForm Shield License 1.0.0. The Pro terms ship only in the Pro package."
+    }
+  ]
+}

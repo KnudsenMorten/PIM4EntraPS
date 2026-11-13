@@ -1,0 +1,13 @@
+{
+  "version": "2.4.572",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Customer installations check PIM Manager directly after deploying.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Simpler check after installation",
+      "text": "After deploying, a customer installation checks PIM Manager directly."
+    }
+  ]
+}

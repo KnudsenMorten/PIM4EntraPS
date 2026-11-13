@@ -1,0 +1,26 @@
+{
+  "version": "2.4.415",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Approvers can always see exactly what they approve, and greyed-out buttons explain themselves.",
+  "new": [
+    {
+      "title": "Approval requests list what they authorise",
+      "text": "Requests raised from a refused Review & Save now list the staged changes in plain words. The manual Raise a request form requires the same list, pre-filled where possible."
+    },
+    {
+      "title": "Copying settings between tenants is documented",
+      "text": "The Naming conventions card now shows the command that copies a setting to another tenant. It is a dry run unless you ask it to apply."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Greyed-out buttons say why",
+      "text": "Commit selected now shows on the button itself why it is off, instead of in a paragraph above the table."
+    },
+    {
+      "title": "\"Already authorised\" needs nothing from you",
+      "text": "The panel of changes your managed tenants will receive now says they are done and travel on the next publish. You only act to cancel a mistake."
+    }
+  ]
+}

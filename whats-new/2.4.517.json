@@ -1,0 +1,13 @@
+{
+  "version": "2.4.517",
+  "date": "2026-10-06",
+  "type": "fix-only",
+  "summary": "The daily reconcile now cleans up access you removed in PIM Manager, within strict safety rules.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Daily reconcile now removes leftovers",
+      "text": "Items PIM Manager granted and you later removed are now removed when all five safety rules hold, never admin accounts. Set the removal mode to report to keep report-only."
+    }
+  ]
+}

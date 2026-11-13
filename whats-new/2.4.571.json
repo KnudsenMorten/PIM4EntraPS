@@ -1,0 +1,13 @@
+{
+  "version": "2.4.571",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "Setup steps that Azure refused now complete.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup steps no longer refused by Azure",
+      "text": "Restarting the app, reading registry credentials and reading the Log Analytics key during setup now work."
+    }
+  ]
+}

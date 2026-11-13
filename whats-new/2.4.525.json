@@ -1,0 +1,26 @@
+{
+  "version": "2.4.525",
+  "date": "2026-10-07",
+  "type": "feature",
+  "summary": "A new Get Started guide walks a new environment through setup, and drift mails are less frequent.",
+  "new": [
+    {
+      "title": "Get Started guides new environments",
+      "text": "A new Get Started menu walks you through every setup step, marks each done or open, and opens the page that does the work. A red ! shows while a required step is open."
+    },
+    {
+      "title": "Choose how often the drift mail comes",
+      "text": "The \"Configuration drift detected\" mail now goes out every two weeks by default. You can change it in Settings under Alerting."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clearer administrative unit errors",
+      "text": "A role at an administrative unit whose group, unit or role cannot be found is now explained, with the fix."
+    },
+    {
+      "title": "Licence alerts reach Invardia",
+      "text": "The MSP licence check now reports to Invardia in a form it accepts."
+    }
+  ]
+}

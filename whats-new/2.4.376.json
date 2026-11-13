@@ -1,0 +1,34 @@
+{
+  "version": "2.4.376",
+  "date": "2026-09-19",
+  "type": "feature",
+  "summary": "Replicated groups reach your managed tenants again, and PIM Manager is easier to navigate.",
+  "new": [
+    {
+      "title": "Every menu item opens its own page",
+      "text": "Manager access & roles, Emergency access (Break-glass) and Mail templates are now separate pages. Review standing access is renamed Review current delegations."
+    },
+    {
+      "title": "See what a template adds",
+      "text": "Each permission template card has a Show button listing every new permission with a tick box. Import stages only the ticked ones."
+    },
+    {
+      "title": "Activation policy in Start here",
+      "text": "The Delegate a permission - Start here wizard now asks which activation policy the delegation uses."
+    },
+    {
+      "title": "v1 imports are checked first",
+      "text": "Importing v1 files is validated before anything is written, and the import never deletes and refuses conflicting rows unless you choose otherwise."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Replicated groups reach managed tenants",
+      "text": "Groups set to Replicate to managed tenants could reach no tenant. They now reach every tenant their ring and tags allow."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Replication options and rings use plain words, menu badges count only work that needs you, and role-assignable is set correctly for Entra role groups."
+    }
+  ]
+}

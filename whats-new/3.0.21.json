@@ -1,0 +1,13 @@
+{
+  "version": "3.0.21",
+  "date": "2026-11-03",
+  "type": "fix-only",
+  "summary": "Updates no longer fail on a short Invardia hiccup.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates retry on short outages",
+      "text": "When the nightly updater gets no answer from Invardia, it asks again after 30 seconds, 1 minute and 2 minutes before it records a failure."
+    }
+  ]
+}

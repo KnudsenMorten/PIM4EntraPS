@@ -1,0 +1,13 @@
+{
+  "version": "2.4.481",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "Ticketing systems can now propose access changes that an administrator reviews before anything happens.",
+  "new": [
+    {
+      "title": "Ticketing systems propose changes (Pro)",
+      "text": "ServiceNow or another system can propose adding an admin to a PIM group. It becomes a pending change that an administrator reviews and commits."
+    }
+  ],
+  "fixes": []
+}

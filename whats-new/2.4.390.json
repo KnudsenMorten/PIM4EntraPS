@@ -1,0 +1,26 @@
+{
+  "version": "2.4.390",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "You approve held policy changes once, in one place, and the approval holds.",
+  "new": [
+    {
+      "title": "Approve all held policy changes",
+      "text": "The Approvals page lists every held policy change for groups, Entra roles and Azure roles, with one Approve all button. The policy jobs start straight after."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "An approval sticks",
+      "text": "An approval used to expire as soon as anything new appeared. It now covers later runs unless they weaken something you have not approved."
+    },
+    {
+      "title": "Clearer approval screens",
+      "text": "Approved changes show as applying on the next run, and each weakening policy is listed with its change in plain words."
+    },
+    {
+      "title": "Admin names checked without case",
+      "text": "Admin names now match your naming convention regardless of upper or lower case, and the warning shows the expected name."
+    }
+  ]
+}

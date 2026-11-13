@@ -1,0 +1,17 @@
+{
+  "version": "2.4.469",
+  "date": "2026-09-30",
+  "type": "fix-only",
+  "summary": "PIM Manager now carries the Invardia logo, and the documentation is up to date.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "New Invardia PIM Manager logo",
+      "text": "The header shows the Community or Pro logo for your edition, and the browser tab shows the Invardia shield."
+    },
+    {
+      "title": "Documentation up to date",
+      "text": "Every screenshot was refreshed, and the documentation describes the hybrid worker and the MSP features as they are now."
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "version": "2.4.367",
+  "date": "2026-09-17",
+  "type": "feature",
+  "summary": "Service providers publish a signed baseline from their own cloud, with no management server and no expiring links to renew.",
+  "new": [
+    {
+      "title": "Baseline published from the provider's cloud",
+      "text": "A scheduled job in the managing tenant's Azure builds and signs the baseline with a key that never leaves its key vault. No management server is needed."
+    },
+    {
+      "title": "Deploy as a signed-in administrator",
+      "text": "The one-command build can now run on your own sign-in instead of a certificate-based deployment identity."
+    },
+    {
+      "title": "Private-only deployments supported",
+      "text": "The managing tenant and each managed tenant can run with no public entry point, reading the baseline through a private connection."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Managed tenants trust only the pinned key",
+      "text": "Each managed tenant accepts a baseline only from the provider key it is set up with. Several keys can be pinned, so keys change without a gap.",
+      "action": "Update every managed tenant and pin the provider's key before the provider's first cloud publish, and redeploy the baseline jobs with this version."
+    },
+    {
+      "title": "No expiring read link any more",
+      "text": "Managed tenants read the signed baseline over the network, so nothing in the access path expires or needs renewing."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The one-command build completes on a new pair, the Manager says why a baseline is not verified, and a check without directory rights reports not checked.",
+      "action": "Before building a brand-new pair, do the two preparation steps listed in the build guide."
+    }
+  ]
+}

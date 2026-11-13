@@ -1,0 +1,13 @@
+{
+  "version": "2.4.626",
+  "date": "2026-10-14",
+  "type": "fix-only",
+  "summary": "No more false failed mails when two engine runs overlap.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No more false failed mails",
+      "text": "When two engine runs collide, the run record is kept and saved again. A lost record is reported as interrupted, never as failed."
+    }
+  ]
+}

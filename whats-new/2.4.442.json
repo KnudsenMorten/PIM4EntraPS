@@ -1,0 +1,13 @@
+{
+  "version": "2.4.442",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "Access review decisions and reviewer changes are no longer refused on a correctly set-up environment.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Access review decisions are always applied",
+      "text": "Access review decisions and reviewer changes are now carried out by the engine, which checks they took effect. The review buttons are no longer refused."
+    }
+  ]
+}

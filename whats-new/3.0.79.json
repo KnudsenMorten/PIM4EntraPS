@@ -1,0 +1,13 @@
+{
+  "version": "3.0.79",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "The Engine permissions check no longer lists rights as missing that the engine already has.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Engine permissions check looks at the engine",
+      "text": "On Get Started and Home, the check now always checks the engine. Before, some installations checked the web app and listed rights as missing that the engine already had."
+    }
+  ]
+}

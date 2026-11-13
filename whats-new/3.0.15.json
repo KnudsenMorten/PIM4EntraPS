@@ -1,0 +1,13 @@
+{
+  "version": "3.0.15",
+  "date": "2026-11-01",
+  "type": "security",
+  "summary": "Stronger protection for the hybrid worker server on an Azure VM.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger protection on the hybrid worker server",
+      "text": "Security improvements for the managed identity of the hybrid worker server on an Azure VM. Setup and the daily update keep these settings."
+    }
+  ]
+}

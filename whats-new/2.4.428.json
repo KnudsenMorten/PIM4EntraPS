@@ -1,0 +1,26 @@
+{
+  "version": "2.4.428",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Administrators share one list of Pending changes, cannot overwrite each other, and can require a second approver.",
+  "new": [
+    {
+      "title": "Pending changes shared by every administrator",
+      "text": "Every administrator now sees the same Pending changes, updated every few seconds, with who staged each change. Your browser's earlier changes join the shared list automatically."
+    },
+    {
+      "title": "Rows are locked while staged",
+      "text": "When a colleague has staged a change to a row, nobody else can change it until it is committed or discarded. You are told who holds it."
+    },
+    {
+      "title": "An optional second approver",
+      "text": "A SuperAdmin can require that sensitive changes, or all changes, are committed by a different administrator than the one who staged them."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Cancel all pending discards only yours",
+      "text": "Cancel all pending now discards only your own changes; your colleagues' changes stay. A commit asks first when it includes colleagues' changes."
+    }
+  ]
+}

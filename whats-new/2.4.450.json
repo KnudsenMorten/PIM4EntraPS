@@ -1,0 +1,17 @@
+{
+  "version": "2.4.450",
+  "date": "2026-09-26",
+  "type": "fix-only",
+  "summary": "Access reviews show each person's real access, and nobody can review their own account.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Reviews list each person's access",
+      "text": "When an admin was defined by a short account name, the review showed no access for them. It now shows the full sign-in name and the access they hold."
+    },
+    {
+      "title": "No reviewing your own admin account",
+      "text": "A reviewer can no longer decide on their own admin account. Another reviewer or a SuperAdmin decides it."
+    }
+  ]
+}

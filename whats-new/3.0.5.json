@@ -1,0 +1,42 @@
+{
+  "version": "3.0.5",
+  "date": "2026-10-29",
+  "type": "feature",
+  "summary": "PIM Manager installs in two lines, and settings can be exported and imported.",
+  "new": [
+    {
+      "title": "Install in two lines",
+      "text": "PIM Manager installs in two lines with a browser sign-in, in Community and Pro alike."
+    },
+    {
+      "title": "Export and import settings",
+      "text": "You can export your settings to a file and import them from one."
+    },
+    {
+      "title": "Guards show a red count",
+      "text": "The Guards menu shows a red count when a guard holds changes for a SuperAdmin."
+    },
+    {
+      "title": "New options, off by default",
+      "text": "Eligible group owners and a nightly demo reset are built in, both off by default."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Engine rights follow your scopes",
+      "text": "The engine's Azure rights follow the scopes you define, never Owner. After an update, PIM Manager reports any new permission the engine needs."
+    },
+    {
+      "title": "Fewer unneeded engine runs",
+      "text": "Engine runs are skipped when nothing changed; a full check still runs every 4 hours."
+    },
+    {
+      "title": "No false not role-assignable label",
+      "text": "An Azure refusal that heals on the next run is no longer labelled group not role-assignable."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The Departments grid no longer shows blank rows, and restoring a list setting keeps its keys."
+    }
+  ]
+}

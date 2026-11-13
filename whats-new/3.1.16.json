@@ -1,0 +1,26 @@
+{
+  "version": "3.1.16",
+  "date": "2026-11-12",
+  "type": "feature",
+  "summary": "You can follow a policy change from save to applied on one page.",
+  "new": [
+    {
+      "title": "Follow a policy change on one page",
+      "text": "When you save policy choices, PIM Manager plans the change at once and shows each step on the same page: planning, waiting for Approve all, approved and applied."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Approvals always shows policy changes",
+      "text": "The Approvals page now always includes its policy part."
+    },
+    {
+      "title": "Clearer Overview and save messages",
+      "text": "The Overview gap tile uses the coverage check, waiting policy choices show as an info line, and the save message no longer sounds like the second-approver setting."
+    },
+    {
+      "title": "No false updater error",
+      "text": "The updater no longer logs an error for a database user that already exists."
+    }
+  ]
+}

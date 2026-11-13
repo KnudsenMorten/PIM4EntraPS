@@ -1,0 +1,22 @@
+{
+  "version": "2.4.667",
+  "date": "2026-10-22",
+  "type": "feature",
+  "summary": "PCs and servers without Intune get the same PIM Activator limits and filters as Intune-managed ones.",
+  "new": [
+    {
+      "title": "Same Activator settings without Intune",
+      "text": "The PIM Activator install for PCs and servers without Intune now takes the same limits and name filters as the Intune install. PIM Manager shows the command with your settings filled in."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Edge profile tip in the setup step",
+      "text": "The Edge for Business step tells you that a new Edge profile gets the extension once it signs in with the work account."
+    },
+    {
+      "title": "Signed-request check runs when switched on",
+      "text": "The optional signed-request check, off by default, now runs correctly when you switch it on."
+    }
+  ]
+}

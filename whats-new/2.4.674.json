@@ -1,0 +1,13 @@
+{
+  "version": "2.4.674",
+  "date": "2026-10-27",
+  "type": "fix-only",
+  "summary": "Brief Azure sign-in hiccups no longer fail job runs.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Short sign-in faults no longer fail runs",
+      "text": "A one-off fault in PIM Manager's Azure sign-in no longer fails a job run. PIM Manager tries again, and a lasting fault is reported as temporary, not as a product defect."
+    }
+  ]
+}

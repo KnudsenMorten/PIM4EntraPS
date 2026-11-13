@@ -1,0 +1,17 @@
+{
+  "version": "2.4.623",
+  "date": "2026-10-13",
+  "type": "fix-only",
+  "summary": "Alert mails are calmer and easier to act on.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Alert mails are easier to act on",
+      "text": "Alert mails start with the environment name and a calm summary, then the facts, the cause and the fix in plain words, and one button. Technical details come last."
+    },
+    {
+      "title": "Clear error for a missing Power BI workspace",
+      "text": "A Power BI workspace that cannot be found now has its own clear error."
+    }
+  ]
+}

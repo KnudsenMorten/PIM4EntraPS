@@ -1,0 +1,17 @@
+{
+  "version": "2.4.526",
+  "date": "2026-10-07",
+  "type": "feature",
+  "summary": "One page now shows everything needed to roll out PIM Activator.",
+  "new": [
+    {
+      "title": "PIM Activator deployment page",
+      "text": "Operations > PIM Activator covers the Entra apps, the settings, the Intune remediation, Edge for Business and servers without Intune, filled in for this environment."
+    },
+    {
+      "title": "Ready-made Intune remediation",
+      "text": "Build gives you both remediation scripts with your settings filled in, for a group, all devices or all users. Uploading needs only a browser sign-in."
+    }
+  ],
+  "fixes": []
+}

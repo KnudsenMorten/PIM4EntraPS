@@ -1,0 +1,17 @@
+{
+  "version": "3.1.7",
+  "date": "2026-11-11",
+  "type": "feature",
+  "summary": "A person can now hold PIM delegations on their own existing account, which PIM Manager never changes.",
+  "new": [
+    {
+      "title": "Delegations on a person's existing account",
+      "text": "The new admin type Existing account lets a person hold PIM delegations on their own office account. PIM Manager finds it by exact name and never creates, changes, disables or deletes it."
+    },
+    {
+      "title": "Warning on high-privilege use",
+      "text": "PIM Manager warns you when such an account gets more than level 4-5."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.4.397",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "You can see at a glance what you have changed on the Access map but not yet committed.",
+  "new": [
+    {
+      "title": "Uncommitted links are marked",
+      "text": "Both ends of a link you have added but not committed are marked in amber with the word staged. The mark disappears once you commit on Review & Save."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.4.426",
+  "date": "2026-09-25",
+  "type": "fix-only",
+  "summary": "Commits no longer fail with a false \"another administrator\" message, and the permission check stops raising false alarms.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Commits no longer blame another administrator",
+      "text": "When the engine's own work changed rows under you, Commit was refused and you had to reload. It now re-applies your edits and commits, asking only when your rows really changed."
+    },
+    {
+      "title": "Correct Azure result in the permission check",
+      "text": "The permission check on Overview now reads the Azure roles the engine actually holds, including inherited ones, so it no longer reports a false blocker."
+    },
+    {
+      "title": "Mail status in the permission check",
+      "text": "Mail now counts as working when the latest real alert was delivered, and failing when the latest attempt failed, instead of always \"not verified\"."
+    }
+  ]
+}

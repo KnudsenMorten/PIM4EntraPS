@@ -1,0 +1,26 @@
+{
+  "version": "2.4.412",
+  "date": "2026-09-22",
+  "type": "feature",
+  "summary": "Every administrator your provider publishes now reaches the managed tenant, whatever their name looks like.",
+  "new": [
+    {
+      "title": "Copy a setting between tenants",
+      "text": "A new setup script copies a setting, such as naming conventions or a schedule, to another tenant. It backs up the target first and refuses tenant-specific settings."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Admins are no longer withheld by name",
+      "text": "A managed tenant's naming setting could silently drop published administrators. Every published admin is now sent, and a naming mismatch is only reported."
+    },
+    {
+      "title": "Sent administrators are managed normally",
+      "text": "The engine now recognises centrally sent administrators whatever they are called, so they are managed like any other and never recreated in a loop."
+    },
+    {
+      "title": "Pull results shown on Job schedule",
+      "text": "The explanation of each pull, such as how many administrators were sent or excluded, is now kept and shown on Job schedule."
+    }
+  ]
+}

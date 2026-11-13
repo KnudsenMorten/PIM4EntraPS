@@ -1,0 +1,42 @@
+{
+  "version": "2.4.515",
+  "date": "2026-10-06",
+  "type": "feature",
+  "summary": "You can now undo commits, restore from backups, pause the daily reconcile and release guards under full control.",
+  "new": [
+    {
+      "title": "Undo any commit",
+      "text": "Commit history & undo shows every commit with who, when and what changed. A SuperAdmin can undo any commit, an Admin their own, through the normal approvals."
+    },
+    {
+      "title": "Back up and restore your configuration",
+      "text": "A daily backup and Back up now keep your configuration for 90 days, never secrets. A SuperAdmin restores the rows they pick as a normal, undoable change."
+    },
+    {
+      "title": "Pause the daily reconcile",
+      "text": "A SuperAdmin can pause it with a reason and an optional end time, shown on Home and Jobs. Commits and Run now keep working."
+    },
+    {
+      "title": "See and release guards",
+      "text": "Guards shows what each protective guard is holding. A SuperAdmin can release that exact plan, with a reason, for one run or up to 24 hours."
+    },
+    {
+      "title": "Remove from PIM on Admin accounts",
+      "text": "Removes every delegation of an admin and disables the account, but keeps it."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Clear rules for deleting admin accounts",
+      "text": "A SuperAdmin or Admin may delete any admin; a delegated operator only admins at or below its own level and tier."
+    },
+    {
+      "title": "Self-approval covers disable and offboarding",
+      "text": "With self-approval on, a disable or offboarding commits directly and is recorded as self-approved."
+    },
+    {
+      "title": "Results recorded per item",
+      "text": "Each commit's result in the tenant is now recorded per item: created, updated, removed, already present or failed."
+    }
+  ]
+}

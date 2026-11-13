@@ -1,0 +1,13 @@
+{
+  "version": "2.4.544",
+  "date": "2026-10-10",
+  "type": "fix-only",
+  "summary": "The engine is sized for your tenant even where the updater cannot read the directory.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Automatic engine sizing works again",
+      "text": "Sizing the engine for your tenant now works even when the updater may not read the directory, and the update log no longer shows count errors."
+    }
+  ]
+}

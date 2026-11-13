@@ -1,0 +1,29 @@
+{
+  "version": "2.4.582",
+  "date": "2026-10-11",
+  "type": "feature",
+  "summary": "Export any view to PDF or Excel and show the impact PIM Manager has, with your company name kept off screen by default.",
+  "new": [
+    {
+      "title": "Export any table to PDF or Excel",
+      "text": "Use the new Export menu in the header to save any page that shows a table as PDF or Excel. The export shows exactly what the page shows and is audited."
+    },
+    {
+      "title": "Impact counters on a new overview",
+      "text": "The new Counters overview shows activations, standing access made eligible, standing-access hours removed, approvals, reviews and more, with how each is counted."
+    },
+    {
+      "title": "Company name hidden on screen by default",
+      "text": "The Dashboard and Counters overview hide the company and environment name by default, also in every export, so you can safely show them in a meeting."
+    },
+    {
+      "title": "Private link between managing and managed tenants",
+      "text": "A managing / managed tenant pair can now connect over a private path without network peering. Built, not yet proven live; the public, signed path stays the default."
+    },
+    {
+      "title": "Hybrid worker improvements",
+      "text": "The hybrid worker now reaches a private-only PIM database, works with domain controllers behind a hub gateway, and can be removed cleanly with one command."
+    }
+  ],
+  "fixes": []
+}

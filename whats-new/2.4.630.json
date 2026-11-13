@@ -1,0 +1,17 @@
+{
+  "version": "2.4.630",
+  "date": "2026-10-14",
+  "type": "fix-only",
+  "summary": "Guards are extra careful for a day after an engine update.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stricter guards after engine updates",
+      "text": "For 24 hours after an update that changes the engine, every guard with a number uses half its limit. A SuperAdmin can end this early."
+    },
+    {
+      "title": "Daily data-quality mail removed",
+      "text": "The data-quality check and its daily mail are gone."
+    }
+  ]
+}

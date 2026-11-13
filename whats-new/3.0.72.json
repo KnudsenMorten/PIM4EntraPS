@@ -1,0 +1,13 @@
+{
+  "version": "3.0.72",
+  "date": "2026-11-09",
+  "type": "fix-only",
+  "summary": "The installation report no longer flags a standard identity as non-standard.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Installation report shows documentation job correctly",
+      "text": "The installation report no longer marks the documentation job's identity as non-standard."
+    }
+  ]
+}

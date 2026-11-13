@@ -1,0 +1,13 @@
+{
+  "version": "2.4.677",
+  "date": "2026-10-27",
+  "type": "fix-only",
+  "summary": "You can no longer miss changes that still wait for Commit.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Uncommitted changes show in the menu",
+      "text": "Changes you staged but did not commit show as a red count on Pending changes in the menu. You see at once that nothing happens until you commit them."
+    }
+  ]
+}

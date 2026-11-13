@@ -1,0 +1,25 @@
+{
+  "version": "2.4.678",
+  "date": "2026-10-27",
+  "type": "fix-only",
+  "summary": "Run now works reliably for the tenant list, and removed admins, groups and delegations no longer clutter your lists.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Run now works for the tenant list",
+      "text": "Refreshing the tenant list with Run now no longer fails or keeps a shorter list of Azure scopes. A partly refused read keeps the fuller list you already had."
+    },
+    {
+      "title": "Removed items are hidden in lists",
+      "text": "Deleted admins, retired groups and removed delegations no longer show in the record lists. A Show removed link brings them into view when you need them."
+    },
+    {
+      "title": "Deleted accounts show their real state",
+      "text": "After Delete account, the admin shows Marked for deletion until PIM Manager has deleted it. The account is deleted only after its group memberships are removed."
+    },
+    {
+      "title": "Fewer failed runs from short faults",
+      "text": "PIM Manager retries its Azure sign-in a few times before a run fails, and the coverage report is always saved."
+    }
+  ]
+}

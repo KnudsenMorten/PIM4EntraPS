@@ -1,0 +1,13 @@
+{
+  "version": "2.4.675",
+  "date": "2026-10-27",
+  "type": "fix-only",
+  "summary": "The Access map shows only access that is actually granted.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Access map shows only granted access",
+      "text": "The Access map no longer shows deleted admins, retired groups or removed delegations. It draws only access that is granted today."
+    }
+  ]
+}

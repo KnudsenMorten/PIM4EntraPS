@@ -1,0 +1,26 @@
+{
+  "version": "2.4.430",
+  "date": "2026-09-25",
+  "type": "feature",
+  "summary": "Every mail takes you straight to the right page, drift shows exactly what differs, and you can ignore a finding with a reason.",
+  "new": [
+    {
+      "title": "Every mail opens the right page",
+      "text": "Every PIM Manager mail now has an \"Open in PIM Manager\" button that opens the page it is about. Mails that carry a sign-in credential have no link."
+    },
+    {
+      "title": "Drift shows what differs",
+      "text": "A changed drift finding now shows the field with its current and desired value. The drift alert mail lists the findings themselves, not only counts."
+    },
+    {
+      "title": "Ignore a drift finding",
+      "text": "An Admin can ignore a drift finding with a reason. It leaves the counts, the page and the mail, and ignored findings are listed separately and can be un-ignored."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Review now works in reminders",
+      "text": "The \"Review now\" button in the review reminder mail now works."
+    }
+  ]
+}

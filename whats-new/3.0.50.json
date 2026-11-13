@@ -1,0 +1,25 @@
+{
+  "version": "3.0.50",
+  "date": "2026-11-06",
+  "type": "fix-only",
+  "summary": "Important security alerts now also reach Invardia support, so help can start before you ask.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Security alerts also reach Invardia support",
+      "text": "Live access that differs from your definitions, new unmanaged privileged roles or groups, and break-glass being switched on now also alert Invardia support."
+    },
+    {
+      "title": "Support can tell long jobs from stuck ones",
+      "text": "Update stages and running PIM jobs with their duration are now reported to Invardia support."
+    },
+    {
+      "title": "Right-sized new installations",
+      "text": "A new installation starts at 2 CPU and 4 GiB, or 4 CPU and 8 GiB from 15,000 users, instead of being raised later."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "A resumed install never reuses another version's package, and settings pages store only the values you set yourself."
+    }
+  ]
+}

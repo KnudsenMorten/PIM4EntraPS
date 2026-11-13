@@ -1,0 +1,17 @@
+{
+  "version": "3.0.1",
+  "date": "2026-10-28",
+  "type": "fix-only",
+  "summary": "Community installs can take updates that change the policy baseline.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community accepts baseline updates",
+      "text": "A Community install can now take an update that changes the policy baseline."
+    },
+    {
+      "title": "Clear message for Pro-only setup",
+      "text": "The multi-tenant setup scripts now say they need PIM Manager Pro instead of failing in a Community install."
+    }
+  ]
+}

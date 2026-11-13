@@ -1,0 +1,22 @@
+{
+  "version": "2.4.467",
+  "date": "2026-09-30",
+  "type": "fix-only",
+  "summary": "The hybrid worker separates its privilege tiers, and importing an unmanaged admin answers at once.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "One hybrid worker account per privilege tier",
+      "text": "Group and membership work now runs as one managed service account and server onboarding as a second. Rights go to each account's permission group, never to the account itself.",
+      "action": "Re-run the Active Directory setup with the server account and servers location, then re-run the hybrid worker configuration with both account names."
+    },
+    {
+      "title": "Import on unmanaged admins responds at once",
+      "text": "Import on the unmanaged-admin list now shows \"Importing...\" straight away and shows any errors. An imported account shows \"Staged\" until you commit it."
+    },
+    {
+      "title": "Server permission groups land in your L2 unit",
+      "text": "Discovery now places a server's permission group in your L2 administrative unit."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "version": "2.4.359",
+  "date": "2026-09-15",
+  "type": "feature",
+  "summary": "The Community edition now installs from GitHub into your own tenant in one step.",
+  "new": [
+    {
+      "title": "Install the Community edition from GitHub",
+      "text": "Clone the repository and run the one-step deploy to set up the Manager, engine and database in your own Azure subscription, with Microsoft Entra sign-in. See Getting started."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Community install completes without the updater",
+      "text": "Without a release feed the deploy skips the updater and tells you how to update: pull the latest version and run the same command again."
+    },
+    {
+      "title": "A missing smoke test no longer rolls back",
+      "text": "A deploy without its automated smoke test is now recorded as unverified instead of being rolled back."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Sign-in consent is granted reliably, creating the deploy identity works on a busy directory, and the documentation and screenshots are refreshed."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "3.0.28",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "Community installs get the same sign-in front as Pro, with the same core security.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Community gets the same sign-in front",
+      "text": "A Community install's updater now builds the sign-in front like Pro does, so an existing Community install can move off Easy Auth."
+    }
+  ]
+}

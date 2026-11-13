@@ -1,0 +1,13 @@
+{
+  "version": "2.4.651",
+  "date": "2026-10-18",
+  "type": "fix-only",
+  "summary": "Every mail from PIM Manager now comes from a sender simply named PIM Manager.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Mail sender is named PIM Manager",
+      "text": "Mails now come from a sender named \"PIM Manager\", without extra parts. New installations get it at once, existing ones once renaming is switched on."
+    }
+  ]
+}

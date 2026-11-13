@@ -1,0 +1,18 @@
+{
+  "version": "2.4.308",
+  "date": "2026-09-10",
+  "type": "feature",
+  "summary": "Each environment can now build and install its own approved updates, with no build machine or administrator needed.",
+  "new": [
+    {
+      "title": "Environments build their own updates",
+      "text": "An environment fetches its approved version, builds it in its own Azure and updates itself. It stays off until configured."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Failed builds are reported",
+      "text": "An environment that cannot fetch or build its approved version says so and stops, instead of reporting success."
+    }
+  ]
+}

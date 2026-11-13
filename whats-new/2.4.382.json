@@ -1,0 +1,47 @@
+{
+  "version": "2.4.382",
+  "date": "2026-09-20",
+  "type": "feature",
+  "summary": "PIM Manager never removes an assignment you did not ask to remove, and naming and licences are fully in your hands.",
+  "new": [
+    {
+      "title": "Register your licence in Settings",
+      "text": "Settings > Licence has Register a licence: pick the file or paste its contents. A file that does not verify is refused and nothing is stored."
+    },
+    {
+      "title": "Name admin accounts your way",
+      "text": "Settings > Naming has an admin word and a tenant short name, so one pattern serves every tenant. PIM Manager now always recognises its own admin accounts."
+    },
+    {
+      "title": "Pick the admin account domain",
+      "text": "Settings > Admin account domain now lists your verified domains, shows how many were found and offers Re-read when the list is empty."
+    },
+    {
+      "title": "Copy button in the run log",
+      "text": "The run log has a Copy button that copies the whole log, and Live tail explains itself."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Eligible and Active can coexist",
+      "text": "Before, asking for one assignment type replaced the other. PIM Manager now creates what a row asks for and leaves the rest alone.",
+      "action": "If a row asks for a type that is not live, the first run creates it; mark the one you do not want for removal and commit."
+    },
+    {
+      "title": "No changes from an incomplete read",
+      "text": "When reading your tenant fails part-way, that area is now left untouched for the run instead of being planned from partial data."
+    },
+    {
+      "title": "Committed removals are never dropped",
+      "text": "A removal whose target could not be seen is now kept and retried, instead of being treated as done."
+    },
+    {
+      "title": "Naming is never guessed",
+      "text": "If your naming settings are missing, PIM Manager stops and names the missing setting instead of falling back to defaults that would rename accounts."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The removal-blocked mail is rewritten in plain words, licence and edition checks are corrected, and options that cannot work on a single tenant are locked off."
+    }
+  ]
+}

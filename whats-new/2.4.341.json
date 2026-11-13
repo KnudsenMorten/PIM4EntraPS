@@ -1,0 +1,42 @@
+{
+  "version": "2.4.341",
+  "date": "2026-09-13",
+  "type": "feature",
+  "summary": "Updates move only to approved versions, group policies get the safety brake, and on-premises AD admins work as in v1.",
+  "new": [
+    {
+      "title": "On-premises AD admins work as in v1",
+      "text": "On-premises AD admins are created and kept up to date in Active Directory, named by your naming settings. Their initial password is mailed and never stored."
+    },
+    {
+      "title": "Choose which managed tenants get each admin",
+      "text": "On a managing tenant, each admin says whether it is synced to managed tenants, optionally narrowed to tagged tenants. The Manager shows the tenant's mode."
+    },
+    {
+      "title": "See what naming patterns produce",
+      "text": "Settings shows the result of each naming pattern as you edit it."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Updates follow the approved release",
+      "text": "Each environment moves only to the version its ring approves, and the nightly update refuses to roll when it cannot check the database first."
+    },
+    {
+      "title": "Every cloud admin gets a Temporary Access Pass",
+      "text": "A Temporary Access Pass is issued to every cloud admin. On-premises AD admins use a password."
+    },
+    {
+      "title": "Remove rows revoke the access",
+      "text": "Marking a delegation for removal revokes it, eligible and active, before removing the row. A held or failed removal keeps its row."
+    },
+    {
+      "title": "Safety brake for group and role policies",
+      "text": "Group and Entra role policy changes now have the same safety brake as Azure policies."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "Faster runs, clearer permission errors, mail sent as the environment's own identity, everything kept in the database, and templates gaining new settings without losing yours."
+    }
+  ]
+}

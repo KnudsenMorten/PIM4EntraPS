@@ -1,0 +1,29 @@
+{
+  "version": "2.4.324",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "Administrators can no longer be locked out, and updates bring the database with them.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Administrators are recognised again",
+      "text": "Valid administrators could be treated as read-only users. They, and delegated access profiles, are recognised correctly again."
+    },
+    {
+      "title": "Updates bring the database with them",
+      "text": "Each update brings the database up to date first and never removes data. If the database cannot be updated, the update stops."
+    },
+    {
+      "title": "Protection against data loss",
+      "text": "Replacing all records of one kind with nothing is refused, with a count of what would be removed. Deliberate clearing still works."
+    },
+    {
+      "title": "Every check offers a fix",
+      "text": "Each check has a working fix or says what to do, and five gained one-click repairs. Wizard fields now suggest values."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Jobs that just ran are not shown as overdue, successful updates are not reported failed, and empty access reviews no longer send reminders."
+    }
+  ]
+}

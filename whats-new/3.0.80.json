@@ -1,0 +1,22 @@
+{
+  "version": "3.0.80",
+  "date": "2026-11-10",
+  "type": "feature",
+  "summary": "Admin accounts are found by names that end with your admin marker, and Drift shows only what PIM Manager owns.",
+  "new": [
+    {
+      "title": "Admin names can match at start or end",
+      "text": "Recognised admin names accepts * at the start or end, so accounts like jdoe-a-id are found: Admin-* means starts with, *-a-id means ends with."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Drift lists only PIM-named objects",
+      "text": "In an area with no definitions, the Drift page and mail list only PIM-named objects. A failed read shows as not checked, and administrative units have their own label."
+    },
+    {
+      "title": "Clearer commit status",
+      "text": "After a commit, the status says queued and on hold instead of saved and waiting."
+    }
+  ]
+}

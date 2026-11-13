@@ -1,0 +1,21 @@
+{
+  "version": "3.0.69",
+  "date": "2026-11-09",
+  "type": "security",
+  "summary": "The PIM Manager web app now works with the narrowest rights possible.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Web app runs with the narrowest rights",
+      "text": "PIM Manager keeps only basic user and group reads and Reader on its own resource group. Everything else it shows is read by the engine, as of the last engine run."
+    },
+    {
+      "title": "Documentation job uses its own identity",
+      "text": "The Installation documentation job runs as its own standard identity."
+    },
+    {
+      "title": "Job rename works with a private database",
+      "text": "The job rename step now works at installations with a private database."
+    }
+  ]
+}

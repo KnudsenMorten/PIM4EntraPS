@@ -1,0 +1,13 @@
+{
+  "version": "2.4.653",
+  "date": "2026-10-19",
+  "type": "fix-only",
+  "summary": "Runs that Azure stopped early now explain themselves.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stopped runs explain themselves",
+      "text": "A scheduled run that Azure stopped before it finished now shows its own error code and explanation, not an unrecognised failure."
+    }
+  ]
+}

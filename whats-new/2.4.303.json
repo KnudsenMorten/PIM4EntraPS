@@ -1,0 +1,17 @@
+{
+  "version": "2.4.303",
+  "date": "2026-09-10",
+  "type": "fix-only",
+  "summary": "Automatic updates no longer undo each other overnight.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Updates no longer undo each other",
+      "text": "A new version is marked as approved only after a clean build, so the nightly update and the build no longer pull in opposite directions."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "A failed save of the approved version is reported at once, and the updater cannot be installed on a version too old to run it."
+    }
+  ]
+}

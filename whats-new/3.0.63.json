@@ -1,0 +1,13 @@
+{
+  "version": "3.0.63",
+  "date": "2026-11-08",
+  "type": "fix-only",
+  "summary": "A moved installation no longer shows two setup checks as missing.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false missing setup checks after a move",
+      "text": "Two setup checks, including Manager may start the engine after a change, now read the identity in use after the identity move, so they no longer show as missing."
+    }
+  ]
+}

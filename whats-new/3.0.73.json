@@ -1,0 +1,13 @@
+{
+  "version": "3.0.73",
+  "date": "2026-11-10",
+  "type": "fix-only",
+  "summary": "The support database access step no longer shows a false failure.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Support database access step no longer fails",
+      "text": "The step no longer asks for an extension shorter than 5 minutes, which Microsoft refuses and which showed as a failed step."
+    }
+  ]
+}

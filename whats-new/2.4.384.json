@@ -1,0 +1,30 @@
+{
+  "version": "2.4.384",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Policy template durations can be changed, and the records screens use plain names and clear buttons.",
+  "new": [
+    {
+      "title": "Change policy template durations",
+      "text": "Each policy template now has editable maximum durations for activation, eligible and active assignments. Your next update asks you to confirm before rolling the change."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Records have plain names",
+      "text": "Record types are now named for what they hold, such as Who gets which group or Administrator accounts."
+    },
+    {
+      "title": "An Edit button on every row",
+      "text": "Edit is now the main row action and takes you straight to the first field."
+    },
+    {
+      "title": "Delete is now Stop managing",
+      "text": "Removing a row never removed access, so the button now says Stop managing and points you to the way to actually remove access."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "The record search explains what it searches, the template rollout page uses plain words, and one menu entry is renamed to match its page."
+    }
+  ]
+}

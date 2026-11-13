@@ -1,0 +1,13 @@
+{
+  "version": "2.4.484",
+  "date": "2026-10-03",
+  "type": "feature",
+  "summary": "An AI assistant on the managing tenant can now see your managed tenants, read-only.",
+  "new": [
+    {
+      "title": "AI assistant sees managed tenants (preview)",
+      "text": "On the managing tenant, an AI assistant can list the managed tenants and see what each one receives. It never changes anything."
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,22 @@
+{
+  "version": "2.4.389",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Held policy changes send one mail instead of many, and you approve them where you read them.",
+  "new": [
+    {
+      "title": "Approve from the Approvals page",
+      "text": "The mail now points to Reviews & controls > Approvals, which always shows the current held change with Approve this change set at the top."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "One mail per held change",
+      "text": "A held policy change used to send a mail on every run. It now mails once, again only if it gets weaker or once a day while it stands."
+    },
+    {
+      "title": "Shorter Policy templates page",
+      "text": "The Policy templates page has a one-line introduction, folded help and one card per default template."
+    }
+  ]
+}

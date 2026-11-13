@@ -1,0 +1,17 @@
+{
+  "version": "2.4.497",
+  "date": "2026-10-05",
+  "type": "security",
+  "summary": "Stronger protection for Pro updates.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Stronger checks on Pro updates",
+      "text": "Every Pro update download is checked before it is applied."
+    },
+    {
+      "title": "Accessible auto-extend field",
+      "text": "Screen readers now announce the auto-extend lead-days field."
+    }
+  ]
+}

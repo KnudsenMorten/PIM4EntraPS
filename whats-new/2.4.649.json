@@ -1,0 +1,21 @@
+{
+  "version": "2.4.649",
+  "date": "2026-10-18",
+  "type": "fix-only",
+  "summary": "Updates report their state more accurately, and Invardia Support keeps the access it needs to help you.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "No false out-of-date reports",
+      "text": "An update now retries a part whose request was lost on the network, instead of reporting it out of date."
+    },
+    {
+      "title": "Invardia Support access stays in place",
+      "text": "PIM Manager never removes the Invardia Support app's database access, and the setup check now finds that access reliably."
+    },
+    {
+      "title": "Safer move to the sign-in front",
+      "text": "The move to the sign-in front waits until the new version is running before it switches the old sign-in off."
+    }
+  ]
+}

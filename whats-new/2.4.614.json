@@ -1,0 +1,21 @@
+{
+  "version": "2.4.614",
+  "date": "2026-10-13",
+  "type": "fix-only",
+  "summary": "Assignments to retired groups are stopped at Commit, and workload readiness is reported honestly.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Assignments to retired groups are refused",
+      "text": "Committing an assignment to a retired or undefined group is refused, with the row and two ways out. A group cannot be retired while assignments still name it."
+    },
+    {
+      "title": "Power BI prerequisite checks itself",
+      "text": "The Power BI prerequisite names the group and the identity that must be in it, and checks the membership itself."
+    },
+    {
+      "title": "Unreadable workloads are not ready",
+      "text": "A workload PIM Manager could not read is never counted as ready."
+    }
+  ]
+}

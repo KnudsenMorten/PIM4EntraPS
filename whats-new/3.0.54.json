@@ -1,0 +1,13 @@
+{
+  "version": "3.0.54",
+  "date": "2026-11-07",
+  "type": "fix-only",
+  "summary": "PIM Manager's app registrations are owned by the installation's own updater, checked on every update.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "The updater owns PIM Manager's app registrations",
+      "text": "Every update checks and reports whether the updater owns PIM Manager's app registrations and proves it once with a harmless change. It never adds itself or removes anyone."
+    }
+  ]
+}

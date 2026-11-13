@@ -1,0 +1,22 @@
+{
+  "version": "2.4.492",
+  "date": "2026-10-04",
+  "type": "feature",
+  "summary": "Each environment now shows its own name, so several open PIM Managers are easy to tell apart.",
+  "new": [
+    {
+      "title": "Name each environment",
+      "text": "A SuperAdmin sets the name under Settings > Environment name. It shows at the top of every page and in the browser tab."
+    },
+    {
+      "title": "Restore configuration after a rebuild",
+      "text": "A restored backup can be copied into a running environment. It shows a plan first, pauses the engine and never overwrites existing definitions."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "No false Azure blocked warning",
+      "text": "Without Azure resource delegations, missing Azure rights no longer show as blocked."
+    }
+  ]
+}

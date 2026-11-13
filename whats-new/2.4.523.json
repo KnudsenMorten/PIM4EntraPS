@@ -1,0 +1,25 @@
+{
+  "version": "2.4.523",
+  "date": "2026-10-07",
+  "type": "fix-only",
+  "summary": "Job results, guards and the daily reconcile are easier to read at a glance.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Jobs show ok when nothing changed",
+      "text": "A job that ran now shows a green ok even when it had nothing to change, instead of a yellow label that read like a warning."
+    },
+    {
+      "title": "The Guards panel clears itself",
+      "text": "It shows only guards that tripped in the last two hours. Older ones fold away, and there is nothing to acknowledge."
+    },
+    {
+      "title": "Daily reconcile in plain words",
+      "text": "The card says what it does, what the last run did, and that access PIM Manager did not create is left alone."
+    },
+    {
+      "title": "Mail setup without a certificate",
+      "text": "Creating the notification mailbox can now run as the signed-in account or as Invardia support."
+    }
+  ]
+}

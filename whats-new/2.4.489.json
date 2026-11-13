@@ -1,0 +1,18 @@
+{
+  "version": "2.4.489",
+  "date": "2026-10-04",
+  "type": "feature",
+  "summary": "Your Pro licence can now arrive and renew by itself.",
+  "new": [
+    {
+      "title": "Licence arrives by itself (optional)",
+      "text": "When no Pro licence is installed or yours ends within 30 days, PIM Manager can request and install it from Invardia. Switch it on under Settings > Features."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Licence page wording corrected",
+      "text": "The Licence page no longer calls a licence without a tenant valid for any tenant."
+    }
+  ]
+}

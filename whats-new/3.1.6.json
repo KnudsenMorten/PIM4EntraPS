@@ -1,0 +1,13 @@
+{
+  "version": "3.1.6",
+  "date": "2026-11-11",
+  "type": "security",
+  "summary": "PIM Manager runs on the latest .NET runtime with Microsoft's newest security fixes.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Latest .NET security fixes",
+      "text": "PIM Manager and its sign-in front now run on .NET 10.0.15, which includes Microsoft's latest security fixes. Nothing changes in how it works."
+    }
+  ]
+}

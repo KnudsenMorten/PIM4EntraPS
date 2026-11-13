@@ -1,0 +1,13 @@
+{
+  "version": "2.4.591",
+  "date": "2026-10-11",
+  "type": "fix-only",
+  "summary": "The installer no longer asks for Owner when your inherited Azure rights are enough.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Inherited Azure rights are counted",
+      "text": "The installer now counts Azure rights inherited from a management group, such as Contributor and User Access Administrator at the tenant root. It no longer asks for Owner then."
+    }
+  ]
+}

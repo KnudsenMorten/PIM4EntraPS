@@ -1,0 +1,17 @@
+{
+  "version": "3.0.34",
+  "date": "2026-11-04",
+  "type": "fix-only",
+  "summary": "The setup checks now show what is really in place.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Setup checks show what is really in place",
+      "text": "A job that can already read its own runs is no longer listed as missing, and the database access check shows a current result again."
+    },
+    {
+      "title": "Support access counts correctly",
+      "text": "Support database access counts as done when read-only access and the time-limited admin access are in place."
+    }
+  ]
+}

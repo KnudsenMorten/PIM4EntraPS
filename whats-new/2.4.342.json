@@ -1,0 +1,13 @@
+{
+  "version": "2.4.342",
+  "date": "2026-09-13",
+  "type": "fix-only",
+  "summary": "Moving from v1 leaves every PIM policy exactly as it was.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "PIM policies identical to v1",
+      "text": "The standard policy templates for Entra roles, Azure resource roles and PIM for Groups carry v1's exact values. The PIM for Groups member activation maximum is back to 8 hours."
+    }
+  ]
+}

@@ -2123,6 +2123,9 @@ deployment is a supported choice) and no credentials lying around.
 ## 21. Docs
 - **Clear documentation set.** A concise design document and this detailed feature catalog
   describe both how the system works and what it does for you.
+- **What's new, in plain words.** Settings > What's new shows every release, newest first: a one-line summary, then New
+  features and Fixes, with any action you must take shown first; a small "New" label marks it after an update. The same
+  text is on invardia.com and in WHATSNEW.md on GitHub.
 
 ## 29. Feature customization & editions
 

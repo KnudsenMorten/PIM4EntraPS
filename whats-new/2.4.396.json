@@ -1,0 +1,21 @@
+{
+  "version": "2.4.396",
+  "date": "2026-09-21",
+  "type": "feature",
+  "summary": "Linking people, groups and permissions on the Access map is quicker.",
+  "new": [
+    {
+      "title": "Link with Ctrl+click",
+      "text": "Select a person or group, then hold Ctrl and click each target to add a link. A plain click still only selects, so nothing is linked by accident."
+    },
+    {
+      "title": "Link by drag and drop",
+      "text": "Drag a box onto another box on the Access map. Only boxes that can accept it light up."
+    },
+    {
+      "title": "Link buttons in the toolbar",
+      "text": "Give access, Add people, Add permissions and Give to a group now sit in the toolbar, named for what you selected. Every link is still committed on Review & Save."
+    }
+  ],
+  "fixes": []
+}

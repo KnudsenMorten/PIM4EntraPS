@@ -1,0 +1,51 @@
+{
+  "version": "2.4.538",
+  "date": "2026-10-09",
+  "type": "feature",
+  "summary": "Manage access for any application, find admins faster, and give your security team a full review pack.",
+  "new": [
+    {
+      "title": "Custom workloads, for example SAP",
+      "text": "Templates > Custom workloads lets you define an application PIM Manager has no connector for, with its roles. PIM Manager then maintains one Entra group per delegated role."
+    },
+    {
+      "title": "Filter admin accounts",
+      "text": "Admin accounts now has filter chips for type, privilege, platform, department and status, and each admin shows a High-priv or Day-to-day badge."
+    },
+    {
+      "title": "Environment report",
+      "text": "Operations > Environment report shows your PIM Manager setup live: identities and their permissions, Azure resources, network exposure and findings with the fix. Export it as PDF."
+    },
+    {
+      "title": "Clear choices for extras in Drift",
+      "text": "An item in the tenant but not in PIM Manager now offers Import into PIM, Delete or Ignore. Deleting a whole group is its own separate commit."
+    },
+    {
+      "title": "Smaller improvements",
+      "text": "A security review pack for your CISO, More info on every setting, per-recipient notifications, Settings > Reports, PDF export, Reader access for department owners, and a clearer daily changes mail."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Operational policy settings now take effect",
+      "text": "Require MFA on activation and the maximum activation and eligibility durations are now applied on top of every policy template. They never loosen a template.",
+      "action": "If your own policy template should stay without MFA, switch \"Require MFA on activation\" off before the next engine run."
+    },
+    {
+      "title": "New groups are not role-assignable by default",
+      "text": "Following Microsoft's guidance, a new group is role-assignable only when it needs to be. Existing groups are not changed."
+    },
+    {
+      "title": "Managed tenants keep their own groups",
+      "text": "A managed tenant's own groups and access are never overwritten or removed by the managing tenant, even when names match."
+    },
+    {
+      "title": "Update ring moves no longer block updates",
+      "text": "An environment ahead of its ring is no longer reported as a failed update, and moving an environment between rings no longer blocks its updates."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Get Started > Mail sender turns green once mail works, duplicate group tags and blank naming patterns are refused, and switched-off pages stay off."
+    }
+  ]
+}

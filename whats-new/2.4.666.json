@@ -1,0 +1,13 @@
+{
+  "version": "2.4.666",
+  "date": "2026-10-22",
+  "type": "fix-only",
+  "summary": "The setup script for private installations on the shared sign-in front is now published and documented.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Sign-in front script is published",
+      "text": "The script that prepares a private installation for the shared sign-in front is now published with its own documentation page and a preview mode, like every other support script."
+    }
+  ]
+}

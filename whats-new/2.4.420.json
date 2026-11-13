@@ -1,0 +1,29 @@
+{
+  "version": "2.4.420",
+  "date": "2026-09-24",
+  "type": "fix-only",
+  "summary": "Revokes are confirmed, new accounts no longer fail runs, and Pending changes and times are easier to read.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "A revoke is checked, not assumed",
+      "text": "A sign-in session revoke is now confirmed instead of recorded as not verifiable. A revoke for an account deleted in the meantime now completes as done."
+    },
+    {
+      "title": "New accounts no longer fail the run",
+      "text": "A role given to an account created minutes earlier is now shown as waiting and applied on the next run, instead of failing the whole run."
+    },
+    {
+      "title": "Pending changes says what a change is",
+      "text": "Each changed row leads with its name, and a group deletion says it will be deleted in Entra ID on the next run."
+    },
+    {
+      "title": "Times are shown correctly",
+      "text": "Queued changes could show times hours off. Every time is now shown in one format in UTC."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The Home permission banner no longer hangs, screens use the menu's names, help text is readable, and a first deployment into an empty tenant no longer looks stuck."
+    }
+  ]
+}

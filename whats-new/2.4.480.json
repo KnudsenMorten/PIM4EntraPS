@@ -1,0 +1,26 @@
+{
+  "version": "2.4.480",
+  "date": "2026-10-02",
+  "type": "feature",
+  "summary": "Environments can be switched to internal-only, ticketing systems connect easily, and managed tenants cost less to run.",
+  "new": [
+    {
+      "title": "Switch an environment to internal-only",
+      "text": "An existing environment can now be rebuilt as internal-only while keeping all its data. It shows a plan first and only applies when told."
+    },
+    {
+      "title": "Ticketing system connectors (Pro)",
+      "text": "Ready guides connect ServiceNow, Power Automate and Logic Apps to access requests. A retried request with the same ticket never creates a second one."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Lower cost for unchanged managed tenants",
+      "text": "A managed tenant with nothing new now stops in seconds, cutting its daily running cost sharply."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "Rebuilds restore the permissions of recreated identities and list leftovers to remove by hand, and the access request portal setup needs no manual step."
+    }
+  ]
+}
