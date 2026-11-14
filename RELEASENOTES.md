@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.23.2 -- 2026-11-14
+
+- Security update: the sign-in front moves to 2.1.2 (ASP.NET Core sign-in packages on 10.0.15); image-only patch of 3.1.23, no change in behaviour
+
 ## 3.1.23 -- 2026-11-13
 
 - A new What's new page (Settings > What's new) shows every release in plain words, newest first; the same list is on invardia.com and in the Community repository; the release notes describe each change by its effect

@@ -1,5 +1,17 @@
 # What's new in PIM Manager
 
+## 3.1.23.2 · 2026-11-14 · Security
+
+A security update for the sign-in front of PIM Manager.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Sign-in security update** - The sign-in front now runs on the latest patched Microsoft sign-in components. Nothing changes in how you sign in or work.
+
 ## 3.1.23 · 2026-11-13 · Feature update
 
 A new What's new page shows every PIM Manager release in plain words, newest first.

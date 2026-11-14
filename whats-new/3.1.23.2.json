@@ -1,0 +1,4 @@
+{"version":"3.1.23.2","date":"2026-11-14","type":"security",
+ "summary":"A security update for the sign-in front of PIM Manager.",
+ "new":[],
+ "fixes":[{"title":"Sign-in security update","text":"The sign-in front now runs on the latest patched Microsoft sign-in components. Nothing changes in how you sign in or work."}]}
