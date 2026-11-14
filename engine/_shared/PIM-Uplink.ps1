@@ -2471,7 +2471,44 @@ function New-PimUplinkUpdateField {
         $ip = ConvertTo-PimUplinkImagePrune -Value (Get-PimUplinkField $us 'imagePrune')
         if ($null -ne $ip) { $o['imagePrune'] = $ip }
     }
+    # SEC-LANE-1 (Invardia 2e20fb60, 2026-11-14): Update.runningImages -- the images the install's apps / jobs run, as the
+    # updater read them (UpdateState.runningImages). PIM_UPLINK_RUNNINGIMAGES=0/off leaves it out; none readable = left out.
+    if ("$([Environment]::GetEnvironmentVariable('PIM_UPLINK_RUNNINGIMAGES'))".Trim() -notmatch '^(?i)(0|off|false|no)$') {
+        $ri = ConvertTo-PimUplinkRunningImages -Value (Get-PimUplinkField $us 'runningImages')
+        if ($null -ne $ri) { $o['runningImages'] = @($ri) }
+    }
     return [pscustomobject]$o
+}
+
+function ConvertTo-PimUplinkRunningImages {
+    <#
+      PURE. Invardia's Update.runningImages shape (heartbeatstate.ts, SEC-LANE-1), EXACTLY these keys per item:
+        { component (req, a-z0-9._-, max 80); repo (a-z0-9._/-, max 80); digest ('sha256:' + 64 hex); dotnet (x.y.z); readUtc }
+      at most 40, component unique. A key whose value does not fit is left out of that item (never a guess); an item without
+      a valid component is dropped. Nothing valid = $null (the field is left out).
+    #>
+    param([AllowNull()][object]$Value)
+    try {
+        if ($null -eq $Value) { return $null }
+        $items = New-Object System.Collections.Generic.List[object]; $seen = @{}
+        foreach ($r in @($Value)) {
+            if ($null -eq $r) { continue }
+            $comp = "$(Get-PimUplinkField $r 'component')".Trim().ToLowerInvariant()
+            if ($comp -notmatch '^[a-z0-9][a-z0-9._-]{0,79}$' -or $seen.ContainsKey($comp)) { continue }
+            $seen[$comp] = $true
+            $it = [ordered]@{ component = $comp }
+            $repo = "$(Get-PimUplinkField $r 'repo')".Trim().ToLowerInvariant(); if ($repo -match '^[a-z0-9][a-z0-9._/-]{0,79}$') { $it['repo'] = $repo }
+            $dg = "$(Get-PimUplinkField $r 'digest')".Trim().ToLowerInvariant(); if ($dg -match '^sha256:[0-9a-f]{64}$') { $it['digest'] = $dg }
+            $dn = "$(Get-PimUplinkField $r 'dotnet')".Trim(); if ($dn -match '^\d+\.\d+\.\d+$') { $it['dotnet'] = $dn }
+            $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $r 'readUtc')
+            if ($at) { $it['readUtc'] = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+            $items.Add([pscustomobject]$it)
+            if ($items.Count -ge 40) { break }
+        }
+        if (-not $items.Count) { return $null }
+        # the comma keeps ONE item an array (the contract is an array; a bare object would be refused by its shape)
+        return , @($items.ToArray())
+    } catch { return $null }
 }
 
 function ConvertTo-PimUplinkImagePrune {

@@ -1,6 +1,31 @@
 # What's new in PIM Manager
 
+## 3.1.24 · 2026-11-14 · Feature update
+
+Security image updates install faster, and each install reports exactly which images it runs.
+
+### New features
+
+- **Images reported by the install** - PIM Manager reports which images it runs and their .NET version, so a security update can be confirmed on every install.
+
+### Fixes
+
+- **Faster security image updates** - When a release only brings a patched image, PIM Manager swaps the image at once. It no longer waits for running jobs to finish, and your data is not touched.
+- **Old images removed** - Once the new image has run successfully, the old image is removed, so security scanners no longer report it.
+
 ## 3.1.23.2 · 2026-11-14 · Security
+
+A security update for the sign-in front of PIM Manager.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Sign-in security update** - The sign-in front now runs on the latest patched Microsoft sign-in components. Nothing changes in how you sign in or work.
+
+## 3.1.23.1 · 2026-11-14 · Security
 
 A security update for the sign-in front of PIM Manager.
 

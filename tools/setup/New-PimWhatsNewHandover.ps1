@@ -16,7 +16,7 @@
     pwsh -NoProfile -File tools\setup\New-PimWhatsNewHandover.ps1 -Version 3.1.23 -OutDir C:\ProgramData\Invardia\handover\whats-new\pim-manager\3.1.23
 #>
 [CmdletBinding()] param(
-    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
+    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')][string]$Version,   # <release>.N = an image-only patch (SEC-LANE-1)
     [Parameter(Mandatory)][string]$OutDir
 )
 $ErrorActionPreference = 'Stop'

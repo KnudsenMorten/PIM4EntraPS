@@ -662,3 +662,26 @@ function Get-PimMonitorEnsurePlan {
     }
     return [pscustomobject]@{ action = 'noop'; reason = 'health monitor already in place + fresh'; intervalMinutes = $iv }
 }
+
+# ---- SEC-LANE-1 (framework, owner 2026-11-14 "build tonight") -- THE SHORT IMAGE-ONLY UPDATE PATH ---------------------------
+# An IMAGE-ONLY release is <release>.N (3.1.23 -> 3.1.23.1): built by image-patch-release.ps1 from <release>'s TAG, changing
+# only the image inputs (base digests = OS / .NET / PowerShell patches, the pinned sign-in front) -- the SAME code and the
+# SAME schema. release-pim-fix.ps1 refuses a 4-part version whose diff from its base tag touches any other file, so the
+# version name is the proof. On such a roll the updater swaps images only: NO schema step and NO SCHEMA-QUIESCE wait, so a
+# running PIM job never holds a security patch back (a running execution keeps its image; the next one takes the new one).
+# Anything else -- a 3-part target, a different base, an unreadable running version, a target not newer -- is a full update.
+function Get-PimImageOnlyUpdateDecision {
+    param([AllowEmptyString()][string]$RunningVersion = '', [AllowEmptyString()][string]$TargetVersion = '')
+    $r = "$RunningVersion".Trim(); $t = "$TargetVersion".Trim()
+    $full = { param($why) [pscustomobject]@{ imageOnly = $false; base = ''; reason = $why } }
+    $tm = [regex]::Match($t, '^(\d+\.\d+\.\d+)\.(\d+)$')
+    if (-not $tm.Success) { return (& $full "a full update: the target '$t' is not an image-only version (<release>.N)") }
+    $rm = [regex]::Match($r, '^(\d+\.\d+\.\d+)(?:\.(\d+))?$')
+    if (-not $rm.Success) { return (& $full "a full update: the running version '$r' is not readable") }
+    $tBase = $tm.Groups[1].Value; $rBase = $rm.Groups[1].Value
+    $tN = [int]$tm.Groups[2].Value; $rN = $(if ($rm.Groups[2].Success) { [int]$rm.Groups[2].Value } else { 0 })
+    if ($rBase -ne $tBase) { return (& $full "a full update: $t is an image-only build of $tBase, but this install runs $r") }
+    if ($tN -le $rN) { return (& $full "a full update: $t is not newer than the running $r") }
+    [pscustomobject]@{ imageOnly = $true; base = $tBase
+        reason = "image-only release $t of $tBase (the same code and schema as the running $r): images are swapped, the schema step and the wait for running jobs are skipped" }
+}

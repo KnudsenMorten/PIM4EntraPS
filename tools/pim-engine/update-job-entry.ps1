@@ -95,6 +95,7 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 . (Join-Path $solRoot 'engine\_shared\PIM-SecretsToKeyVault.ps1') # the secrets into the install's own Key Vault (step 2f-ter; writes secrets, never a role)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
+. (Join-Path $solRoot 'engine\_shared\PIM-RunningImages.ps1')    # SEC-LANE-1: the images the install runs NOW (digest + .NET) -> heartbeat Update.runningImages
 . (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -780,6 +781,34 @@ function Send-PimUpdateOutcome {
             } catch { Say "after the update: the cache refresh could not be queued ($($_.Exception.Message)) -- it runs on its own schedule" 'DarkGray' }
         }
     } catch { }                                      # recording can never break the update
+}
+
+# ---- SEC-LANE-1 (owner 2026-11-14) -- WHAT THIS INSTALL RUNS, REPORTED BY THE INSTALL ITSELF ----------------------------------
+# After the outcome is recorded (so it lands in THIS run's record, read-modify-write; New-PimUpdateStateRecord carries it on):
+# every app / job container -> component, repo, digest, .NET (PIM-RunningImages.ps1), read from the install's own registry
+# with this job's identity -- a private registry nobody outside can read is reported too. -MaxAgeMinutes: a run that changed
+# nothing re-reads only when the recorded read is older than that. Best effort: never changes the outcome or the exit code.
+function Save-PimUpdaterRunningImages {
+    param([int]$MaxAgeMinutes = 0)
+    try {
+        $riCs = $null; try { $riCs = Get-PimSqlConnectionString } catch { $riCs = $null }
+        if (-not "$riCs".Trim()) { return }
+        $riUs = Read-PimUpdateState -ConnectionString $riCs
+        if (-not $riUs -or $riUs -is [string]) { return }
+        if ($MaxAgeMinutes -gt 0) {
+            $riOld = @(Get-PimUpdateStateField -Object $riUs -Key 'runningImages' | Where-Object { $_ })
+            $riLast = $null
+            foreach ($x in $riOld) { $t = [datetime]::MinValue; if ([datetime]::TryParse("$($x.readUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$t)) { if (-not $riLast -or $t -gt $riLast) { $riLast = $t } } }
+            if ($riLast -and ([datetime]::UtcNow - $riLast).TotalMinutes -lt $MaxAgeMinutes) { return }
+        }
+        $riRes = @(Get-PimRegistryPruneResources -SubscriptionId $sub -ResourceGroup $rg -ApiVersion $script:PimAcaApi | Where-Object { "$($_.name)" -notmatch ' revision ' })
+        $riList = @(Get-PimRunningImages -Resources $riRes -Resolve { param($i) Resolve-PimRegistryImage -Image $i })
+        if (-not $riList.Count) { return }
+        $riH = [ordered]@{}; foreach ($pp in $riUs.PSObject.Properties) { $riH[$pp.Name] = $pp.Value }
+        $riH['runningImages'] = @($riList)
+        [void](Save-PimUpdateState -ConnectionString $riCs -Record ([pscustomobject]$riH))
+        Say "running images: $(@($riList | ForEach-Object { "$($_.component)=$("$($_.digest)".Replace('sha256:', '').Substring(0, [Math]::Min(12, "$($_.digest)".Replace('sha256:', '').Length)))$(if ($_.dotnet) { " .NET $($_.dotnet)" })" }) -join '; ')" 'DarkGray'
+    } catch { Say "running images: not recorded ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
 }
 
 # ---- SCHEMA-QUIESCE-818 (framework 8.18; owner 2026-11-05 "it can destroy schema") -- NO DATABASE CHANGE UNDER A RUN -------
@@ -1512,6 +1541,7 @@ if ($plan.action -eq 'none') {
     # reporting" look identical from the fleet view unless the quiet nights are recorded too --
     # and telling them apart is most of "is THIS customer stuck".
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ok'
+    Save-PimUpdaterRunningImages -MaxAgeMinutes 360   # SEC-LANE-1: re-read what runs at most every 6 h on a quiet install
     exit 0
 }
 
@@ -1550,6 +1580,7 @@ if ($isAhead) {
     # Invardia source serves only the ring's version: then the next release builds it). Never changes this exit.
     if ($sfOpt.optIn) { [void](Invoke-PimUpdaterSigninFrontStep -Version $aheadFrom) }
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ahead'
+    Save-PimUpdaterRunningImages -MaxAgeMinutes 360   # SEC-LANE-1
     exit 0
 }
 if (-not $dg.allowed) {
@@ -1774,7 +1805,15 @@ try {
                         -ManagerStore (Get-PimAcaStoreSettings -Resource $app) `
                         -CurrentVersion $(if ($ref) { "$($ref.tag)" } else { '' }) -TargetVersion $tgtVerForSchema `
                         -UpdateJobName $selfJob -ManagerApp $managerApp
-    if ($storeDecision.mode -eq 'storeless') {
+    # SEC-LANE-1 (owner 2026-11-14): an image-only release (<release>.N of the running release -- the same code and schema)
+    # swaps images only. No DDL, no database-access converge and no SCHEMA-QUIESCE wait: a running PIM job keeps its image and
+    # never holds a security patch back. Decided by Get-PimImageOnlyUpdateDecision (PIM-UpdateLifecycle.ps1), from the
+    # version names alone; release-pim-fix.ps1 refuses a 4-part version that changes anything but the image inputs.
+    $script:PimImageOnly = Get-PimImageOnlyUpdateDecision -RunningVersion $(if ($ref) { "$($ref.tag)" } else { '' }) -TargetVersion $tgtVerForSchema
+    if ($script:PimImageOnly.imageOnly) {
+        $script:PimSchemaDeferred = $null
+        Say "  schema step skipped: $($script:PimImageOnly.reason)" 'Green'
+    } elseif ($storeDecision.mode -eq 'storeless') {
         Say "  $($storeDecision.message)" 'DarkGray'
     } elseif ($storeDecision.mode -eq 'unverified') {
         Say "  $($storeDecision.message)" 'Red'
@@ -2355,10 +2394,47 @@ try {
         # nothing) = $null = nothing deleted, whatever the stored record holds (stability first, owner 2026-11-12).
         $prStored = $null
         if ("$csUpd".Trim()) { try { $prRaw = Get-PimSqlSettingRaw -ConnectionString $csUpd -Name 'ImageReleaseRecord'; if ("$prRaw".Trim()) { $prStored = "$prRaw" | ConvertFrom-Json; if ($prStored -is [string]) { $prStored = $prStored | ConvertFrom-Json } } } catch { $prStored = $null } }
+        # SEC-LANE-1 (owner 2026-11-14: "when swap works we remove old" -- an old image is Defender noise; framework IMAGE-PRUNE
+        # amendment: "works" = a job has SUCCEEDED on the new image): an IMAGE-ONLY swap keeps the previous release as its
+        # rollback point only until the swap is PROVEN. Proven = this run is the NEW updater (the follow-up), the Manager reads
+        # back healthy on the target, the release record says the target was reached from its own base
+        # (Get-PimImageOnlyUpdateDecision), AND another PIM job execution has SUCCEEDED on the target image (waited for, at most
+        # 10 minutes: the engine's tick runs every few minutes). Then the watchdog's last-known-good moves to the target and only
+        # the CURRENT release is kept. Not proven in time = the previous release is kept (said). A full release keeps both.
+        $prProven = $false
+        try {
+            if ($prStored -and "$($prStored.version)" -eq "$($prRef.tag)" -and "$selfImageBefore" -eq "$targetImg" -and $roll.healthy -and
+                [bool](Get-PimImageOnlyUpdateDecision -RunningVersion "$($prStored.previous.version)" -TargetVersion "$($prRef.tag)").imageOnly) {
+                $prOwnExec = "$([Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))"
+                $prOkJob = ''
+                for ($prTry = 0; $prTry -le 10 -and -not $prOkJob; $prTry++) {
+                    if ($prTry) { Start-Sleep -Seconds 60 }
+                    foreach ($prJ in @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs" -ApiVersion $script:PimAcaApi -All)) {
+                        foreach ($prX in @(Invoke-PimArm -Method GET -Path "$($prJ.id)/executions" -ApiVersion $script:PimAcaApi -All)) {
+                            if ("$($prX.name)" -eq $prOwnExec -or "$($prX.properties.status)" -ne 'Succeeded') { continue }
+                            if (@($prX.properties.template.containers | Where-Object { "$($_.image)" -eq "$targetImg" }).Count) { $prOkJob = "$($prJ.name) execution $($prX.name)"; break }
+                        }
+                        if ($prOkJob) { break }
+                    }
+                }
+                if ($prOkJob) { $prProven = $true; Say "registry: a job SUCCEEDED on $($prRef.tag) ($prOkJob)" 'DarkGray' }
+                else { Say "registry: no PIM job has succeeded on $($prRef.tag) yet (waited 10 min) -- the previous release stays as the rollback point" 'Yellow' }
+            }
+        } catch { $prProven = $false; Say "registry: the image-only proof could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- the previous release is kept" 'Yellow' }
+        if ($prProven) {
+            try {
+                [void](Set-PimAcaJobEnvValues -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Values @{ PIM_UPDATE_LAST_GOOD = "$targetImg" })
+                Say "registry: the image-only swap to $($prRef.tag) is proven (the new updater runs, the Manager is healthy) -- the previous release $($prStored.previous.version) is removed, only $($prRef.tag) is kept" 'Cyan'
+            } catch { $prProven = $false; Say "registry: the last-known-good image could not be moved to $($prRef.tag) ($((("$($_.Exception.Message)") -split "`n")[0])) -- the previous release is kept" 'Yellow' }
+        }
         $prPrev = $null
         if ($null -ne $prPreRoll -and @($prPreRoll).Count) {
             $prPrev = @($prPreRoll)
-            if ($prStored -and @($prStored.images).Count) { $prPrev += @(@($prStored.images) | ForEach-Object { @{ image = "$_"; by = "release record $($prStored.version)" } }) }
+            if ($prStored -and @($prStored.images).Count -and -not $prProven) { $prPrev += @(@($prStored.images) | ForEach-Object { @{ image = "$_"; by = "release record $($prStored.version)" } }) }
+            if ($prProven -and $prStored -and @($prStored.images).Count) {
+                # the release record of the swap itself = the target's own images (the current release): kept, never the previous
+                $prPrev += @(@($prStored.images) | Where-Object { "$_" -like "*:$($prRef.tag)" -or "$_" -like "*:$($prRef.tag)@*" } | ForEach-Object { @{ image = "$_"; by = "release record $($prStored.version)" } })
+            }
             $prPrev = @(@($prPrev) + @($prKeepExtra))
         }
         $prNowImgs = @()
@@ -2414,6 +2490,7 @@ try {
         }
     }
 } catch { Say "registry: not pruned ($((("$($_.Exception.Message)") -split "`n")[0])) -- the update is not affected" 'Yellow' }
+Save-PimUpdaterRunningImages   # SEC-LANE-1: what runs NOW, after the roll + the clean-up (best effort)
 
 # ---- 4. §71.44 -- ONE FOLLOW-UP RUN ON THE NEW UPDATER -------------------------------------------
 # 🔴 This run was executed by the PREVIOUS updater image, so whatever the new release changed in the

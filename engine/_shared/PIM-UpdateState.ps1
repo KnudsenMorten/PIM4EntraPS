@@ -208,6 +208,15 @@ function New-PimUpdateStateRecord {
     if ($null -ne $engPerm) { $rec['enginePermissions'] = $engPerm }
     if ($null -ne $setupF) { $rec['setupFacts'] = $setupF }
     if ($null -ne $bPool) { $rec['buildPool'] = $bPool }
+    # SEC-LANE-1 / IMAGE-PRUNE point 5: written AFTER the outcome by the run that read them (read-modify-write of this record),
+    # so every later record carries them on -- a 15-minute "nothing to do" run must not wipe what the heartbeat reports
+    # (Update.runningImages / Update.imagePrune). Each says its own read time.
+    if ($Previous) {
+        foreach ($ck in 'runningImages', 'imagePrune') {
+            $cv = Get-PimUpdateStateField -Object $Previous -Key $ck
+            if ($null -ne $cv -and -not ($cv -is [string] -and -not $cv.Trim())) { $rec[$ck] = $(if ($ck -eq 'runningImages') { @($cv) } else { $cv }) }
+        }
+    }
     return $rec
 }
 

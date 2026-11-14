@@ -13,9 +13,9 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
-## 3.1.23.2 -- 2026-11-14
+## 3.1.24 -- 2026-11-14
 
-- Security update: the sign-in front moves to 2.1.2 (ASP.NET Core sign-in packages on 10.0.15); image-only patch of 3.1.23, no change in behaviour
+- Security image updates install faster: an image-only release (<release>.N, the same code and schema) swaps the images at once without the schema step or a wait for running jobs; each install reports the images it runs (digest + .NET) in its heartbeat; after an image-only swap has run successfully the old image is removed; the sign-in front 2.1.2 (ASP.NET Core sign-in packages on 10.0.15).
 
 ## 3.1.23 -- 2026-11-13
 
