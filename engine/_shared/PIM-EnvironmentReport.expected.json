@@ -81,10 +81,9 @@
       ],
       "directoryRoles": [],
       "azure": [
-        { "role": "Container Apps Jobs Operator", "scope": "engineJob", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "Commit and Run now start the engine job" },
         { "role": "Reader", "scope": "resourceGroup", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "The Environment report reads the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) -- the PIM resource group only (PIM 100.22 b)" },
         { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the Manager image when the registry is reached with the managed identity" },
-        { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the emergency passphrase hash and the SMTP relay password (when configured)" }
+        { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads ONLY the one secret PIM-EmergencyPasscode (the emergency passphrase hash), granted on that secret -- never the vault and never the SMTP relay password (SECURE-WEB-1: mail goes through the engine)" }
       ],
       "sql": [
         { "role": "pim_web", "required": true, "coveredBy": [ "db_datareader" ], "why": "Least-privilege web role (framework 12.23): its store, read the tenant registry, register managed tenants; no schema right; granted through the signed access procedure. A new install gets this role only; an install the security cut-over has not reached yet still works through db_datareader + db_datawriter" },
@@ -148,7 +147,6 @@
     { "id": "engine-graph", "from": "Engine job", "to": "Microsoft Graph", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, application permissions (app-only)", "data": "admin accounts, groups, role and group assignments, activation policies", "enabledWhen": "always" },
     { "id": "engine-arm", "from": "Engine job", "to": "Azure Resource Manager", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, Azure RBAC", "data": "management groups and subscriptions (discovery), Azure role assignments", "enabledWhen": "always" },
     { "id": "manager-graph", "from": "PIM Manager", "to": "Microsoft Graph", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, read-only application permissions", "data": "directory reads for the pages", "enabledWhen": "always" },
-    { "id": "manager-job", "from": "PIM Manager", "to": "Engine job", "direction": "outbound", "protocol": "HTTPS (Azure Resource Manager)", "auth": "managed identity, Container Apps Jobs Operator on the engine job only", "data": "start an engine run after a commit or Run now", "enabledWhen": "always" },
     { "id": "mail-graph", "from": "Engine job / PIM Manager", "to": "Exchange Online (Microsoft Graph sendMail)", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, Exchange RBAC for Applications scoped to the sender mailbox", "data": "TAP codes, approvals, reminders, alerts (mail to the recipients)", "enabledWhen": "mail:sharedMailbox" },
     { "id": "mail-smtp", "from": "Engine job / PIM Manager", "to": "SMTP relay", "direction": "outbound", "protocol": "SMTP with TLS", "auth": "relay user name + password read from Key Vault", "data": "TAP codes, approvals, reminders, alerts", "enabledWhen": "mail:smtp" },
     { "id": "uplink", "from": "Engine job", "to": "Invardia (invardia.com)", "direction": "outbound", "protocol": "HTTPS", "auth": "anonymous, or the Pro install key", "data": "Invardia support link: which jobs ran and their outcome, version, edition, licence state (no tenant data; error text only with a Pro install key, secrets removed)", "enabledWhen": "feature:telemetry.uplink" },

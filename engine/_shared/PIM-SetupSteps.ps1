@@ -188,15 +188,16 @@ function Test-PimUpdateSourceUrlNoSas {
 function ConvertFrom-PimSetupConvergeLines {
     <#
       PURE. The converge-defaults lines (Invoke-PimUpdateConvergeDefaults .lines: id; level; text) -> the Jobs Operator facts:
-        jobsOperator  'manager-tick-operator': '-- present' = $true, 'MISSING' = $false, 'not checked' = $null
-        tickJobIdSet  'tick-start': already set / set / kept = $true, 'not set' = $false, 'not checked' = $null
+        jobsOperator  RETIRED (SECURE-WEB-1, 2026-11-14): always $null -- the Manager holds no job right any more
+        webNeverRightsClear  'manager-never-rights': 'none held' = $true, 'HELD' = $false, 'not checked' = $null
+        tickJobIdSet  'tick-start': already set / set / kept = $true, 'not set' = $false, 'not checked' = $null (informative only)
     #>
     param([object[]]$Lines = @())
-    $o = [ordered]@{ jobsOperator = $null; tickJobIdSet = $null }
+    $o = [ordered]@{ jobsOperator = $null; webNeverRightsClear = $null; tickJobIdSet = $null }
     foreach ($l in @($Lines | Where-Object { $null -ne $_ })) {
         $id = "$(Get-PimSetupStepField $l 'id')"; $tx = "$(Get-PimSetupStepField $l 'text')"; $lv = "$(Get-PimSetupStepField $l 'level')"
-        if ($id -eq 'manager-tick-operator') {
-            if ($tx -match '-- present') { $o.jobsOperator = $true } elseif ($tx -match 'MISSING') { $o.jobsOperator = $false } else { $o.jobsOperator = $null }
+        if ($id -eq 'manager-never-rights') {
+            if ($tx -match '-- none held') { $o.webNeverRightsClear = $true } elseif ($tx -match '-- HELD') { $o.webNeverRightsClear = $false } else { $o.webNeverRightsClear = $null }
         } elseif ($id -eq 'tick-start') {
             if ($tx -match 'not checked|not converged') { $o.tickJobIdSet = $null }
             elseif ($tx -match 'not set') { $o.tickJobIdSet = $false }
@@ -636,9 +637,12 @@ function New-PimSetupSteps {
     # ---- S11 jobs-operator (updater: converge-defaults) ------------------------------------------------------------
     if ($null -eq $up) { & $set 'jobs-operator' 'unknown' $noUp $null }
     else {
-        $jo = & $ub 'jobsOperator'; $tj = & $ub 'tickJobIdSet'
-        if ($jo -eq $true -and $tj -eq $true) { & $set 'jobs-operator' 'ok' 'the Manager holds Container Apps Jobs Operator on the engine job and SchedulerTickJobId is set' $upAt }
-        elseif ($jo -eq $false -or $tj -eq $false) { & $set 'jobs-operator' 'missing' ("missing: " + ((@($(if ($jo -eq $false) { "the Manager's Container Apps Jobs Operator role on the engine job" }), $(if ($tj -eq $false) { 'SchedulerTickJobId' })) | Where-Object { $_ }) -join ', ')) $upAt }
+        # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the step's key stays (Invardia's list); its meaning turned around -- the
+        # internet-facing Manager must hold NO job right (nor Contributor, role-assignment write, AcrPush, Key Vault secrets).
+        # Commit / Run now wait for the next scheduled engine start; SchedulerTickJobId is no longer needed.
+        $wc = & $ub 'webNeverRightsClear'
+        if ($wc -eq $true) { & $set 'jobs-operator' 'ok' 'the Manager holds no job right (SECURE-WEB-1); the engine runs on its schedule' $upAt }
+        elseif ($wc -eq $false) { & $set 'jobs-operator' 'missing' 'SECURITY (SECURE-WEB-1): the Manager still holds a job right or another right an internet-facing app must not hold -- Invardia removes it through the Support app' $upAt }
         else { & $set 'jobs-operator' 'unknown' 'not read: the Manager''s role assignments could not be read' $upAt }
     }
 
@@ -824,7 +828,7 @@ function Get-PimSetupStepUpdaterFacts {
           [AllowNull()][object]$DbInit,
           [AllowNull()][string]$SourceUrl = $env:PIM_UPDATE_SOURCE_URL, [datetime]$NowUtc = [datetime]::UtcNow)
     $f = [ordered]@{ checkedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
-                     privateNetwork = $null; jobsOperator = $null; tickJobIdSet = $null
+                     privateNetwork = $null; jobsOperator = $null; webNeverRightsClear = $null; tickJobIdSet = $null
                      acrAdminOff = $null; kvPurgeProtection = $null; sourceUrlNoSas = $null; sqlAudit = $null
                      frontKey = $null; frontSqlSchema = $null; frontKvPrivate = $null; jobSelfReader = $null
                      asBuiltStorage = 'unknown'; asBuiltRights = 'unknown'; asBuiltDetail = ''
@@ -835,7 +839,7 @@ function Get-PimSetupStepUpdaterFacts {
     try { $dj = Get-PimSetupStepDbJobFacts -DbInitResult $DbInit; $f.dbJob = $dj.dbJob; $f.dbJobDetail = (ConvertTo-PimSetupStepDetail -Text $dj.dbJobDetail) } catch { }
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $items = { param($a) if ($null -eq $a) { @() } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $_ }) } else { @($a) } }
-    try { $cl = ConvertFrom-PimSetupConvergeLines -Lines $ConvergeLines; $f.jobsOperator = $cl.jobsOperator; $f.tickJobIdSet = $cl.tickJobIdSet } catch { }
+    try { $cl = ConvertFrom-PimSetupConvergeLines -Lines $ConvergeLines; $f.jobsOperator = $cl.jobsOperator; $f.webNeverRightsClear = $cl.webNeverRightsClear; $f.tickJobIdSet = $cl.tickJobIdSet } catch { }
     try { $f.jobSelfReader = ConvertFrom-PimSetupJobSelfIdResult -Result $JobSelfId } catch { }
     try { $f.sqlAudit = ConvertFrom-PimSetupSqlAuditResult -Result $SqlAudit } catch { }
     try { $f.sourceUrlNoSas = [bool](Test-PimUpdateSourceUrlNoSas -Url $SourceUrl) } catch { }

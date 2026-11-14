@@ -390,11 +390,19 @@ function Get-PimIdentityMoveRoleNeeds {
       listed takes AcrPull only.
     #>
     param([Parameter(Mandatory)][string]$Role)
+    function Get-PimIdentityMoveSkvReaders {
+        # SEC-10 reader set = PIM-SecretsToKeyVault.ps1 Get-PimSkvReaderRoles when loaded (else the same literal); 'web' left it
+        # permanently (SECURE-WEB-1 F1 a, Invardia 2026-11-14)
+        if (Get-Command Get-PimSkvReaderRoles -ErrorAction SilentlyContinue) { return @(Get-PimSkvReaderRoles) }
+        return @('engine', 'updater', 'asbuilt', 'downlink')
+    }
     $acr = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
     $rdr = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'   # Reader (a job's Reader on ITSELF reads its own runs, 100.166 (a))
     $kvf = 'e147488a-f6f5-4113-8e2d-b22465e65bf6'   # Key Vault Crypto Service Encryption User on the sign-in front key -- web only
     $n = switch ("$Role".ToLowerInvariant()) {
-        'web'      { @{ azure = @($rdr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', $kvf, $acr); groups = @(); dirRoles = @() } }
+        # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the internet-facing web identity takes NO job right (Container Apps Jobs
+        # Operator on the engine job was dropped) -- see 'never' below
+        'web'      { @{ azure = @($rdr, $kvf, $acr); groups = @(); dirRoles = @() } }
         # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): + Container Apps Jobs Operator and Contributor, held
         # on the UPDATER job only -- the engine starts the updater (update-expedite) and the watchdog restores its image
         # (tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess grants them, scope = that job)
@@ -412,13 +420,23 @@ function Get-PimIdentityMoveRoleNeeds {
     # (tests\Test-PimSecretsToKeyVault.ps1 holds the two equal; tests\Test-PimRightsList.ps1 D1 holds this map == the rights list)
     $kvsu = '4633458b-17de-408a-b874-0445c86b69e6'
     $n['azureVaultOnly'] = @()
-    if ("$Role".ToLowerInvariant() -in @('engine', 'web', 'updater', 'asbuilt', 'downlink')) { $n.azure = @(@($n.azure) + $kvsu); $n['azureVaultOnly'] = @($kvsu) }
+    if ("$Role".ToLowerInvariant() -in @(Get-PimIdentityMoveSkvReaders)) { $n.azure = @(@($n.azure) + $kvsu); $n['azureVaultOnly'] = @($kvsu) }
+    # SECURE-WEB-1 F1 b (Invardia 2026-11-14): the web identity is no vault reader; it keeps Key Vault Secrets User on the ONE
+    # secret PIM-EmergencyPasscode only (the break-glass hash) -- taken over at exactly that secret, never at the vault or wider
+    $n['azureSecretOnly'] = @{}
+    if ("$Role".ToLowerInvariant() -eq 'web') { $n.azure = @(@($n.azure) + $kvsu); $n['azureSecretOnly'] = @{ $kvsu = 'PIM-EmergencyPasscode' } }
     # SEC-10 (Invardia decision 2026-11-11): the UPDATER writes the moved secrets -- Key Vault Secrets Officer, at a vault only
     # (PIM-SecretsToKeyVault.ps1 Get-PimSkvWriterRole / Get-PimSkvOfficerRoleId)
     if ("$Role".ToLowerInvariant() -eq 'updater') { $kvso = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'; $n.azure = @(@($n.azure) + $kvso); $n['azureVaultOnly'] = @(@($n['azureVaultOnly']) + $kvso) }
     # SEC-108 (owner 2026-11-09: "it is only the engine"): User Access Administrator / Owner are the ENGINE's only. Every other
     # role lists them as NEVER -- the move refuses to copy them from ANY source (its own system identity too).
     $n['never'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @() } else { @(Get-PimIdentityMoveRootRoleIds) }
+    # SECURE-WEB-1: the web identity (internet-facing) never takes a job right, Contributor, AcrPush or a Key Vault secrets
+    # right from ANY source either -- the move lists them as not copied
+    if ("$Role".ToLowerInvariant() -eq 'web') {
+        $n['never'] = @(@($n['never']) + @('b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c', '8311e382-0749-4cb8-b61a-304f252e45ec',
+                                            'b86a8fe4-44ce-4948-aee5-eccb2c155cd7', '00482a5a-887f-4fb3-b363-3b7fe8e74483') | Select-Object -Unique)
+    }
     # RIGHTS-LIVE-1: the engine's Jobs Operator + Contributor are taken over ONLY at a Container Apps job scope (the updater job),
     # never at the resource group or wider -- Select-PimIdentityMoveNeeded lists any other as not copied
     $n['azureJobOnly'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @('b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c') } else { @() }
@@ -442,6 +460,9 @@ function Select-PimIdentityMoveNeeded {
         $jobOk = (@($need.azureJobOnly) -notcontains $g) -or ("$($a.scope)".TrimEnd('/') -match '(?i)/providers/Microsoft\.App/jobs/[^/]+$')
         # SEC-10: Key Vault Secrets User is taken over only at a vault (or a secret in it), never at a resource group or wider
         if (@($need.azureVaultOnly) -contains $g -and "$($a.scope)".TrimEnd('/') -notmatch '(?i)/providers/Microsoft\.KeyVault/vaults/[^/]+(/secrets/[^/]+)?$') { $jobOk = $false }
+        # SECURE-WEB-1 F1 b: a role the map allows on ONE named secret only (the web's emergency hash) is never taken elsewhere
+        $so = $need['azureSecretOnly']
+        if ($so -and $so.ContainsKey($g) -and "$($a.scope)".TrimEnd('/') -notmatch ('(?i)/providers/Microsoft\.KeyVault/vaults/[^/]+/secrets/' + [regex]::Escape("$($so[$g])") + '$')) { $jobOk = $false }
         if ($need.azure -contains $g -and $jobOk) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") }
     }
     foreach ($m in @($Rights.groups)) { if (-not $m) { continue }; if (@($need.groups | Where-Object { $_ -ieq "$($m.displayName)" }).Count) { $keep.groups += $m } else { $not.Add("PIM group $($m.displayName) (from $SourceName)") } }

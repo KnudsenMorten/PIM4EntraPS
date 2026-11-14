@@ -431,6 +431,15 @@
             [
               "Engine (ca-pim-tick)",
               "Azure RBAC",
+              "Container Apps Jobs Operator + Contributor",
+              "The updater job only",
+              "Start the updater when an update is expedited; put the updater back on its last good image",
+              "Expedited updates and the updater's self-repair (updates still run on their schedule)",
+              "No"
+            ],
+            [
+              "Engine (ca-pim-tick)",
+              "Azure RBAC",
               "Reader",
               "The ca-pim-tick job resource",
               "Read its own execution status",
@@ -517,15 +526,6 @@
               "Read the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) for the Environment report",
               "Environment report (the architecture section shows \"not readable\")",
               "No"
-            ],
-            [
-              "Manager (ca-pim-manager)",
-              "Azure RBAC",
-              "Container Apps Jobs Operator",
-              "The ca-pim-tick job only",
-              "Start the engine on Run now / commit",
-              "Run now (the engine still runs on its schedule)",
-              "Default on; can be skipped"
             ],
             [
               "Manager (ca-pim-manager)",

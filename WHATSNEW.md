@@ -1,5 +1,18 @@
 # What's new in PIM Manager
 
+## 3.1.25 · 2026-11-14 · Security
+
+Stronger isolation: the part of PIM Manager that is reachable from the internet now holds only its own data.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Web app keeps only its own data** - The web app holds no right to start or change the engine's job and reads no Key Vault secret except the break-glass passphrase hash. Commit and Run now start at the engine's next scheduled run, within five minutes.
+- **Rights checked on every update** - Each update checks the web app's rights and reports any right it must not hold as a security finding.
+
 ## 3.1.24 · 2026-11-14 · Feature update
 
 Security image updates install faster, and each install reports exactly which images it runs.

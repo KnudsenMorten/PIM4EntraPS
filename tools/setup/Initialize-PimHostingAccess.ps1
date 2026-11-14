@@ -2,8 +2,8 @@
 <#
 .SYNOPSIS
     71.18 -- converge the hosting identities' access on an EXISTING environment: the tick's Graph app roles (Engine set),
-    the Manager's Graph app roles (read-only Manager set), the Manager's right to start the tick now
-    ('Container Apps Jobs Operator' on ca-pim-tick only), the tick's right to read its own executions ('Reader' on
+    the Manager's Graph app roles (read-only Manager set), a CHECK that the Manager holds NO job right (SECURE-WEB-1,
+    2026-11-14: it used to get 'Container Apps Jobs Operator' on ca-pim-tick), the tick's right to read its own executions ('Reader' on
     ca-pim-tick only, BUG-268), pim.Settings 'SchedulerTickJobId' and -- §97 -- the tick's Reader at the TENANT ROOT
     management group (Discovery cannot see Azure without it; User Access Administrator there only with
     -EngineAzureRootUserAccessAdmin), and -- PIM 100.22 (b) -- the Manager's 'Reader' on the PIM resource group ONLY (the
@@ -94,16 +94,17 @@ if (-not $SkipAzureRootAccess) {
 }
 
 if (-not $SkipTickStart) {
-    Step "'Container Apps Jobs Operator' for $ManagerApp on $TickJobName only"
+    # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the Manager is INTERNET-FACING and holds NO job right any more. It used to
+    # get 'Container Apps Jobs Operator' here to start the engine after a commit -- but a job start accepts a container
+    # override, so the web app could run any command as the engine identity. NOTHING is granted; a held one is a SECURITY
+    # finding (removed through the Invardia Support app, recorded and read back). Commit / Run now wait for the next
+    # scheduled start of the engine job.
+    Step "SECURE-WEB-1: $ManagerApp holds no job right on $TickJobName (check only, nothing is granted)"
     # 100.41: ARM REST -- Get-PimArmRoleAssignments / New-PimArmRoleAssignment (az role assignment list / create), exact scope.
     $haveRole = { param($oid, $role) try { [bool](@(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $oid -Scope $tickId -Role $role).Count) } catch { $false } }
-    if (& $haveRole $mgrOid 'Container Apps Jobs Operator') { Note 'already assigned' }
-    elseif ($PSCmdlet.ShouldProcess($tickId, 'role assignment Container Apps Jobs Operator')) {
-        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $mgrOid -PrincipalType ServicePrincipal -Role 'Container Apps Jobs Operator' -Scope $tickId) }
-        catch { throw "could not assign 'Container Apps Jobs Operator' to $ManagerApp on $TickJobName (the deploying identity needs User Access Administrator or Owner on the resource group): $($_.Exception.Message)" }
-        if (-not (& $haveRole $mgrOid 'Container Apps Jobs Operator')) { throw "read-back FAILED: the role assignment is not listed on $tickId." }
-        Note 'assigned and read back'
-    }
+    if (& $haveRole $mgrOid 'Container Apps Jobs Operator') {
+        Write-Warning "SECURITY (SECURE-WEB-1): $ManagerApp ($mgrOid) still holds 'Container Apps Jobs Operator' on $TickJobName. Remove it through the Invardia Support app (record + read back); PIM grants it no more."
+    } else { Note 'none held (correct)' }
 
     # BUG-268: the tick reads the status of the execution that holds its lease, so a lease left by an execution the
     # platform ended is taken over at the next tick instead of after its 15-minute TTL. Read-only, this job only.
@@ -133,7 +134,7 @@ if (-not $SkipTickStart) {
         }
         $r = Set-PimTickJobIdSetting -TickJobId $tickId -Store $tickStore -Overwrite
         if ($r.action -eq 'set' -and $r.after -ne $tickId) { throw "read-back FAILED: SchedulerTickJobId is '$($r.after)'" }
-        Note 'set and read back (the Manager starts the tick immediately after a commit)'
+        Note 'set and read back (the engine reads its own executions with it; the Manager no longer starts the tick -- SECURE-WEB-1)'
     }
 }
 

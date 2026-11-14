@@ -4242,6 +4242,9 @@ function Write-PimMutationLog {
 #   * Debounced (45 s), so a multi-entity commit starts one execution, not one per entity.
 # ---------------------------------------------------------------------------
 $script:PimTickKickAt = $null
+# SECURE-WEB-1 (2026-11-14): OFF in every shipped build -- the Manager never starts a job (see Start-PimManagerTickNow). Only a
+# test may switch it on to exercise the old start path; no setting, environment value or request can.
+$script:PimManagerMayStartJobs = $false
 function Get-PimManagerAdminTypeFromName {
     # PURE. The admin type an account name implies when its row has no AdminType (see the admin grid).
     param([string]$Name)
@@ -4556,6 +4559,13 @@ function Start-PimManagerTickNow {
     param([string]$Reason = 'manager', [datetime]$NowUtc = [datetime]::UtcNow)
     $now = $NowUtc.ToUniversalTime()
     $nextCron = 'the next scheduled start (within about 5 minutes)'
+    # 🔒 SECURE-WEB-1 (framework 12.11f, 2026-11-14): the Manager is INTERNET-FACING and holds NO job right -- a job start accepts
+    # a container override, so the web app could run any command as the engine identity. The Manager never starts a job any
+    # more; the engine picks the committed work up at its next scheduled start. (The wake queue -- a message the engine job
+    # reads, KEDA-triggered, a NAME from its allow-list -- is the next release; until then this is the whole answer.)
+    if (-not $script:PimManagerMayStartJobs) {
+        return [pscustomobject]@{ started = $false; reason = 'scheduled'; detail = "runs on $nextCron" }
+    }
     if (-not $script:PimHosted -and -not "$($env:PIM_TickJobId)".Trim()) {
         return [pscustomobject]@{ started = $false; reason = 'not-hosted'; detail = "runs on $nextCron" }
     }
@@ -4603,7 +4613,7 @@ function Start-PimManagerTickNow {
     } catch {
         $m = "$($_.Exception.Message)"
         Write-Warning "[manager] could not start the engine tick now ($Reason): $m"
-        $why = if ($m -match '(?i)\b403\b|AuthorizationFailed|forbidden') { "the Manager identity lacks 'Container Apps Jobs Operator' on the tick job" } else { $m.Substring(0, [Math]::Min(160, $m.Length)) }
+        $why = if ($m -match '(?i)\b403\b|AuthorizationFailed|forbidden') { 'the Manager may not start the engine job (by design)' } else { $m.Substring(0, [Math]::Min(160, $m.Length)) }
         return [pscustomobject]@{ started = $false; reason = 'error'; detail = "runs on $nextCron ($why)" }
     }
 }

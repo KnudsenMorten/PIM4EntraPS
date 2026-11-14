@@ -1,0 +1,5 @@
+{"version":"3.1.25","date":"2026-11-14","type":"security",
+ "summary":"Stronger isolation: the part of PIM Manager that is reachable from the internet now holds only its own data.",
+ "new":[],
+ "fixes":[{"title":"Web app keeps only its own data","text":"The web app holds no right to start or change the engine's job and reads no Key Vault secret except the break-glass passphrase hash. Commit and Run now start at the engine's next scheduled run, within five minutes."},
+          {"title":"Rights checked on every update","text":"Each update checks the web app's rights and reports any right it must not hold as a security finding."}]}

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.25 -- 2026-11-14
+
+- Security: the PIM Manager web app holds only its own data; it no longer holds any right to start or change the engine job. Commit and Run now are picked up at the engine's next scheduled start (within about five minutes). Each update reports any such right it finds as a security finding.
+
 ## 3.1.24 -- 2026-11-14
 
 - Security image updates install faster: an image-only release (<release>.N, the same code and schema) swaps the images at once without the schema step or a wait for running jobs; each install reports the images it runs (digest + .NET) in its heartbeat; after an image-only swap has run successfully the old image is removed; the sign-in front 2.1.2 (ASP.NET Core sign-in packages on 10.0.15).

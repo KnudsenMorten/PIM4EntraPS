@@ -81,8 +81,12 @@ function Get-PimSkvReaderRoles {
         asbuilt   PIM_UPLINK_KEY (the as-built push)              (identity id-pim-docs)
         downlink  pim-engine-client-secret (Deploy-PimDownlinkJob.ps1)
       Any other role holding a secret is REFUSED by the plan (a new reader is a rights decision, never silent).
+      🔒 SECURE-WEB-1 F1 a (Invardia decision 2026-11-14, permanent): 'web' is NOT a reader. The web identity is internet-facing
+      (the Manager + its signin-front container share it) and must never hold Key Vault Secrets User on the vault -- it would
+      read the engine's secrets. A web secret stays an app secret until it goes away (built-in auth) or comes per secret
+      through the engine; the plan REFUSES moving it.
     #>
-    return @('engine', 'web', 'updater', 'asbuilt', 'downlink')
+    return @('engine', 'updater', 'asbuilt', 'downlink')
 }
 
 # ---------------------------------------------------------------------------------------------------------- small pure

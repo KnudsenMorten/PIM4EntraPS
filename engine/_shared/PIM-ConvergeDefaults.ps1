@@ -104,6 +104,51 @@ function Get-PimRbacConvergeDecision {
     return [pscustomobject]@{ id = $Id; action = 'report'; line = "$What -- MISSING (the updater may not grant roles). Fix: $Fix" }
 }
 
+function Get-PimWebNeverRightDecision {
+    <#
+      PURE. SECURE-WEB-1 (framework 12.11f, 2026-11-14): the INTERNET-FACING Manager identity's role assignments (as ARM lists
+      them; $null = not readable) checked against the never-rights -- any Container Apps job role, Contributor, Owner, User
+      Access Administrator, RBAC Administrator, AcrPush, Key Vault Secrets Officer / Administrator / Contributor, Managed
+      Identity Operator. Key Vault Secrets User is allowed ONLY on the one secret PIM-EmergencyPasscode (Invardia F1 b).
+      Returns @{ level = info | warn; held = @(<role guid @ scope>); line }. Report only: removal is a Support-app action.
+    #>
+    param([AllowNull()][object[]]$Assignments, [string]$ReadError = '', [string]$ManagerApp = 'ca-pim-manager')
+    $never = @{
+        'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b' = 'Container Apps Jobs Operator'
+        'b24988ac-6180-42a0-ab88-20f7382dd24c' = 'Contributor'
+        '8e3af657-a8ff-443c-a75c-2fe8c4bcb635' = 'Owner'
+        '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9' = 'User Access Administrator'
+        'f58310d9-a9f6-439a-9e8d-f62e7b41a168' = 'Role Based Access Control Administrator'
+        '8311e382-0749-4cb8-b61a-304f252e45ec' = 'AcrPush'
+        'b86a8fe4-44ce-4948-aee5-eccb2c155cd7' = 'Key Vault Secrets Officer'
+        '00482a5a-887f-4fb3-b363-3b7fe8e74483' = 'Key Vault Administrator'
+        'f25e0fa2-a7c8-4377-a976-54943a77a395' = 'Key Vault Contributor'
+        'f1a07417-d97a-45cb-824c-7a7467783830' = 'Managed Identity Operator'
+        'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59' = 'Managed Identity Contributor'
+        '8b54135c-b56d-4d72-a534-26097cfdc8d8' = 'Key Vault Data Access Administrator'
+        '57cc5028-e6a7-4284-868d-0611c5923f8d' = 'Container Apps ManagedEnvironments Contributor'
+        '4633458b-17de-408a-b874-0445c86b69e6' = 'Key Vault Secrets User'
+    }
+    $what = "SECURE-WEB-1: $ManagerApp (internet-facing) holds no job right, Contributor, role-assignment write, AcrPush or Key Vault secrets right"
+    if ($null -eq $Assignments) {
+        return [pscustomobject]@{ level = 'warn'; held = @(); line = "$what -- not checked ($(if ($ReadError) { $ReadError } else { 'the role assignments could not be read' }))" }
+    }
+    $held = New-Object System.Collections.Generic.List[string]
+    foreach ($as in @($Assignments | Where-Object { $_ })) {
+        $p = if ($as.PSObject.Properties['properties'] -and $as.properties) { $as.properties } else { $as }
+        $rid = Get-PimConvergeRoleGuid -RoleDefinitionId "$($p.roleDefinitionId)"
+        if (-not $never.ContainsKey($rid)) { continue }
+        $sc = "$($p.scope)"
+        # Invardia F1 b: Key Vault Secrets User on the ONE secret PIM-EmergencyPasscode is the only allowed exception
+        if ($rid -eq '4633458b-17de-408a-b874-0445c86b69e6' -and $sc -match '(?i)/providers/Microsoft\.KeyVault/vaults/[^/]+/secrets/PIM-EmergencyPasscode$') { continue }
+        $held.Add("$($never[$rid]) @ $($sc -replace '^/subscriptions/[^/]+/resourceGroups/[^/]+', '<rg>')")
+    }
+    if ($held.Count) {
+        return [pscustomobject]@{ level = 'warn'; held = @($held); line = "SECURITY $what -- HELD: $(@($held) -join '; '). The updater may not change role assignments: Invardia removes it through the Support app (recorded, read back)." }
+    }
+    return [pscustomobject]@{ level = 'info'; held = @(); line = "$what -- none held (correct)" }
+}
+
 function Get-PimTickJobIdConvergeDecision {
     <#
       PURE. pim.Settings 'SchedulerTickJobId' on an existing install.
@@ -221,10 +266,13 @@ function Invoke-PimUpdateConvergeDefaults {
     $d = Get-PimRbacConvergeDecision -Id 'manager-rg-reader' -What "Reader for $ManagerApp on the resource group (Environment report)" -Assignments $mgrRg.list -ReadError $mgrRg.error `
             -Scope $rgScope -RoleIds @($ids.Reader, $ids.Contributor, $ids.Owner) -Fix $rgReaderFix
     & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
-    $mgrTick = & $readAssignments $tickScope $mgrOid
-    $dOp = Get-PimRbacConvergeDecision -Id 'manager-tick-operator' -What "'Container Apps Jobs Operator' for $ManagerApp on $TickJob (start the engine after a commit)" -Assignments $mgrTick.list -ReadError $mgrTick.error `
-            -Scope $tickScope -RoleIds @($ids.JobsOperator, $ids.Contributor, $ids.Owner) -Fix $hostingFix
-    & $add $dOp.id $(if ($dOp.action -eq 'noop') { 'info' } else { 'warn' }) $dOp.line
+    # 🔒 SECURE-WEB-1 (framework 12.11f, 2026-11-14): the Manager is INTERNET-FACING and must hold NO never-right anywhere in
+    # the resource group (it used to hold 'Container Apps Jobs Operator' on the tick -- a job start accepts a container
+    # override). REPORT ONLY (the updater may not change role assignments): a held one is a SECURITY line; Invardia removes it
+    # through the Support app. assignedTo() at the resource group lists assignments at, above and below it.
+    $mgrNever = & $readAssignments $rgScope $mgrOid
+    $dSw = Get-PimWebNeverRightDecision -Assignments $mgrNever.list -ReadError $mgrNever.error -ManagerApp $ManagerApp
+    & $add 'manager-never-rights' $dSw.level $dSw.line
     $tickSelf = & $readAssignments $tickScope $tickOid
     $d = Get-PimRbacConvergeDecision -Id 'tick-self-reader' -What "Reader for $TickJob on itself (a stale engine lease is taken over at once)" -Assignments $tickSelf.list -ReadError $tickSelf.error `
             -Scope $tickScope -RoleIds @($ids.Reader, $ids.Contributor, $ids.Owner) -Fix $hostingFix
@@ -257,14 +305,13 @@ function Invoke-PimUpdateConvergeDefaults {
     if (-not $Store) { & $add 'tick-start' 'warn' 'immediate engine start (SchedulerTickJobId) -- not checked (no store)' }
     else {
         try {
-            $may = switch ($dOp.action) { 'noop' { $true } 'report' { $false } default { $null } }
+            # SECURE-WEB-1: the Manager never starts the engine (no job right), so an absent SchedulerTickJobId is correct and
+            # never a warning; a stored one is left as it is (nothing reads it to start a job any more)
             $tickId = $(if ($t -and "$($t.id)".Trim()) { "$($t.id)".Trim() } elseif ($tickOid) { $tickScope } else { '' })
             $cur = & $Store 'get' 'SchedulerTickJobId' $null
-            $dt = Get-PimTickJobIdConvergeDecision -Current $cur -TickJobId $tickId -ManagerMayStart $may -Fix $hostingFix
-            if ($dt.action -eq 'set') {
-                $r = Set-PimTickJobIdSetting -TickJobId $tickId -Store $Store
-                & $add 'tick-start' 'changed' "immediate engine start (SchedulerTickJobId) -- $($r.reason)"
-            } else { & $add 'tick-start' $(if ($dt.action -eq 'report') { 'warn' } else { 'info' }) $dt.line }
+            $dt = Get-PimTickJobIdConvergeDecision -Current $cur -TickJobId $tickId -ManagerMayStart $false -Fix $hostingFix
+            if ($dt.action -eq 'report') { & $add 'tick-start' 'info' 'immediate engine start -- off by design (SECURE-WEB-1: the Manager starts no job; the engine runs on its schedule)' }
+            else { & $add 'tick-start' 'info' $dt.line }
         } catch { & $add 'tick-start' 'warn' "immediate engine start (SchedulerTickJobId) -- not converged: $(((("$($_.Exception.Message)") -split "`n")[0]).Trim()). Fix: $hostingFix" }
     }
 

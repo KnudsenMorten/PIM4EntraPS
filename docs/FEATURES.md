@@ -536,12 +536,12 @@ deployment is a supported choice) and no credentials lying around.
   every step for the whole tenant. A kind of data the platform does not recognise still runs
   everything, so a gap can cost time but never a missed change. (The first change after an
   update runs every step once, because there is nothing yet to compare against.)
-- **Changes start moving right away.** ✅ 2026-09-14 A commit, a queue commit or **Run now** can
-  start the scheduled engine job immediately instead of waiting for its next start — where the
-  Manager's identity has been allowed to start that job. Without that permission the change
-  runs on the next scheduled start (within about five minutes), and the Manager says so. A run
-  that is already in progress picks new commits and queued work up as soon as its current job
-  finishes, instead of waiting for the whole run.
+- **Changes start moving within minutes.** ✅ 2026-11-14 A commit, a queue commit or **Run now**
+  is picked up by the engine at its next scheduled start (within about five minutes), and the
+  Manager says so. The web app holds no right to start or change the engine's job: the part of
+  the product that is reachable from the internet keeps only its own data. A run that is already
+  in progress picks new commits and queued work up as soon as its current job finishes, instead
+  of waiting for the whole run.
 - **Queued actions do not wait for a long run.** ✅ 2026-09-14 A committed queued action — such as
   a Temporary Access Pass re-issue or a sign-in session revoke — is applied **between the engine's
   steps**,

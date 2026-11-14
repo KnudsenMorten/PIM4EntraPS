@@ -38,7 +38,7 @@
     {
       "target": "Azure",
       "action": "grant",
-      "object": "each role assignment made on the old job itself (for example the Manager's Container Apps Jobs Operator on the engine job, a job's Reader on itself), given on the new job",
+      "object": "each role assignment made on the old job itself (for example a job's Reader on itself), given on the new job",
       "permission": "the same Azure role for the same principal",
       "scope": "the new job",
       "why": "The same rights on the new job before anything switches; nothing is removed from the old job.",

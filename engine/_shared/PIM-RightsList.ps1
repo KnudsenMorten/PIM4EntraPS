@@ -212,7 +212,9 @@ function Get-PimRightsAzureTable {
         (& $r 'engine' 'fabric-administrator@tenant' 'entra-directory-role' 'Fabric Administrator' $fabric 'tenant' 'directory scope / (active, permanent); older tenants show it as Power BI Administrator' 'feature' 'connectors.powerbi' 'Gives Power BI workspace roles through the Fabric admin API' 'tools\setup\_PimWorkloadPrereqRunner.ps1 (powerbi.fabricAdmin, Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator)')
         # ---- web (the web app's identity)
         (& $r 'web' 'reader@install-rg' 'azure-rbac' 'Reader' $reader 'install-rg' 'the PIM resource group only (never the subscription)' 'always' '' 'The Environment report reads the installation''s own architecture' 'tools\setup\_PimSetupShared.ps1 Get-PimManagerRgReaderScope / Grant-PimManagerRgReader (PIM 100.22 b, RIGHTS-1 B)')
-        (& $r 'web' 'container-apps-jobs-operator@engine-job' 'azure-rbac' 'Container Apps Jobs Operator' $jobsOp 'resource' 'the engine job only' 'always' '' 'Commit and Run now start the engine job' 'tools\setup\Initialize-PimHostingAccess.ps1')
+        # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the web identity holds NO job right any more (it was 'Container Apps Jobs
+        # Operator' on the engine job: a job start accepts a container override, so the internet-facing app could run a command
+        # as the engine). Commit / Run now wait for the next scheduled start of the engine job.
         (& $r 'web' 'key-vault-crypto-service-encryption-user@signin-front-key' 'azure-rbac' 'Key Vault Crypto Service Encryption User' $kvCseu 'resource' 'the key signin-front in the install''s own Key Vault' 'always' '' 'The sign-in front wraps and unwraps its session keys' 'tools\setup\_PimInstallSigninFront.ps1 (signin-front-vault)')
         (& $r 'web' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls the web app image' 'tools\setup\Setup-PimContainers.ps1 (AcrPull per workload identity)')
         # ---- updater (the update job's identity)
@@ -275,16 +277,86 @@ function Get-PimRightsIdentityCatalog {
       PURE. The identities of the list: role (the id-pim-<role> word), the code role key (engine\_shared\PIM-IdentitySplit.ps1),
       the old names (renamed identities), the Graph set it gets (a key of Get-PimRightsCodeGraphSets, '' = none) and when.
     #>
+    # internetFacing (SECURE-WEB-1 point 4): the identity of an app WITH INGRESS -- web = ca-pim-manager (the Manager + its
+    # signin-front container), requests = the RFA broker app (public portal). In Container Apps every container of an app can
+    # take every identity assigned to that app, so these identities may hold only their own data (Get-PimRightsNeverRules).
     return @(
-        [ordered]@{ role = 'engine';   codeRole = 'engine';   oldNames = @();                  graph = 'engine';   when = 'always';  featureKey = '' }
-        [ordered]@{ role = 'web';      codeRole = 'web';      oldNames = @();                  graph = 'web';      when = 'always';  featureKey = '' }
-        [ordered]@{ role = 'updater';  codeRole = 'updater';  oldNames = @();                  graph = 'updater';  when = 'always';  featureKey = '' }
-        [ordered]@{ role = 'downlink'; codeRole = 'downlink'; oldNames = @();                  graph = 'downlink'; when = 'feature'; featureKey = 'msp.downlink' }
-        [ordered]@{ role = 'publish';  codeRole = 'publish';  oldNames = @();                  graph = '';         when = 'feature'; featureKey = 'msp.downlink' }
-        [ordered]@{ role = 'requests'; codeRole = 'requests'; oldNames = @();                  graph = '';         when = 'feature'; featureKey = 'rfa.portal' }
-        [ordered]@{ role = 'dbinit';   codeRole = 'dbinit';   oldNames = @();                  graph = '';         when = 'always';  featureKey = '' }
-        [ordered]@{ role = 'docs';     codeRole = 'asbuilt';  oldNames = @('id-pim-asbuilt');  graph = '';         when = 'always';  featureKey = '' }
+        [ordered]@{ role = 'engine';   codeRole = 'engine';   oldNames = @();                  graph = 'engine';   when = 'always';  featureKey = '';             internetFacing = $false }
+        [ordered]@{ role = 'web';      codeRole = 'web';      oldNames = @();                  graph = 'web';      when = 'always';  featureKey = '';             internetFacing = $true }
+        [ordered]@{ role = 'updater';  codeRole = 'updater';  oldNames = @();                  graph = 'updater';  when = 'always';  featureKey = '';             internetFacing = $false }
+        [ordered]@{ role = 'downlink'; codeRole = 'downlink'; oldNames = @();                  graph = 'downlink'; when = 'feature'; featureKey = 'msp.downlink'; internetFacing = $false }
+        [ordered]@{ role = 'publish';  codeRole = 'publish';  oldNames = @();                  graph = '';         when = 'feature'; featureKey = 'msp.downlink'; internetFacing = $false }
+        [ordered]@{ role = 'requests'; codeRole = 'requests'; oldNames = @();                  graph = '';         when = 'feature'; featureKey = 'rfa.portal';   internetFacing = $true }
+        [ordered]@{ role = 'dbinit';   codeRole = 'dbinit';   oldNames = @();                  graph = '';         when = 'always';  featureKey = '';             internetFacing = $false }
+        [ordered]@{ role = 'docs';     codeRole = 'asbuilt';  oldNames = @('id-pim-asbuilt');  graph = '';         when = 'always';  featureKey = '';             internetFacing = $false }
     )
+}
+
+function Get-PimRightsNeverRules {
+    <#
+      PURE. SECURE-WEB-1 (framework 12.11f, owner 2026-11-14): the rights an INTERNET-FACING identity must never hold -- each
+      one lets a compromised web container reach beyond its own data. Matched on the role id (Azure built-ins) and, for Graph,
+      on the permission name; an Azure role also by its NAME (azureRoleName), so a built-in whose id is not listed here (any
+      Container Apps job role, any Contributor of the compute plane) is still caught. A data role on the identity's own data
+      (Storage Table / Blob Data Contributor, Crypto Service Encryption User on its one key) is not a never-right.
+      Returns @{ azureRoleIds = @{ id = name }; azureRoleName = regex; graphPattern = regex }.
+    #>
+    return @{
+        azureRoleName = '(?i)(\bjobs?\b|^owner$|^contributor$|container apps contributor|managedenvironments contributor|user access administrator|role based access control administrator|^acrpush$|key vault secrets|key vault administrator|key vault contributor|key vault data access administrator|managed identity (operator|contributor))'
+        azureRoleIds = [ordered]@{
+            'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b' = 'Container Apps Jobs Operator'
+            'b24988ac-6180-42a0-ab88-20f7382dd24c' = 'Contributor'
+            '8e3af657-a8ff-443c-a75c-2fe8c4bcb635' = 'Owner'
+            '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9' = 'User Access Administrator'
+            'f58310d9-a9f6-439a-9e8d-f62e7b41a168' = 'Role Based Access Control Administrator'
+            '8311e382-0749-4cb8-b61a-304f252e45ec' = 'AcrPush'
+            '4633458b-17de-408a-b874-0445c86b69e6' = 'Key Vault Secrets User'
+            'b86a8fe4-44ce-4948-aee5-eccb2c155cd7' = 'Key Vault Secrets Officer'
+            '00482a5a-887f-4fb3-b363-3b7fe8e74483' = 'Key Vault Administrator'
+            'f25e0fa2-a7c8-4377-a976-54943a77a395' = 'Key Vault Contributor'
+            'f1a07417-d97a-45cb-824c-7a7467783830' = 'Managed Identity Operator'
+            # framework SECURE-WEB-1 point 4 (Invardia, from SI's review 2026-11-14)
+            'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59' = 'Managed Identity Contributor'
+            '8b54135c-b56d-4d72-a534-26097cfdc8d8' = 'Key Vault Data Access Administrator'
+            '57cc5028-e6a7-4284-868d-0611c5923f8d' = 'Container Apps ManagedEnvironments Contributor'
+        }
+        graphPattern = '(?i)(ReadWrite|\.Write|Manage|\.Send|FullControl)'
+    }
+}
+
+function Get-PimRightsNeverExceptions {
+    <#
+      PURE. LITERAL. The ONLY never-right an internet-facing identity may hold: Invardia decision 2026-11-14 (SECURE-WEB-1 F1 b) --
+      Key Vault Secrets User on the ONE secret PIM-EmergencyPasscode (the hash of the break-glass passphrase, per-secret scope).
+      Reported by the gate, never failed. Target: the check moves behind built-in auth / the engine. Any OTHER never-right
+      fails the gate; this list only shrinks. (F1 a: the web left the SEC-10 vault reader set -- Get-PimSkvReaderRoles.)
+    #>
+    return @(
+        'web.azure.key-vault-secrets-user@emergency-passcode'
+    )
+}
+
+function Test-PimRightsInternetFacing {
+    <#
+      PURE. The SECURE-WEB-1 lint over an approved rights list: every right of an internetFacing identity that is a never-right.
+      Returns @{ violations = @(<right id = role>); excepted = @(<right id = role>) }. The gate fails on any violation.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$List)
+    $rules = Get-PimRightsNeverRules; $exc = @(Get-PimRightsNeverExceptions)
+    $bad = New-Object System.Collections.Generic.List[string]; $okx = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @($List.identities)) {
+        if (-not [bool]$id.internetFacing) { continue }
+        foreach ($rt in @($id.rights)) {
+            $never = $false
+            if ("$($rt.kind)" -eq 'graph-app-role') { $never = ("$($rt.role)" -match $rules.graphPattern) }
+            elseif ("$($rt.kind)" -eq 'entra-directory-role') { $never = $true }
+            else { $never = ($rules.azureRoleIds.Contains("$($rt.roleId)".ToLowerInvariant()) -or "$($rt.role)" -match $rules.azureRoleName) }
+            if (-not $never) { continue }
+            $line = "$($rt.id) = $($rt.role)"
+            if ($exc -contains "$($rt.id)") { $okx.Add($line) } else { $bad.Add($line) }
+        }
+    }
+    return @{ violations = @($bad); excepted = @($okx) }
 }
 
 function Get-PimRightsSortedOrdinal {
@@ -340,7 +412,7 @@ function Get-PimApprovedRightsList {
         }
         $ids = Get-PimRightsSortedOrdinal -Items @($rights.Keys)
         $old = Get-PimRightsSortedOrdinal -Items @($id.oldNames)
-        $byRole[$id.role] = [ordered]@{ role = $id.role; name = "id-pim-$($id.role)"; oldNames = $old; rights = @(foreach ($k in $ids) { $rights[$k] }) }
+        $byRole[$id.role] = [ordered]@{ role = $id.role; name = "id-pim-$($id.role)"; oldNames = $old; internetFacing = [bool]$id.internetFacing; rights = @(foreach ($k in $ids) { $rights[$k] }) }
     }
     $roles = Get-PimRightsSortedOrdinal -Items @($byRole.Keys)
     return [ordered]@{

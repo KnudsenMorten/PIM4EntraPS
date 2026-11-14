@@ -4073,13 +4073,14 @@ Key semantics:
   only the providers that read the changed entities (§5.3), e.g.
   `trigger:engine-delta:AdminMembers,AzResPolicies,AzRes,GroupMembers`; unknown entities widen it to
   `All`. `engine-delta` is create/update only; `All` names the scope set, not a destructive mode.
-- **Immediate start where permitted** — on a configuration commit, a queue commit and **Run now**
-  the Manager asks Container Apps to start one execution of the tick job
-  (`Start-PimManagerTickNow` → ARM `POST …/jobs/<tick>/start`; also `POST /api/scheduler/kick`,
-  Admin-gated, audited `schedule.tick.start`). It is **conditional**: it needs the job's resource id
-  (env `PIM_TickJobId` or `pim.Settings` `SchedulerTickJobId`) **and** the *Container Apps Jobs
-  Operator* role for the Manager's managed identity, scoped to the tick job only. Without either it
-  degrades to the next cron start and says so in the response. Runs in progress do not stop it — a
+- **The web app starts no job (3.1.25)** — the Manager's identity is the identity of an app that
+  is reachable from the internet, so it holds only its own data: no Container Apps job right, no
+  Contributor, no role-assignment right, no registry push and no Key Vault secrets right (the one
+  exception is reading the hash of the break-glass passphrase, a single secret). On a
+  configuration commit, a queue commit and **Run now** the work is queued and the engine picks it
+  up at its next scheduled start (within about five minutes); `Start-PimManagerTickNow` answers
+  "next scheduled start" and makes no Azure call. The updater reports any such right it finds on
+  the Manager's identity as a security finding. Runs in progress do not stop it — a
   new execution works on the areas they do not hold; only when the most runs that may go side by
   side are already running does it wait (one of them picks the work up when it finishes its current
   job). It is debounced (45 s) so a multi-entity commit starts one execution, and never fails the

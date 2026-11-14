@@ -136,6 +136,7 @@ Every permission the product grants or requires, per identity, read from the ins
 | Engine (ca-pim-tick) | Azure RBAC | Reader | Tenant root management group | Discovery of management groups and subscriptions; Azure RBAC reporting | Azure discovery and reporting | Default on; can be skipped |
 | Engine (ca-pim-tick) | Azure RBAC | Reader | The hosting subscription (and optionally a management group) | Read Azure resources and role assignments | Azure reporting | Default on; can be skipped |
 | Engine (ca-pim-tick) | Azure RBAC | User Access Administrator | Tenant root management group, or the delegated scopes | Write Azure role assignments and PIM for Azure resources | Azure RBAC delegation (read-only without it) | Yes (opt-in switch) |
+| Engine (ca-pim-tick) | Azure RBAC | Container Apps Jobs Operator + Contributor | The updater job only | Start the updater when an update is expedited; put the updater back on its last good image | Expedited updates and the updater's self-repair (updates still run on their schedule) | No |
 | Engine (ca-pim-tick) | Azure RBAC | Reader | The ca-pim-tick job resource | Read its own execution status | Run status in the GUI | No |
 | Engine (ca-pim-tick) | Azure RBAC | Storage Table Data Contributor | The access-request storage account | Store access-request state | Access requests (RFA) | Yes (RFA option) |
 | Engine (ca-pim-tick) | Azure RBAC (custom role) | Microsoft.Storage/storageAccounts/read + write | The one MSP bundle storage account | Maintain the bundle store's network rules (MSP managing tenant, public-signed mode) | MSP bundle publication | Yes (MSP only) |
@@ -146,7 +147,6 @@ Every permission the product grants or requires, per identity, read from the ins
 | Manager (ca-pim-manager) | Graph application (read-only) | User.ReadBasic.All, GroupMember.Read.All | Tenant | The people and group pickers; every other directory fact is read by the engine | GUI views and pickers | No |
 | Manager (ca-pim-manager) | Azure RBAC | Reader | The hosting subscription | Show Azure scopes and roles | Azure views | No |
 | Manager (ca-pim-manager) | Azure RBAC | Reader | The PIM resource group only | Read the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) for the Environment report | Environment report (the architecture section shows "not readable") | No |
-| Manager (ca-pim-manager) | Azure RBAC | Container Apps Jobs Operator | The ca-pim-tick job only | Start the engine on Run now / commit | Run now (the engine still runs on its schedule) | Default on; can be skipped |
 | Manager (ca-pim-manager) | Azure RBAC | AcrPull | Your container registry (legacy path; normally the pull identity) | Pull its image | Start-up | No |
 | Manager (ca-pim-manager) | SQL | Role pim_web (read; write staged changes, settings and audit; no schema right since 2.4.631); db_datareader, db_datawriter only until the second cut-over run | The PIM database | Read and stage changes, settings and audit | GUI | No |
 | Manager (ca-pim-manager) | Key Vault RBAC | Key Vault Secrets User | The one emergency-passphrase secret | Emergency sign-in check | Emergency access | Yes |
