@@ -354,6 +354,7 @@ function Test-PimManagerDemoDataOn {
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1') }
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1') }   # §90 API keys
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\mcp\PIM-Mcp.ps1')) { . (Join-Path $solutionRoot 'engine\mcp\PIM-Mcp.ps1') }   # REQ 93 MCP server (Pro)
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\ai-chat\PIM-AiChat.ps1')) { . (Join-Path $solutionRoot 'engine\ai-chat\PIM-AiChat.ps1') }   # MANAGER-CHAT-1 AI chat (Pro)
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1')) { . (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1') }
 # 🔴 Found 2026-09-25 by the code audit once it could follow the Manager's loads: these two were NEVER loaded, so the
 # Get-Command guards around them were always false -- a warning override was checked only by the partial fallback
@@ -523,6 +524,10 @@ if (Test-Path -LiteralPath $_cutoverLib) { . $_cutoverLib }
 # -> JSON sibling of the scheduler-state file -> in-memory). Powers /api/jobs[/log].
 $_schedLib = Join-Path $solutionRoot 'engine\_shared\PIM-Scheduler.ps1'
 if (Test-Path -LiteralPath $_schedLib) { . $_schedLib }
+# WAKE-1 (SECURE-WEB-1 point 1, 3.1.26): the wake message the Manager puts on the wake queue after a Commit / Run now
+# (Send-PimWakeMessage) -- the engine's wake job is the gate; the Manager holds no job right.
+$_wakeLib = Join-Path $solutionRoot 'engine\_shared\PIM-Wake.ps1'
+if (Test-Path -LiteralPath $_wakeLib) { . $_wakeLib }
 
 # §71.43 -- UPDATE RING + update state (engine/_shared/PIM-UpdateState.ps1). The ring this environment
 # is on is an environment variable on the UPDATE JOB (ca-pim-update), not on this container, so the
@@ -546,6 +551,11 @@ if (Test-Path -LiteralPath $_relCtlLib) { . $_relCtlLib }
 # only (honest "configure to enable" state), never a fake send.
 $_notifyLib = Join-Path $solutionRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
+# 🔒 SECURE-WEB-1 (framework 12.11f, 3.1.26): this internet-facing web app sends NO mail -- its identity holds no Exchange
+# send right. Every mail raised in this process (an alert, a notice, an engine library loaded here) is handed to the engine
+# as a queued notify request (Add-PimManagerNotifyRequest); the engine sends it at its next run. Send-PimNotifyMail honours
+# this hook at its one chokepoint, so no path in this process reaches a mail sender.
+$global:PIM_NotifyMailQueue = { param($MailType, $Tokens, $Recipients, $Attachments) Add-PimManagerNotifyRequest -MailType $MailType -Tokens $Tokens -Recipients @($Recipients) -Attachments @($Attachments) }
 # GUARD-1: the Manager's own guard (the last SuperAdmin, PIM 100.72 (7)) records its trips the same way. PIM 100.72 (2)(3): the
 # commit delta guard is a same-person confirm and uplink-readonly / the replication gate are form validation -- not guards.
 $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
@@ -727,20 +737,65 @@ function Test-PimManagerRequestLogged {
 function Get-PimManagerMcpAuthConfig {
     # REQ 93 -- what /mcp pins a token to: audiences from PIM_MCP_AUDIENCE (written by Set-PimManagerMcpAuth.ps1 -Apply),
     # issuers = THIS tenant (v1 + v2). Not configured = /mcp refuses every hosted call (fail closed, 503 with the remedy).
+    # AUTH-MODERN-1 (owner 2026-11-15 "use modern method for api only - same with mcp"): unset PIM_MCP_AUDIENCE = the Manager's
+    # own sign-in app (PIM_HOSTED_EASYAUTH_AUD, id + api://id), so every built-in install answers MCP with Entra OAuth. The scope
+    # a client asks for is api://<id>/user_impersonation (mcp.access, from earlier MCP setups, is still accepted by the check).
     param([System.Net.HttpListenerRequest]$Request)
     $aud = @("$env:PIM_MCP_AUDIENCE" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if (-not $aud.Count) {
+        $ea = @("$env:PIM_HOSTED_EASYAUTH_AUD" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $aud = @(@($ea | ForEach-Object { if ($_ -match '^api://') { $_ } else { "api://$_" } }) + @($ea | Where-Object { $_ -notmatch '^api://' }) | Select-Object -Unique)
+    }
     $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
     $iss = @(if ($tid -and (Get-Command Get-PimHostedDefaultIssuers -ErrorAction SilentlyContinue)) { Get-PimHostedDefaultIssuers -TenantId $tid })
-    $apiUri = @($aud | Where-Object { $_ -like 'api://*' })[0]; if (-not $apiUri) { $apiUri = @($aud)[0] }
+    $apiUri = @($aud | Where-Object { $_ -like 'api://*' })[0]; if (-not $apiUri -and @($aud).Count) { $apiUri = "api://$(@($aud)[0])" }
     $hostName = ''
     if ($Request) { $hostName = "$(("$($Request.Headers['X-Forwarded-Host'])" -split ',')[0])".Trim(); if (-not $hostName) { $hostName = "$($Request.Headers['Host'])".Trim() }; if (-not $hostName) { $hostName = "$($Request.Url.Authority)" } }
     return @{
         configured = ($aud.Count -gt 0 -and $iss.Count -gt 0)
-        audiences = $aud; issuers = $iss
-        scope = $(if ($apiUri) { "$apiUri/mcp.access" } else { '' })
+        audiences = $aud; issuers = $iss; tenantId = $tid
+        scope = $(if ($apiUri) { "$apiUri/user_impersonation" } else { '' })
+        scopes = @('user_impersonation', 'mcp.access')
         authorizationServer = $(if ($tid) { "https://login.microsoftonline.com/$tid/v2.0" } else { '' })
         resource = "https://$hostName/mcp"
+        # RFC 9728: /mcp's own metadata document (resource = https://<host>/mcp); the ROOT document describes https://<host>
+        origin = "https://$hostName"
         metadataUrl = "https://$hostName/.well-known/oauth-protected-resource/mcp"
+    }
+}
+
+function Add-PimManagerAuthPathSeen {
+    <#
+      AUTH-MODERN-1: counts which token verified the hosted requests of this process (bearer | access-token |
+      id-token-fallback), for /api/signed-requests (authTokenPaths) and the console. The FALLBACK is said once per person
+      (WARNING level: an install still on it needs the new sign-in settings, pushed by operations), never per request.
+    #>
+    param([string]$Path = '', [string]$Identity = '')
+    $p = "$Path".Trim(); if (-not $p) { return }
+    if (-not ($script:PimAuthPathCounts -is [hashtable])) { $script:PimAuthPathCounts = @{} }
+    if (-not $script:PimAuthPathCounts.ContainsKey($p)) { $script:PimAuthPathCounts[$p] = 0 }
+    $script:PimAuthPathCounts[$p] = [int]$script:PimAuthPathCounts[$p] + 1
+    $script:PimAuthPathLastUtc = [datetime]::UtcNow.ToString('o')
+    if ($p -eq 'id-token-fallback') {
+        if (-not ($script:PimAuthFallbackSaid -is [hashtable])) { $script:PimAuthFallbackSaid = @{} }
+        $k = "$Identity".ToLowerInvariant()
+        if (-not $script:PimAuthFallbackSaid.ContainsKey($k)) {
+            $script:PimAuthFallbackSaid[$k] = $true
+            Write-Warning ("[auth] '{0}' was verified by the ID-token FALLBACK: this install's sign-in does not request the Manager's API scope (offline_access api://<id>/user_impersonation) yet, so the access token cannot be checked -- the built-in sign-in settings need the current standard (Set-PimManagerEasyAuth.ps1 / the setup step builtin-signin)" -f $Identity)
+        }
+    }
+}
+
+function Get-PimManagerAuthPathStatus {
+    # AUTH-MODERN-1: the read-only status of the token paths seen by this process (no token, no identity in it).
+    $c = @{}; if ($script:PimAuthPathCounts -is [hashtable]) { $c = $script:PimAuthPathCounts }
+    $fb = [int]$(if ($c.ContainsKey('id-token-fallback')) { $c['id-token-fallback'] } else { 0 })
+    return [ordered]@{
+        counts = [ordered]@{ bearer = [int]$(if ($c.ContainsKey('bearer')) { $c['bearer'] } else { 0 }); accessToken = [int]$(if ($c.ContainsKey('access-token')) { $c['access-token'] } else { 0 }); idTokenFallback = $fb }
+        onFallback = ($fb -gt 0)
+        thisRequest = "$script:CurrentRequestTokenPath"
+        lastUtc = "$script:PimAuthPathLastUtc"
+        idTokenFallbackAllowed = ("$env:PIM_HOSTED_ID_TOKEN_FALLBACK".Trim() -notmatch '^(?i)(0|false|no|off)$')
     }
 }
 
@@ -796,13 +851,33 @@ function Get-PimEasyAuthPrincipal {
         Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
         return ''
     }
+    # AUTH-MODERN-1 / SIGNIN-TOKEN-LIFETIME-1 (framework decision c5704c10): the platform's sign-in is layer 1; layer 2 is the
+    # Manager validating the token itself with Microsoft.IdentityModel -- the ACCESS token (a script's / MCP client's own
+    # Authorization bearer, else the sign-in's X-MS-TOKEN-AAD-ACCESS-TOKEN: scp user_impersonation, aud = this app, this
+    # tenant, strict expiry). The ID token only as the FALLBACK for an install whose sign-in does not request the API scope
+    # yet (PIM_HOSTED_ID_TOKEN_FALLBACK = 0 switches it off) -- the path that verified is counted (/api/signed-requests).
+    # /mcp validates its own bearer in its route (Resolve-PimMcpBearer); /.well-known is public metadata -- no page principal.
+    $p = "$($Request.Url.AbsolutePath)"
+    if ($p -eq '/mcp' -or $p -like '/.well-known/*') { return '' }
+    $tidPin2 = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tidPin2) { $tidPin2 = "$($global:PIM_TenantId)".Trim() }
+    $allowId = ("$env:PIM_HOSTED_ID_TOKEN_FALLBACK".Trim() -notmatch '^(?i)(0|false|no|off)$')
+    # /api/app/* reads its own APPLICATION bearer (Invoke-PimManagerAppSignIn); the person's bearer check does not apply there
+    $ahIn = "$($Request.Headers['Authorization'])"
+    if ($p -eq '/api/app' -or $p -like '/api/app/*') { $ahIn = '' }
     $d = Resolve-PimHostedPrincipal `
             -PrincipalName "$($Request.Headers['X-MS-CLIENT-PRINCIPAL-NAME'])" `
             -PrincipalBlob "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])" `
             -SignedToken   "$($Request.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])" `
+            -Authorization $ahIn -AccessToken "$($Request.Headers['X-MS-TOKEN-AAD-ACCESS-TOKEN'])" -TenantId $tidPin2 `
+            -AllowIdTokenFallback $allowId `
             -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer
     # SEC-90: the verified object id of THIS request, for Get-PimManagerRole ('' when the edge sent none)
-    if ($d.trusted) { $script:CurrentRequestOid = "$($d.oid)"; return "$($d.identity)" }
+    if ($d.trusted) {
+        $script:CurrentRequestOid = "$($d.oid)"
+        $script:CurrentRequestTokenPath = "$($d.tokenPath)"; $script:CurrentRequestToken = "$($d.token)"; $script:CurrentRequestTokenKind = "$($d.tokenKind)"
+        Add-PimManagerAuthPathSeen -Path "$($d.tokenPath)" -Identity "$($d.identity)"
+        return "$($d.identity)"
+    }
     # Rejections are security events -- never silent (BUG-01 lesson: a guard that trips
     # without telling anyone reads as a clean run).
     Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
@@ -811,22 +886,24 @@ function Get-PimEasyAuthPrincipal {
 
 function Test-PimManagerApiPageToken {
     <#
-      The /api page token check. OFF the sign-in front: exactly today's 'Authorization: Bearer <page token>'. 🟡 CR7
-      (§12.11g): behind the front, Authorization is the user's ID token (the front owns that header), so the page also
-      sends the token in X-PIM-Token and only that header counts (Test-PimManagerPageToken, PIM-HostedAuth.ps1). The
-      library missing behind the front = refused (the Authorization comparison can never match an ID token).
+      The /api page token check: X-PIM-Token only (Test-PimManagerPageToken, PIM-HostedAuth.ps1), on every layer -- the
+      library missing = refused.
     #>
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [string]$ExpectedToken = '')
-    $ah = $Request.Headers['Authorization']
-    if ($script:PimSigninFront) {
-        if (-not (Get-Command Test-PimManagerPageToken -ErrorAction SilentlyContinue)) { return $false }
-        return (Test-PimManagerPageToken -Authorization "$ah" -PageTokenHeader "$($Request.Headers['X-PIM-Token'])" -ExpectedToken "$ExpectedToken" -Front $true)
-    }
+    # AUTH-MODERN-1 (owner 2026-11-15 "use only modern and secure method"): the page token is read from X-PIM-Token ONLY, on
+    # every layer and every route -- 'Authorization' carries Entra access tokens alone (a page token there never counts).
+    # 🔑 A HOSTED request whose principal was proven by its OWN 'Authorization: Bearer <Entra access token>' (a script, verified
+    # in Get-PimEasyAuthPrincipal: signature, tenant, audience, expiry, scope) needs no page token: a header the browser never
+    # adds by itself is the same proof against a cross-site request that the page token is.
+    if ($script:PimHosted -and "$script:CurrentRequestTokenPath" -eq 'bearer' -and "$script:CurrentRequestPrincipal".Trim()) { return $true }
+    if (-not (Get-Command Test-PimManagerPageToken -ErrorAction SilentlyContinue)) { return $false }
+    $ok = Test-PimManagerPageToken -PageTokenHeader "$($Request.Headers['X-PIM-Token'])" -ExpectedToken "$ExpectedToken" -Front $true
+    if (-not $ok) { return $false }
     # LOCAL (break-glass) Manager: the call must ALSO carry the session cookie that only the browser which opened the one-time
     # link holds. The header stays required too -- a cookie alone is sent by the browser on any request, so it never counts on
     # its own. Hosted Managers never enter here (their principal comes from the edge).
     if (-not $script:PimHosted -and -not (Test-PimManagerLocalSessionCookie -Session $script:PimLocalSession -CookieHeader "$($Request.Headers['Cookie'])")) { return $false }
-    return [bool]($ah -and $ah -eq "Bearer $ExpectedToken")
+    return $true
 }
 
 # ---------------------------------------------------------------------------
@@ -1043,6 +1120,12 @@ function New-PimManagerSignedRequestCapture {
     # The capture of THIS hosted request's signed ID token (role 'committer'), or $null (not hosted, no principal, no token).
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [string]$Identity = '')
     if (-not $script:PimHosted -or -not "$Identity".Trim() -or -not (Get-Command New-PimSignedRequestCapture -ErrorAction SilentlyContinue)) { return $null }
+    # AUTH-MODERN-1: sign with the token that was VERIFIED for this request (the access token -- the browser's or a script's
+    # bearer -- or, on the fallback, the ID token), never with a header that was not the proof
+    if ("$script:CurrentRequestToken".Trim() -and "$script:CurrentRequestTokenKind" -in @('access', 'id')) {
+        return (New-PimSignedRequestCapture -Token "$script:CurrentRequestToken".Trim() -Identity "$Identity".Trim() -Role 'committer' -TokenKind "$script:CurrentRequestTokenKind" `
+                    -Route ("{0} {1}" -f $Request.HttpMethod, $Request.Url.AbsolutePath) -ManagerCheck ("verified by the Manager on receipt ($script:CurrentRequestTokenPath: signature, issuer, audience, expiry" + $(if ("$script:CurrentRequestTokenKind" -eq 'access') { ', scope)' } else { ')' })))
+    }
     $tok = "$($Request.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])".Trim()
     if (-not $tok) {
         if (-not $script:PimSignedRequestNoTokenWarned) {
@@ -1473,6 +1556,27 @@ function Get-PimManagerRole {
         return @{ role = 'Reader'; identity = $who; source = 'hosted: not in SQL ManagerAccess or env (fail closed)' }
     }
     return @{ role = 'Reader'; identity = $who; source = 'not in SQL ManagerAccess or env (fail closed)' }
+}
+
+function Get-PimManagerSwitchAccountUrl {
+    # SIGNIN-SWITCH (3.1.26): sign out of the built-in sign-in and straight back into it. Microsoft's built-in sign-in in front
+    # of the Manager asks prompt=select_account, so the account picker appears and the person can choose another account.
+    # A fixed, same-site path: nothing from the request goes into it.
+    return '/.auth/logout?post_logout_redirect_uri=/.auth/login/aad'
+}
+
+function Test-PimManagerNoGrant {
+    <#
+      PURE. SIGNIN-SWITCH (3.1.26): is this a HOSTED sign-in that nobody granted a role -- the fail-closed Reader of
+      Get-PimManagerRole ("not in SQL ManagerAccess or env (fail closed)")? Not for a demo viewer, a delegated owner, an
+      application or a local console. -Hosted defaults to this Manager's mode.
+    #>
+    param([AllowNull()][object]$Role, [Nullable[bool]]$Hosted = $null)
+    $h = if ($null -ne $Hosted) { [bool]$Hosted } else { [bool]$script:PimHosted }
+    if (-not $h -or $null -eq $Role) { return $false }
+    $get = { param($n) if ($Role -is [System.Collections.IDictionary]) { $Role[$n] } else { $Role.$n } }
+    if ("$(& $get 'role')" -ne 'Reader' -or [bool](& $get 'app') -or [bool](& $get 'derived')) { return $false }
+    return ("$(& $get 'source')" -match '^hosted: not in SQL ManagerAccess or env \(fail closed\)$')
 }
 
 function Get-PimManagerAccessBootstrapState {
@@ -2698,22 +2802,28 @@ function Write-PimManagerLoginAudit {
     } catch { Write-Warning "login audit skipped: $($_.Exception.Message)" }
 }
 
-# Emergency override state (phase 8). The passphrase is verified (SHA-256, constant time, 5 failures in 15 min
-# lock it) against the key vault secret PIM-EmergencyPasscode in the vault named by PIM_EmergencyVault (REQ-F:
-# tools/setup/Set-PimEmergencyPassphrase.ps1 provisions both). The secret may hold the passphrase or its SHA-256
-# hex; the setup script stores the hex, so the clear passphrase is never in the vault.
+# Emergency override state (phase 8). SECURE-WEB-1 (3.1.26): the passphrase is verified against the VERIFIER in the PIM
+# database (pim.Settings 'EmergencyPassphraseVerifier': PBKDF2-SHA256, its own salt, 600000 iterations -- never the
+# passphrase; engine/_shared/PIM-EmergencyVerifier.ps1), constant time, 5 failures in 15 min lock it. The Manager reads
+# NO Key Vault: its identity holds no Key Vault role. Written by tools/setup/Set-PimEmergencyPassphrase.ps1; an install
+# set up before 3.1.26 is moved once by the updater (or -MigrateFromKeyVault). Read fresh on every activation.
 $script:EmergencyAttempts = @()
 
+function Get-PimManagerEmergencyVerifierReader {
+    # the store reader the verify and the status use (one place): pim.Settings through Get-PimManagerSetting
+    return { param($n) Get-PimManagerSetting -Name $n }
+}
+
 function Get-PimManagerEmergencyPassphraseStatus {
-    # REQ-F: { configured; source; vault; secretName; reason } for the Settings card -- NEVER the passphrase or its
-    # hash. Cached 60 s (it reads the key vault); a failure is reported as "not configured", with the reason.
+    # REQ-F: { configured; source; legacyVault; vault; secretName; reason } for the Settings card -- NEVER the passphrase,
+    # its hash or its verifier. Cached 60 s; a failure is reported as "not configured", with the reason.
     $now = [datetime]::UtcNow
     if ($script:PimEmergencyPpCache -and ($now - $script:PimEmergencyPpCache.at).TotalSeconds -lt 60) { return $script:PimEmergencyPpCache.value }
     $st = $null
     try {
-        if (Get-Command Get-PimEmergencyPassphraseStatus -ErrorAction SilentlyContinue) { $st = Get-PimEmergencyPassphraseStatus }
-        else { $st = [pscustomobject]@{ configured = $false; source = 'none'; vault = "$($global:PIM_EmergencyVault)"; secretName = 'PIM-EmergencyPasscode'; reason = 'the governance library (PIM-Governance.ps1) is not loaded' } }
-    } catch { $st = [pscustomobject]@{ configured = $false; source = 'none'; vault = "$($global:PIM_EmergencyVault)"; secretName = 'PIM-EmergencyPasscode'; reason = "$($_.Exception.Message)" } }
+        if (Get-Command Get-PimEmergencyPassphraseStatus -ErrorAction SilentlyContinue) { $st = Get-PimEmergencyPassphraseStatus -VerifierReader (Get-PimManagerEmergencyVerifierReader) }
+        else { $st = [pscustomobject]@{ configured = $false; source = 'none'; legacyVault = $false; vault = ''; secretName = ''; reason = 'the governance library (PIM-Governance.ps1) is not loaded' } }
+    } catch { $st = [pscustomobject]@{ configured = $false; source = 'none'; legacyVault = $false; vault = ''; secretName = ''; reason = "$($_.Exception.Message)" } }
     # SETTINGS-CLARITY (owner 2026-11-10: "what to do where?"): the card prints the published two-line command
     # (Set-PimEmergencyPassphrase.ps1 from invardia.com/support/pim) with what this installation knows filled in --
     # setupValues; a part that cannot be read stays '' and the page prints a placeholder for it. Read only while NOT
@@ -2725,8 +2835,8 @@ function Get-PimManagerEmergencyPassphraseStatus {
         try { $sv.managerApp = if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { "$(Get-PimInstallName -Role web)" } else { '' } } catch { }
     }
     $v = [ordered]@{
-        configured = [bool]$st.configured; source = "$($st.source)"; vault = "$($st.vault)"; secretName = "$($st.secretName)"; reason = "$($st.reason)"
-        setup = 'Set-PimEmergencyPassphrase.ps1 stores the passphrase (only its hash) in this installation''s key vault and lets PIM Manager read it.'
+        configured = [bool]$st.configured; source = "$($st.source)"; legacyVault = [bool]$st.legacyVault; vault = "$($st.vault)"; secretName = "$($st.secretName)"; reason = "$($st.reason)"
+        setup = 'Set-PimEmergencyPassphrase.ps1 stores a check of the passphrase (a salted, slow hash -- never the passphrase) in this installation''s PIM database.'
         setupValues = $sv
     }
     $script:PimEmergencyPpCache = @{ at = $now; value = $v }
@@ -2735,20 +2845,17 @@ function Get-PimManagerEmergencyPassphraseStatus {
 
 function Test-PimEmergencyPasscode {
     param([Parameter(Mandatory)][string]$Passcode)
-    # Delegates to the shared, KV-backed governance helpers (PIM-Governance.ps1):
-    # expected hash from KV PIM-EmergencyPasscode (set $global:PIM_EmergencyVault)
-    # else the local config/emergency.custom.ps1 hash; constant-time compare;
-    # 5-failures-in-15-min lockout. Falls back to an inline verify if the shared
+    # Delegates to the shared governance helpers (PIM-Governance.ps1): the verifier from the PIM database
+    # (pim.Settings 'EmergencyPassphraseVerifier', read FRESH -- an activation never waits for a cache or an engine run),
+    # else an in-memory $global:PIM_EmergencyPasscodeHash a local host set; constant-time compare; 5-failures-in-15-min
+    # lockout. SECURE-WEB-1 (3.1.26): NO Key Vault read. Falls back to an inline verify of the local hash if the shared
     # module is somehow unavailable, so the endpoint never hard-fails.
     $now = [datetime]::UtcNow
 
-    # SQL-only product (2026-09-12): the expected hash comes from the key vault (PIM-EmergencyPasscode,
-    # $global:PIM_EmergencyVault) or an in-memory $global:PIM_EmergencyPasscodeHash set by the host --
-    # never from a config/emergency.custom.ps1 file.
-
-    if ((Get-Command Resolve-PimEmergencyVerification -ErrorAction SilentlyContinue) -and (Get-Command Resolve-PimEmergencyExpectedHash -ErrorAction SilentlyContinue)) {
+    if ((Get-Command Resolve-PimEmergencyVerification -ErrorAction SilentlyContinue) -and (Get-Command Resolve-PimEmergencyVerifier -ErrorAction SilentlyContinue)) {
+        $rv = Resolve-PimEmergencyVerifier -Reader (Get-PimManagerEmergencyVerifierReader)
         $expected = (Resolve-PimEmergencyExpectedHash).hash
-        $v = Resolve-PimEmergencyVerification -Passcode $Passcode -ExpectedHashHex $expected -NowUtc $now -Failures @($script:EmergencyAttempts)
+        $v = Resolve-PimEmergencyVerification -Passcode $Passcode -Verifier $(if ($rv.ok) { $rv.verifier } else { $null }) -ExpectedHashHex $expected -NowUtc $now -Failures @($script:EmergencyAttempts)
         $script:EmergencyAttempts = @($v.recentFailures)
         if (-not $v.ok -and $v.error -eq 'invalid passcode') {
             Write-PimManagerAuditEvent -Action 'emergency.passcode.failed' -Target 'emergency-override' -Result 'denied'
@@ -2767,7 +2874,7 @@ function Test-PimEmergencyPasscode {
     # Hosted resolves the passphrase from the key vault; only a LOCAL install has the file.
     if (-not $expected) {
         # SQL-only product: there is no local config file to point at on ANY deployment shape.
-        $hint = 'store the emergency passphrase in your key vault (secret PIM-EmergencyPasscode)'
+        $hint = 'run Set-PimEmergencyPassphrase.ps1 once'
         return @{ ok = $false; error = "no emergency passcode configured -- $hint" }
     }
     $actual = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Passcode))).Replace('-', '').ToLowerInvariant()
@@ -3058,9 +3165,9 @@ Set-PimManagerCfgFromEnv 'PIM_ClientId'       'PIM_ClientId'
 Set-PimManagerCfgFromEnv 'PIM_CertThumbprint' 'PIM_CertThumbprint'
 Set-PimManagerCfgFromEnv 'PIM_TenantId'       'PIM_TenantId'
 Set-PimManagerCfgFromEnv 'PIM_ClientSecret'   'PIM_ClientSecret'
-# REQ-F (2026-09-19): the emergency passphrase's key vault. Resolve-PimEmergencyExpectedHash reads the GLOBAL, and
-# nothing mapped the container's env var into it -- so even a Manager with PIM_EmergencyVault set found no passphrase.
-# tools/setup/Set-PimEmergencyPassphrase.ps1 sets the env var; this is what makes the Manager see it.
+# REQ-F (2026-09-19) / SECURE-WEB-1 (3.1.26): the key vault an EARLIER version kept the emergency passphrase in. The
+# Manager NEVER reads it any more (no Key Vault right) -- the name only lets the Settings card say that the passphrase
+# moves into the PIM database once (Get-PimEmergencyPassphraseStatus legacyVault; the updater's converge does the move).
 Set-PimManagerCfgFromEnv 'PIM_EmergencyVault'          'PIM_EmergencyVault'
 Set-PimManagerCfgFromEnv 'PIM_EmergencyPasscodeSecret' 'PIM_EmergencyPasscodeSecret'
 
@@ -4555,14 +4662,64 @@ function Add-PimManagerCommittedAction {
     return [pscustomobject]@{ id = "$($ch.id)"; engine = $eng }
 }
 
+# ---------------------------------------------------------------------------
+# WAKE-1 (framework SECURE-WEB-1 point 1, 3.1.26): the IMMEDIATE start, the safe way. The Manager puts ONE message on the
+# install's wake queue (pim.Settings 'WakeQueue' names the storage account; the queue name is the literal 'pim-wake') with
+# its managed identity -- it holds 'Storage Queue Data Message Sender' on that queue only, and NO job right. The message is
+# the job NAME 'engine' and nothing else (no reason, no command, no argument). The platform starts the event-triggered wake
+# job (caj-pim-wake), which checks the message's age and name itself and runs one normal engine run. Debounced (20 s): a
+# multi-entity commit sends one message. Hosted only; no setting / a refused send = the next scheduled start (never fails).
+# ---------------------------------------------------------------------------
+$script:PimWakeSentAt = $null
+function Get-PimManagerWakeQueue {
+    # pim.Settings 'WakeQueue' (written by setup / the updater once the queue and the wake job are in place) -> the storage
+    # account name, '' when not configured or not a storage account name. The queue name is never read from the setting.
+    $v = $null
+    try { if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $v = Get-PimSetting -Name 'WakeQueue' } } catch { $v = $null }
+    if ($v -is [string]) { $t = "$v".Trim(); if (-not $t) { return '' }; try { $v = $t | ConvertFrom-Json } catch { return '' } }
+    if ($null -eq $v) { return '' }
+    $a = if ($v -is [System.Collections.IDictionary]) { "$($v['account'])" } elseif ($v.PSObject.Properties['account']) { "$($v.account)" } else { '' }
+    $a = $a.Trim()
+    if ($a -cnotmatch '^[a-z0-9]{3,24}$') { return '' }
+    return $a
+}
+function Send-PimManagerWake {
+    # Returns @{ sent; recent; reason }. -Send { param($account) -> Send-PimWakeMessage shape } is a test seam.
+    param([datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Send)
+    $now = $NowUtc.ToUniversalTime()
+    if (-not $script:PimHosted) { return [pscustomobject]@{ sent = $false; recent = $false; reason = 'not hosted' } }
+    $acct = Get-PimManagerWakeQueue
+    if (-not $acct) { return [pscustomobject]@{ sent = $false; recent = $false; reason = 'no wake queue configured' } }
+    if ($script:PimWakeSentAt -and ($now - $script:PimWakeSentAt).TotalSeconds -lt 20) { return [pscustomobject]@{ sent = $true; recent = $true; reason = 'a wake message was sent moments ago' } }
+    if (-not $Send) {
+        if (-not (Get-Command Send-PimWakeMessage -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ sent = $false; recent = $false; reason = 'the wake library is not loaded' } }
+        $Send = { param($a) Send-PimWakeMessage -StorageAccount $a -Kind 'engine' }
+    }
+    $r = $null
+    try { $r = & $Send $acct } catch { $r = @{ ok = $false; reason = "$($_.Exception.Message)" } }
+    if ($r -and $r.ok) {
+        $script:PimWakeSentAt = $now
+        Write-Host "[manager] wake message queued on $acct/pim-wake" -ForegroundColor Cyan
+        return [pscustomobject]@{ sent = $true; recent = $false; reason = 'queued' }
+    }
+    $why = if ($r) { "$($r.reason)" } else { 'no answer' }
+    Write-Warning "[manager] the wake message was not queued ($why) -- the engine picks the work up at its next scheduled start"
+    return [pscustomobject]@{ sent = $false; recent = $false; reason = $why }
+}
+
 function Start-PimManagerTickNow {
     param([string]$Reason = 'manager', [datetime]$NowUtc = [datetime]::UtcNow)
     $now = $NowUtc.ToUniversalTime()
     $nextCron = 'the next scheduled start (within about 5 minutes)'
+    # WAKE-1 (3.1.26): with the wake queue configured, ONE message on it (a job NAME only) -- the event-triggered wake job
+    # starts the engine within a minute. The Manager still starts no job itself and holds no job right.
+    if (Get-Command Send-PimManagerWake -ErrorAction SilentlyContinue) {
+        $wk = $null; try { $wk = Send-PimManagerWake -NowUtc $now } catch { $wk = $null }
+        if ($wk -and $wk.sent) { return [pscustomobject]@{ started = $false; queued = $true; reason = 'queued'; detail = 'queued; the engine starts within a minute' } }
+    }
     # 🔒 SECURE-WEB-1 (framework 12.11f, 2026-11-14): the Manager is INTERNET-FACING and holds NO job right -- a job start accepts
-    # a container override, so the web app could run any command as the engine identity. The Manager never starts a job any
-    # more; the engine picks the committed work up at its next scheduled start. (The wake queue -- a message the engine job
-    # reads, KEDA-triggered, a NAME from its allow-list -- is the next release; until then this is the whole answer.)
+    # a container override, so the web app could run any command as the engine identity. The Manager never starts a job; without
+    # the wake queue the engine picks the committed work up at its next scheduled start.
     if (-not $script:PimManagerMayStartJobs) {
         return [pscustomobject]@{ started = $false; reason = 'scheduled'; detail = "runs on $nextCron" }
     }
@@ -6197,6 +6354,21 @@ function Get-PimManagerMailIdentities {
     return $o
 }
 
+function ConvertTo-PimManagerSmtpPasswordFact {
+    <#
+      PURE. SECURE-WEB-1: the 'smtpPassword' fact of the mail check from the ENGINE's record (pim.Settings
+      'MailSmtpPasswordCheck' @{ readable; reason; vaultName; secretName; at }) -- counted only for THIS relay's vault and
+      secret. Returns @{ readable = $true | $false | $null; reason }. The web app never reads the secret itself.
+    #>
+    param([AllowNull()]$Check, [AllowNull()]$Config)
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    $wait = 'checked by the engine at its test mail (Send test mail queues it; the engine runs within about 5 minutes)'
+    if ($null -eq $Check) { return @{ readable = $null; reason = $wait } }
+    if ("$(& $g $Check 'vaultName')".Trim() -ine "$(& $g $Config 'vaultName')".Trim() -or "$(& $g $Check 'secretName')".Trim() -ine "$(& $g $Config 'secretName')".Trim()) { return @{ readable = $null; reason = "$wait -- the last check was for another vault or secret" } }
+    $rd = "$(& $g $Check 'readable')" -match '(?i)^true$'
+    return @{ readable = [bool]$rd; reason = $(if ($rd) { '' } else { "$(& $g $Check 'reason')".Trim() }); at = "$(& $g $Check 'at')".Trim() }
+}
+
 function Get-PimManagerMailChecks {
     <#
       MAIL CHECK (owner 2026-10-08: "mail is optional, but include it in the get started + home and test exactly what is
@@ -6258,10 +6430,13 @@ function Get-PimManagerMailChecks {
         }
         $facts['identities'] = $idList
         if ($mode -eq 'smtp') {
+            # 🔒 SECURE-WEB-1 (3.1.26): the web app reads NO Key Vault secret. The ENGINE checks whether it can read the relay
+            # password at its test mail (Send test mail queues it) and records only the answer (pim.Settings
+            # 'MailSmtpPasswordCheck', Save-PimMailEngineTestProof); a record for another vault / secret is not counted.
             $relay = ConvertTo-PimSmtpRelayConfig -Value $facts['smtp']
             if ($relay.ok -and "$($relay.config.username)".Trim()) {
-                try { $pw = Get-PimSmtpRelayPassword -Config $relay.config; $facts['smtpPassword'] = @{ readable = [bool]"$pw" ; reason = $(if (-not "$pw") { 'the secret is empty' } else { '' }) }; $pw = $null }
-                catch { $facts['smtpPassword'] = @{ readable = $false; reason = (("$($_.Exception.Message)" -split "`n")[0]).Trim() } }
+                $pc = $null; try { $pc = Get-PimManagerSetting -Name 'MailSmtpPasswordCheck'; if ($pc -is [string]) { try { $pc = $pc | ConvertFrom-Json } catch { $pc = $null } } } catch { $pc = $null }
+                $facts['smtpPassword'] = ConvertTo-PimManagerSmtpPasswordFact -Check $pc -Config $relay.config
             }
         }
     } catch { Write-Verbose "  [mail check] facts incomplete: $($_.Exception.Message)" }
@@ -6372,43 +6547,22 @@ function Get-PimManagerMailState {
     }
 }
 
-function Set-PimManagerVaultSecret {
+function Get-PimManagerSmtpPasswordRefusal {
     <#
-      Write the SMTP relay password into the environment's Key Vault AS THIS MANAGER'S OWN IDENTITY. Returns @{ ok; reason }.
-      Refused (401/403/404 or no network path) = the Manager may not write there -- the page then prints the setup script
-      (Set-PimSmtpRelayPassword.ps1), which a person runs with their own rights. The value is never logged or returned.
-      -Writer is the test seam: param($Vault, $Name, $Value) -> nothing (throws on refusal).
+      PURE. 🔒 SECURE-WEB-1 (framework 12.11f, 3.1.26): the internet-facing web app writes NO Key Vault secret, and a password
+      is never handed through the queue either (a queue entry is stored in SQL and audited). A password typed on the page is
+      therefore NOT stored: the answer names the published script a person runs with their own Key Vault rights
+      (Set-PimSmtpRelayPassword.ps1, browser sign-in). Returns @{ stored = $false; reason; command }.
     #>
-    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [Parameter(Mandatory)][string]$Value, [scriptblock]$Writer)
-    try {
-        if ($Writer) { & $Writer $VaultName $SecretName $Value }
-        else {
-            $tok = Get-PimRestToken -Resource 'https://vault.azure.net'
-            [void](Invoke-RestMethod -Method PUT -Uri ("https://{0}.vault.azure.net/secrets/{1}?api-version=7.4" -f $VaultName, $SecretName) `
-                -Headers @{ Authorization = "Bearer $tok"; 'Content-Type' = 'application/json' } -Body (@{ value = $Value; contentType = 'PIM Manager SMTP relay password' } | ConvertTo-Json) -ErrorAction Stop)
-        }
-        return @{ ok = $true; reason = '' }
-    } catch {
-        $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)".Replace($Value, '***')
-        $why = if ($m -match '(?i)\b403\b|Forbidden') { "this Manager's identity may not write secrets in Key Vault '$VaultName'" }
-               elseif ($m -match '(?i)\b401\b|Unauthorized') { "Key Vault '$VaultName' refused this Manager's sign-in" }
-               elseif ($m -match '(?i)\b404\b|NotFound|could not be resolved|No such host|name or service') { "Key Vault '$VaultName' was not found from this Manager (name, or a private network path)" }
-               else { (($m -split "`n")[0]).Trim() }
-        return @{ ok = $false; reason = $why }
-    }
+    param([AllowNull()]$Setup, [AllowNull()]$Smtp)
+    $cmd = @(); try { $cmd = @(Get-PimMailSetupCommand -Kind smtpPassword -Setup $Setup -Smtp $Smtp) } catch { $cmd = @() }
+    return [ordered]@{ stored = $false
+        reason = 'PIM Manager does not store the password itself. Run the command below (it signs you in with your browser and puts the password in Key Vault), then press Send test mail: the engine checks that it can read it.'
+        command = ($cmd -join "`n") }
 }
 
-function Save-PimManagerMailLastTest {
-    # Record what the latest test mail proved, against WHICH settings (Get-PimMailTestFingerprint): a later change to the
-    # relay or the mailbox makes this proof stale, so the Get Started step is computed from the data, never a stored tick.
-    param([bool]$Ok, [string]$Reason, [string]$To)
-    try {
-        $script:PimMailCheckCache = $null   # MAIL CHECK: a new test result is read again
-        $st = Get-PimManagerMailState -NoChecks
-        $fp = Get-PimMailTestFingerprint -Mode $st.mode -Sender $st.sender -Smtp $st.smtp
-        Set-PimManagerSetting -Name 'MailLastTest' -Value ([ordered]@{ ok = $Ok; fingerprint = $fp; mode = $st.mode; at = (Get-Date).ToUniversalTime().ToString('o'); reason = "$Reason"; to = "$To"; by = (Get-PimManagerActorName) })
-    } catch { Write-Warning "  [mail] the test-mail result could not be recorded: $($_.Exception.Message)" }
-}
+# (SECURE-WEB-1, 3.1.26: the test-mail proof pim.Settings 'MailLastTest' is written by the ENGINE after its test send --
+#  Save-PimMailEngineTestProof, PIM-Notify.ps1 -- because the web app sends no test mail of its own any more.)
 
 function Request-PimManagerMailEngineTest {
     <#
@@ -6417,30 +6571,58 @@ function Request-PimManagerMailEngineTest {
       mail also queues ONE engine test send (pim.Settings 'MailEngineTest', New-PimMailEngineTestRequest) and starts the tick
       through the existing Run-now path (Start-PimManagerTickNow: needs Jobs Operator on the tick job, else the next cron start).
       The engine sends it as its own identity first thing in that run and records the proof as a real send does.
-      Shared mailbox only (the mode with a per-identity send right). Returns @{ queued; started; detail; note }. Never throws.
+      SECURE-WEB-1 (3.1.26): this IS the test mail now (the web app sends none) -- a shared mailbox or an SMTP relay.
+      Returns @{ queued; started; detail; note }. Never throws.
     #>
     param([Parameter(Mandatory)][string]$To)
     $o = [ordered]@{ queued = $false; started = $false; detail = ''; note = '' }
     try {
         $st = Get-PimManagerMailState -NoChecks
-        if ("$($st.mode)" -ne 'sharedMailbox' -or -not "$($st.sender)".Trim()) { $o.detail = 'no engine test: only a shared mailbox has a per-identity send right'; return $o }
-        $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode 'sharedMailbox' -Sender "$($st.sender)"
+        $mode = "$($st.mode)"
+        if ($mode -eq 'sharedMailbox' -and -not "$($st.sender)".Trim()) { $o.detail = 'no sender mailbox is set yet -- save the mail sender first'; $o.note = "Not queued: $($o.detail)"; return $o }
+        if ($mode -eq 'smtp' -and -not $st.smtp) { $o.detail = 'the SMTP relay is not saved yet -- save it first'; $o.note = "Not queued: $($o.detail)"; return $o }
+        if ($mode -notin @('sharedMailbox', 'smtp')) { $o.detail = 'mail is switched off -- choose a shared mailbox or an SMTP relay first'; $o.note = "Not queued: $($o.detail)"; return $o }
+        $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode $mode -Sender $(if ($mode -eq 'smtp') { "$($st.smtp.from)" } else { "$($st.sender)" })
         Set-PimManagerSetting -Name 'MailEngineTest' -Value $rec
         $script:PimMailCheckCache = $null
         $o.queued = $true
         $k = $null; try { $k = Start-PimManagerTickNow -Reason 'mail engine test' } catch { $k = [pscustomobject]@{ started = $false; detail = "$($_.Exception.Message)" } }
         $o.started = [bool]$k.started; $o.detail = "$($k.detail)"
-        $o.note = if ($o.started) { 'Engine test mail queued -- proven in about a minute.' } else { "Engine test mail queued -- the engine sends it at its next run ($($k.detail))." }
+        $o.note = if ($o.started) { 'Test mail queued -- the engine sends it in about a minute.' } else { 'Test mail ' + (Get-PimManagerQueuedMailNote).Substring(0, 1).ToLowerInvariant() + (Get-PimManagerQueuedMailNote).Substring(1) }
     } catch { $o.detail = "the engine test mail could not be queued: $($_.Exception.Message)"; $o.note = "Engine test mail NOT queued: $($_.Exception.Message)" }
     return $o
 }
 
+function Add-PimManagerNotifyRequest {
+    <#
+      🔒 SECURE-WEB-1 (framework 12.11f, 3.1.26): the web app sends NO mail -- its identity holds no Exchange send right. A
+      mail it raises is ONE queued notify request (pim.ChangeQueue, Kind Action, type 'notify-mail', New-PimNotifyMailAction),
+      committed at once through the existing Add-PimManagerCommittedAction; the ENGINE sends it as its own identity at its
+      next run (within about 5 minutes; Invoke-PimQueueNotifyMail). Returns @{ queued; id; reason }. Never throws.
+    #>
+    param([Parameter(Mandatory)][string]$MailType, [hashtable]$Tokens = @{}, [string[]]$Recipients = @(), [object[]]$Attachments = @(), [string]$Event = '')
+    try {
+        $by = "$(try { Get-PimManagerActorName } catch { '' })"; if (-not $by.Trim()) { $by = 'PIM Manager' }
+        $p = New-PimNotifyMailAction -MailType $MailType -Tokens $Tokens -Recipients $Recipients -Attachments $Attachments -Event $Event -RaisedBy $by
+        $qa = Add-PimManagerCommittedAction -Entity 'PIM-Action-NotifyMail' -Key ("{0}|{1}" -f $MailType, $(if ("$Event".Trim()) { "$Event".Trim() } else { [guid]::NewGuid().ToString('N').Substring(0, 8) })) `
+                -Payload ([pscustomobject]$p) -By $by -Justification ("mail '{0}'{1} raised in PIM Manager; the engine sends it" -f $MailType, $(if ("$Event".Trim()) { " ($Event)" } else { '' }))
+        return [pscustomobject]@{ queued = $true; id = "$($qa.id)"; reason = '' }
+    } catch { return [pscustomobject]@{ queued = $false; id = ''; reason = "$(("$($_.Exception.Message)" -split "`n")[0])" } }
+}
+
+function Get-PimManagerQueuedMailNote {
+    # SECURE-WEB-1: the ONE sentence the GUI shows where it used to say "mail sent".
+    param([int]$Recipients = 0)
+    return ("Queued; the engine sends it at its next run (within about 5 minutes)" + $(if ($Recipients -gt 0) { " to $Recipients recipient(s)." } else { '.' }))
+}
+
 function Send-PimManagerAlert {
-    # Fan an alert out to every configured recipient for ONE event type, through the
-    # existing Send-PimNotifyMail path (the 'alert-notice' template). Honours the
-    # per-event toggle, debounces identical repeats within a window, and RECORDS the
-    # outcome to the durable feed (the recorded-send proof -- closes the [M5] residual).
-    # Returns @{ event; fired; sent; recipients; reason; recorded; debounced }.
+    # Fan an alert out to every configured recipient for ONE event type. SECURE-WEB-1 (3.1.26): the web app sends no mail
+    # itself -- the mail part is ONE queued notify request (Add-PimManagerNotifyRequest, the 'alert-notice' template) that
+    # the ENGINE sends at its next run. Honours the per-event toggle, debounces identical repeats within a window, and
+    # RECORDS the outcome to the durable feed (the recorded-send proof -- closes the [M5] residual).
+    # Returns @{ event; fired; sent; queued; queueId; recipients; reason; recorded; debounced } (sent counts a delivered
+    # webhook only; queued = the recipients the engine will mail).
     # NEVER throws -- alerting must not take the Manager down.
     param(
         [Parameter(Mandatory)][string]$Event,
@@ -6461,9 +6643,9 @@ function Send-PimManagerAlert {
     )
     $cfg = Get-PimAlertingConfig
     $webhookOn = [bool]$cfg.webhookEnabled
-    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; recipients = @($cfg.recipients); reason = ''; recorded = $false; debounced = $false; webhookKind = "$($cfg.webhookKind)"; webhookSent = $false }
+    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; queued = 0; queueId = ''; recipients = @($cfg.recipients); reason = ''; recorded = $false; debounced = $false; webhookKind = "$($cfg.webhookKind)"; webhookSent = $false }
     if (-not ($cfg.events.ContainsKey($Event) -and $cfg.events[$Event])) { $result.reason = 'event disabled'; return $result }
-    $mailPossible = (@($cfg.recipients).Count -gt 0 -and (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue))
+    $mailPossible = (@($cfg.recipients).Count -gt 0 -and (Get-Command Add-PimManagerNotifyRequest -ErrorAction SilentlyContinue))
     # The alert can deliver via mail and/or the outbound webhook. Only bail when
     # NEITHER channel is configured (no recipients/notify path AND no webhook).
     if (-not $mailPossible -and -not $webhookOn) {
@@ -6502,15 +6684,16 @@ function Send-PimManagerAlert {
     if ($mailPossible -and -not $IgnoreNotifications -and (Get-Command Select-PimNotificationRecipients -ErrorAction SilentlyContinue)) {
         try { $alertRcpts = @((Select-PimNotificationRecipients -Prefs (Get-PimMailNotificationPrefsFromStore) -Recipients $alertRcpts -Type $Event -Kind 'alert').keep) } catch { $alertRcpts = @($cfg.recipients) }
     }
-    if ($mailPossible) {
-        foreach ($rcpt in $alertRcpts) {
-            try {
-                $r = if ($WhatIf) { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt -WhatIf } else { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt }
-                if ($r.sent) { $sent++ } elseif ($r.reason) { $lastReason = "$($r.reason)" }
-            } catch { $lastReason = "$($_.Exception.Message)" }
+    if ($mailPossible -and @($alertRcpts).Count) {
+        if ($WhatIf) { $lastReason = 'whatif -- nothing queued' }
+        else {
+            # SECURE-WEB-1: ONE queued request for every recipient left after their Notifications; the engine mails them
+            $q = Add-PimManagerNotifyRequest -MailType 'alert-notice' -Tokens $tokens -Recipients @($alertRcpts) -Event $Event
+            if ($q.queued) { $result.queued = @($alertRcpts).Count; $result.queueId = "$($q.id)" } else { $lastReason = "mail not queued: $($q.reason)" }
         }
-    }
+    } elseif ($mailPossible) { $lastReason = 'every recipient switched this alert off (Notifications)' }
     $result.sent = $sent
+    if ($result.queued -gt 0 -and -not $result.reason) { $result.reason = (Get-PimManagerQueuedMailNote -Recipients $result.queued) }
     # SECOND channel: fire the outbound webhook (Teams / generic JSON) when configured.
     # Independent of mail -- a webhook-only alert is valid. Its outcome folds into the
     # recorded proof (sent count includes a delivered webhook so the feed reflects it).
@@ -6527,9 +6710,9 @@ function Send-PimManagerAlert {
     if ($result.sent -eq 0 -and -not $result.reason) { $result.reason = $(if ($lastReason) { $lastReason } else { 'rendered only (no sender / whatif)' }) }
     # A clean human note covering BOTH channels for the feed's reason line.
     if ($webhookOn -and (Get-Command Get-PimChannelDedupeNote -ErrorAction SilentlyContinue)) {
-        try { $result.reason = (Get-PimChannelDedupeNote -MailSent $sent -WebhookKind "$($cfg.webhookKind)" -WebhookState $webhookState) + $(if ("$($result.reason)".Trim() -and $result.sent -eq 0) { " ($($result.reason))" } else { '' }) } catch {}
+        try { $result.reason = (Get-PimChannelDedupeNote -MailSent $sent -WebhookKind "$($cfg.webhookKind)" -WebhookState $webhookState) + $(if ($result.queued -gt 0) { "; mail: $($result.queued) queued for the engine" } else { '' }) + $(if ("$($result.reason)".Trim() -and $result.sent -eq 0) { " ($($result.reason))" } else { '' }) } catch {}
     }
-    try { Write-PimManagerAuditEvent -Action 'alert.send' -Target "event:$Event" -After ([ordered]@{ fired = $result.fired; sent = $result.sent; recipients = @($cfg.recipients).Count; webhook = "$($cfg.webhookKind)"; webhookSent = [bool]$result.webhookSent; reason = "$($result.reason)" }) -Result $(if ($result.sent -gt 0) { 'ok' } else { 'noop' }) } catch {}
+    try { Write-PimManagerAuditEvent -Action 'alert.send' -Target "event:$Event" -After ([ordered]@{ fired = $result.fired; sent = $result.sent; queued = $result.queued; queueId = "$($result.queueId)"; recipients = @($cfg.recipients).Count; webhook = "$($cfg.webhookKind)"; webhookSent = [bool]$result.webhookSent; reason = "$($result.reason)" }) -Result $(if ($result.sent -gt 0 -or $result.queued -gt 0) { 'ok' } else { 'noop' }) } catch {}
     # Record the recorded-send PROOF to the durable feed (the [M5] residual fix): a
     # break-glass "owners notified" claim is now backed by a feed entry showing
     # exactly who was notified and whether delivery was recorded.
@@ -7448,6 +7631,24 @@ function Invoke-PimManagerCsvPut {
         return 403
     }
     $body = $PutBody
+    # TRUST-1 round 5 G4 (NEGATIVE): rows the page staged FROM a finding (a Coverage proposal, a Drift Import) carry their source
+    # key (body.sourceKeys). At COMMIT each is checked again: a source that is no longer from today (carried / stale), or that
+    # cannot be checked, refuses the whole commit (409) -- staging it earlier from today's data is not enough.
+    $__sk = $null
+    if ($null -ne $body) { if ($body -is [System.Collections.IDictionary]) { if ($body.Contains('sourceKeys')) { $__sk = $body['sourceKeys'] } } elseif ($body.PSObject.Properties['sourceKeys']) { $__sk = $body.sourceKeys } }
+    $__skL = @(@($__sk) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    # round 6 F2: the SERVER's own record decides -- the source keys stored WITH the staged changes of this entity in the shared
+    # pending store (whoever staged them, whatever this browser sends). A store that cannot be read refuses (cannot tell).
+    if ($script:PimSqlCs -and (Get-Command Read-PimSharedPendingStore -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSharedPendingSourceKeys -ErrorAction SilentlyContinue)) {
+        $__spDoc = $null
+        try { $__spDoc = (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc }
+        catch { Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; base = $base; carried = $true; error = "Could not check whether the staged rows are current (the shared pending changes could not be read: $($_.Exception.Message)) -- nothing was committed. Try again." }); return 409 }
+        $__skL = @(@($__skL) + @(Get-PimSharedPendingSourceKeys -Doc $__spDoc -Base $base) | Where-Object { "$_".Trim() } | Select-Object -Unique)
+    }
+    if ($__skL.Count) {
+        $__tsr = Get-PimTrustStagedSourceRefusal -Keys $__skL
+        if ($__tsr) { Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; base = $base; carried = $true; error = $__tsr }); return 409 }
+    }
     # 🔴 §77.24 (a test tenant 2026-09-21: "409: This commit would EMPTY the entity (was 67 row(s), would be 0)"): a body
     # WITHOUT a rows array (absent / null -- a second, overlapping commit sent pendingFinalRows() = null) was read
     # as "replace the entity with nothing" and answered with the mass-disable warning. It is a malformed request:
@@ -11753,6 +11954,9 @@ function Get-PimActiveAssignmentsCached {
         if ($st.stamps.ContainsKey('active-assignments')) { $stamp = "$($st.stamps['active-assignments'])" }
         elseif ($readErr) { $readErr = '' }   # no row at all: it IS missing, whatever the read said
     }
+    # TRUST-1 (review finding 4): the header's lastRun mark changes the document, not RefreshedUtc -- the stamp the page keys
+    # on carries the row's change time too (UpdatedUtc), so a new mark is seen. RefreshedUtc stays the "as of".
+    if ($stamp -and (Get-Command Get-PimTenantCacheChangeStamp -ErrorAction SilentlyContinue)) { $chg = Get-PimTenantCacheChangeStamp -Kind 'active-assignments'; if ($chg) { $stamp = "$stamp|c$chg" } }
     if ($readErr -and (Get-Command ConvertTo-PimActiveAssignmentsReadErrorText -ErrorAction SilentlyContinue)) { $readErr = "$(ConvertTo-PimActiveAssignmentsReadErrorText -Message $readErr)" }
     $missing = ($null -eq $entry -and -not $readErr)
     $queued = $false; $qErr = ''
@@ -11824,6 +12028,9 @@ function Get-PimActiveAssignmentsState {
             else { $err = "$($st.error)" }
         } catch { $err = "$($_.Exception.Message)" }
     } else { $err = 'the tenant cache is not loaded in this process' }
+    # TRUST-1 (review finding 4): the same change-aware stamp as Get-PimActiveAssignmentsCached (refreshedUtc stays the "as of")
+    $snapStamp = $stamp
+    if ($stamp -and (Get-Command Get-PimTenantCacheChangeStamp -ErrorAction SilentlyContinue)) { $chg = Get-PimTenantCacheChangeStamp -Kind 'active-assignments'; if ($chg) { $snapStamp = "$stamp|c$chg" } }
     $rs = $null
     if (Get-Command Read-PimActiveAssignmentsRefreshState -ErrorAction SilentlyContinue) { try { $rs = Read-PimActiveAssignmentsRefreshState -NowUtc $NowUtc } catch { $rs = $null } }
     $pending = ($null -ne $rs -and [bool]$rs.pending)
@@ -11834,7 +12041,7 @@ function Get-PimActiveAssignmentsState {
         ok              = (-not $err)
         state           = $true
         refreshedUtc    = $(if ($stamp) { $stamp } else { $null })
-        snapshotStamp   = $stamp
+        snapshotStamp   = $snapStamp
         snapshotMissing = (-not $exists -and -not $err)
         refreshPending  = [bool]$pending
         refreshState    = $(if ($pending) { "$($rs.state)" } else { '' })
@@ -12136,7 +12343,9 @@ function Get-PimActiveAssignmentsResponseCacheKey {
     } catch { return '' }
     $store = ''
     if (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue) { $store = "$(Get-PimTenantCacheStoreCs)" }
-    return (@($store, "$($st.stamps['active-assignments'])", $ml, "$cad", $bg) -join '|')
+    # TRUST-1 (review finding 4): + the row's change time, so a lastRun mark (document only, RefreshedUtc unchanged) is a new key
+    $chg = ''; if (Get-Command Get-PimTenantCacheChangeStamp -ErrorAction SilentlyContinue) { $chg = "$(Get-PimTenantCacheChangeStamp -Kind 'active-assignments')" }
+    return (@($store, "$($st.stamps['active-assignments'])", $ml, "$cad", $bg, $chg) -join '|')
 }
 
 function Get-PimActiveAssignmentsResponseCacheLookup {
@@ -12276,6 +12485,105 @@ function Test-PimManagerQueueEntryNeedsOwnCommit {
     $p = if ($Entry -is [System.Collections.IDictionary]) { $Entry['payload'] } else { $Entry.payload }
     $t = if ($null -eq $p) { '' } elseif ($p -is [System.Collections.IDictionary]) { "$($p['type'])" } elseif ($p.PSObject.Properties['type']) { "$($p.type)" } else { '' }
     return ($t -eq 'group-delete')
+}
+
+function Get-PimTrustStagedSourceRefusal {
+    <#
+      TRUST-1 round 5 G4 + G5 / H7. The plain reason (409) why rows staged FROM a finding may not be committed NOW, or ''. -Keys
+      are the page's source keys: 'coverage:<row key>' (a Discovery & gaps proposal: its row must not be carried / stale in the
+      stored report as it is now) and 'drift:<scope>|<key>' (a Drift Import: its area must have been compared this run). FAIL-
+      CLOSED: a store that could not be read, or a key of an unknown kind, refuses. -Coverage { -> view } / -Drift { param($keys)
+      -> reason }: test seams.
+    #>
+    param([AllowNull()][string[]]$Keys, [scriptblock]$Coverage = $null, [scriptblock]$Drift = $null)
+    $cov = @(); $dr = @(); $bad = @()
+    foreach ($k in @($Keys)) {
+        $t = "$k".Trim(); if (-not $t) { continue }
+        if ($t -like 'coverage:*') { $cov += $t.Substring(9) } elseif ($t -like 'drift:*') { $dr += $t.Substring(6) } else { $bad += $t }
+    }
+    if ($bad.Count) { return "These rows were staged from a finding that cannot be checked ($($bad[0])) -- nothing was committed. Stage them again from the page." }
+    if ($cov.Count) {
+        if (-not $Coverage) {
+            if (-not (Get-Command Get-PimCoverageCached -ErrorAction SilentlyContinue)) { return 'Whether the Discovery & gaps rows these were staged from are current could not be checked (the coverage report is not loaded here) -- nothing was committed. Try again.' }
+            $Coverage = { Get-PimCoverageCached }
+        }
+        $v = $null; try { $v = & $Coverage } catch { return "Could not check whether the Discovery & gaps rows these were staged from are current ($($_.Exception.Message)) -- nothing was committed. Try again." }
+        $re = "$(if ($null -ne $v) { $v['reportReadError'] })".Trim()
+        if ($re) { return "Could not check whether the Discovery & gaps rows these were staged from are current ($re) -- nothing was committed. Try again." }
+        $byKey = @{}; foreach ($r in @($v['rows'])) { if ($null -eq $r) { continue }; $rk = "$(if ($r -is [System.Collections.IDictionary]) { $r['key'] } else { $r.key })"; if ($rk) { $byKey[$rk] = $r } }
+        foreach ($ck in $cov) {
+            if (-not $byKey.ContainsKey($ck)) { continue }   # a row that is gone is no carried row (the commit's own checks judge the rows)
+            $r = $byKey[$ck]
+            $car = [bool]$(if ($r -is [System.Collections.IDictionary]) { $r['carried'] } else { $r.carried })
+            if ($car) {
+                $w = "$(if ($r -is [System.Collections.IDictionary]) { $r['workload'] } else { $r.workload })"; $from = "$(if ($r -is [System.Collections.IDictionary]) { $r['carriedFromUtc'] } else { $r.carriedFromUtc })"
+                return "These rows were staged from Discovery & gaps, but $w is no longer from today: it was not read this run and is shown from the last complete read$(if ($from) { " ($from)" }). Nothing was committed -- commit them once it is read again."
+            }
+        }
+    }
+    if ($dr.Count) {
+        if (-not $Drift) {
+            if (-not (Get-Command Get-PimDriftStoredRefusal -ErrorAction SilentlyContinue)) { return 'Whether the Drift items these were staged from are current could not be checked (the drift snapshot code is not loaded here) -- nothing was committed. Try again.' }
+            $Drift = { param($ks) Get-PimDriftStoredRefusal -SelectKeys $ks }
+        }
+        $why = ''; try { $why = "$(& $Drift $dr)" } catch { $why = "Could not check whether the Drift items these were staged from are current ($($_.Exception.Message)) -- nothing was committed. Try again." }
+        if ($why) { return $why }
+    }
+    return ''
+}
+
+function Get-PimTrustQueueCommitRefusal {
+    <#
+      TRUST-1 round 5 G4 (NEGATIVE): a STAGED revoke / group delete is checked again at COMMIT against the data as it is NOW --
+      a revoke whose source row ('<type>:<id>', payload.sourceRowId) is carried / stale in the stored snapshot
+      (Get-PimActiveAssignmentsCarriedRows), a Drift Delete ('scope|key') or a group delete (payload.groupId) of an area not
+      compared this run (Get-PimDriftStoredRefusal). "Cannot tell" refuses. Returns $null or { status = 409; body }.
+      -Carried { param($ids) -> Get-PimActiveAssignmentsCarriedRows shape } / -Drift { param($scope, $keys, $groupId) -> reason }:
+      test seams.
+    #>
+    param([string[]]$Ids = @(), [object[]]$Entries = @(), [scriptblock]$Carried = $null, [scriptblock]$Drift = $null, [scriptblock]$FindRows = $null)
+    $want = @{}; foreach ($i in @($Ids)) { if ("$i".Trim()) { $want["$i".Trim().ToLowerInvariant()] = $true } }
+    $aaIds = [System.Collections.Generic.List[string]]::new(); $drKeys = [System.Collections.Generic.List[string]]::new(); $gids = [System.Collections.Generic.List[string]]::new()
+    foreach ($e in @($Entries)) {
+        if ($null -eq $e -or -not $want.ContainsKey("$($e.id)".Trim().ToLowerInvariant())) { continue }
+        $p = $e.payload; if ($p -is [string]) { try { $p = $p | ConvertFrom-Json } catch { $p = $null } }
+        $pv = { param($n) if ($null -eq $p) { '' } elseif ($p -is [System.Collections.IDictionary]) { "$($p[$n])" } elseif ($p.PSObject.Properties[$n]) { "$($p.$n)" } else { '' } }
+        if ("$($e.entity)" -eq 'PIM-Action-Revoke') {
+            $src = (& $pv 'sourceRowId').Trim()
+            if ($src.Contains('|')) { $drKeys.Add($src) } elseif ($src) { $aaIds.Add($src) }
+            else {
+                # round 6 F8: staged BEFORE this release (no sourceRowId) -- the stored row is found from the payload itself
+                # (Find-PimActiveAssignmentsRowIdsForPayload); none found = '<type>:' so a part the newest run did not read is
+                # still refused by its type
+                $fr = $null
+                if ($FindRows) { try { $fr = @(& $FindRows $p) } catch { $fr = $null } }
+                elseif (Get-Command Find-PimActiveAssignmentsRowIdsForPayload -ErrorAction SilentlyContinue) { try { $fr = @(Find-PimActiveAssignmentsRowIdsForPayload -Payload $p) } catch { $fr = $null } }
+                if ($null -eq $fr) { return (& { [ordered]@{ status = 409; body = [ordered]@{ ok = $false; carried = $true; error = 'Nothing was committed: whether a staged revoke is current could not be checked (its stored row could not be looked up). Try again.' } } }) }
+                foreach ($x in $fr) { if ("$x".Trim()) { $aaIds.Add("$x".Trim()) } }
+            }
+        }
+        if ("$($e.entity)" -eq 'PIM-Action-GroupDelete' -or (& $pv 'type') -eq 'group-delete') { $g = (& $pv 'groupId').Trim(); if ($g) { $gids.Add($g) } }
+    }
+    $refuse = { param($msg) [ordered]@{ status = 409; body = [ordered]@{ ok = $false; carried = $true; error = $msg } } }
+    if ($aaIds.Count) {
+        if (-not $Carried) { if (Get-Command Get-PimActiveAssignmentsCarriedRows -ErrorAction SilentlyContinue) { $Carried = { param($ids) Get-PimActiveAssignmentsCarriedRows -Ids $ids } } }
+        if ($Carried) {
+            $st = $null; try { $st = & $Carried @($aaIds.ToArray()) } catch { $st = [pscustomobject]@{ known = $false; rows = @{}; error = "$($_.Exception.Message)" } }
+            if (-not (Get-Command Get-PimRevokeCarriedRefusal -ErrorAction SilentlyContinue)) { return (& $refuse 'Nothing was committed: whether the staged revokes are current could not be checked (the snapshot code is not loaded here). Try again.') }
+            $ref = Get-PimRevokeCarriedRefusal -Rows @($aaIds | ForEach-Object { [pscustomobject]@{ id = $_ } }) -Stored $st
+            # round 6 F8: the revoke refusal's own sentence, with its "Nothing was queued" said as "Nothing was committed" (once)
+            if ($null -ne $ref) { $b = $ref.body; $b['error'] = "$($b['error'])" -replace 'Nothing was queued', 'Nothing was committed' -replace 'nothing was queued', 'nothing was committed'; return [ordered]@{ status = 409; body = $b } }
+        } else { return (& $refuse 'Nothing was committed: whether the staged revokes are current could not be checked (the snapshot reader is not loaded here). Try again.') }
+    }
+    if ($drKeys.Count -or $gids.Count) {
+        if (-not $Drift) {
+            if (-not (Get-Command Get-PimDriftStoredRefusal -ErrorAction SilentlyContinue)) { return (& $refuse 'Nothing was committed: whether the staged Drift actions are current could not be checked (the drift snapshot code is not loaded here). Try again.') }
+            $Drift = { param($ks, $g) if ($g) { Get-PimDriftStoredRefusal -GroupId $g } else { Get-PimDriftStoredRefusal -SelectKeys $ks } }
+        }
+        if ($drKeys.Count) { $w = ''; try { $w = "$(& $Drift @($drKeys.ToArray()) '')" } catch { $w = "Could not check whether this item is current ($($_.Exception.Message)) -- nothing was done. Try again." }; if ($w) { return (& $refuse $w) } }
+        foreach ($g in $gids) { $w = ''; try { $w = "$(& $Drift @() $g)" } catch { $w = "Could not check whether this item is current ($($_.Exception.Message)) -- nothing was done. Try again." }; if ($w) { return (& $refuse $w) } }
+    }
+    return $null
 }
 
 function Split-PimManagerQueueCommitIds {
@@ -13291,6 +13599,10 @@ function Invoke-PimActiveAssignmentRevokeBatch {
             # The engine selects the ACTIVE or ELIGIBLE removal from this field -- set it from the row
             # AFTER the names merge so nothing can blank it.
             $payload['assignmentType'] = $(if ($isEligible) { 'Eligible' } elseif ($rowAssignType) { $rowAssignType } else { 'Active' })
+            # TRUST-1 round 5 G4: the staged revoke carries the SOURCE row it was staged from (the snapshot's '<type>:<id>', or a
+            # Drift Delete's 'scope|key'), so the COMMIT checks it again (Get-PimTrustQueueCommitRefusal) -- a row that is no
+            # longer from today when the commit is pressed is refused there too. Not part of the key (de-dupe unchanged).
+            if ($rowId) { $payload['sourceRowId'] = $rowId }
 
             # Entity/key are the queue's natural addressing. The key identifies WHAT is being
             # revoked so two operators queuing the same revoke are visibly the same target.
@@ -13693,7 +14005,16 @@ function Invoke-Server {
         $posture = Test-PimHostedAuthPosture -Hosted ([bool]$script:PimHosted) -AuthLayer $bootLayer
         $pc = 'Green'; if (-not $posture.ok) { $pc = 'Yellow' }
         Write-Host ("  [auth] posture={0}" -f $posture.level) -ForegroundColor $pc
-        foreach ($ln in ("$($posture.message)" -split "`r?`n")) { Write-Host ("  [auth] " + $ln) -ForegroundColor $pc }
+        foreach ($ln in ("$($posture.message)" -split "`r?`n")) { if ($ln.Trim()) { Write-Host ("  [auth] " + $ln) -ForegroundColor $pc } }
+        # AUTH-MODERN-1 / WEB-AUTH-SELF-CHECK-1 (framework, binding): BEFORE the listener opens, the token library (Microsoft.
+        # IdentityModel, hash-pinned) is loaded and proven end to end on three made-up tokens through the SAME function the
+        # requests use (accepted / another key refused / alg none refused). Any deviation = one red line and EXIT 1: the
+        # revision is unhealthy and serves no request (fail closed). OK = exactly one line, read back by ops at ring 0.
+        if ($script:PimHosted) {
+            $im = if (Get-Command Test-PimIdentityModelSelfCheck -ErrorAction SilentlyContinue) { Test-PimIdentityModelSelfCheck } else { @{ ok = $false; line = '[auth] token library self-check FAILED: PIM-TokenValidation.ps1 is not loaded -- refusing to start (fail closed)' } }
+            Write-Host ("  " + $im.line) -ForegroundColor $(if ($im.ok) { 'Green' } else { 'Red' })
+            if (-not $im.ok) { exit 1 }
+        }
     } elseif ($script:PimHosted) {
         Write-Host "  [auth] posture=UNKNOWN -- PIM-HostedAuth.ps1 not loaded; hosted principals will be REFUSED (failing closed)." -ForegroundColor Red
     }
@@ -13836,6 +14157,8 @@ function Invoke-Server {
             # hangs names itself; the completion line below is written only when it ends.
             if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { Write-Host ("  [{0}] {1,-6} {2} ... started" -f $started.ToString('HH:mm:ss'), $ctx.Request.HttpMethod, $ctx.Request.Url.AbsolutePath) -ForegroundColor DarkGray }
             # Hosted: capture THIS request's Easy Auth principal for role resolution.
+            # AUTH-MODERN-1: which token proved THIS request (bearer | access-token | id-token-fallback | '') and the token itself
+            $script:CurrentRequestTokenPath = ''; $script:CurrentRequestToken = ''; $script:CurrentRequestTokenKind = ''
             $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
             if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null; $script:CurrentRequestOid = '' } }
             # §98: the other names + group claim of THIS request's (already trusted) principal, for the demo-group check only.
@@ -13864,6 +14187,7 @@ function Invoke-Server {
             # PIM 93.4: every application call that was let in is audited with its app id, role, route and answer
             if ($script:CurrentRequestApp) { Write-PimManagerAppCallAudit -Status ([int]$status) }
             $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
+            $script:CurrentRequestTokenPath = ''; $script:CurrentRequestToken = ''; $script:CurrentRequestTokenKind = ''
             $global:PIM_SignedRequestCapture = $null
             # SEC-90: bind Manager access entries to their Entra object id (self-throttled to once an hour; never throws)
             try { [void](Invoke-PimManagerAccessObjectIdBackfill) } catch { }
@@ -15344,6 +15668,9 @@ function Handle-Request {
             try { $dcb = Get-PimManagerDelegatedContext; if ($dcb.isDelegated) { $roleBoot = @{ role = 'Delegated'; identity = $roleBoot.identity; source = $dcb.source; derived = $true } } } catch { }
         }
         try { $roleBoot['accessBootstrap'] = (Get-PimManagerAccessBootstrapState) } catch { }
+        # SIGNIN-SWITCH (3.1.26): a signed-in person whom nobody granted a role (the fail-closed Reader) is offered "Sign in
+        # with another account" -- Microsoft's built-in sign-in is in front of every hosted Manager (prompt=select_account)
+        try { $roleBoot['noGrant'] = (Test-PimManagerNoGrant -Role $roleBoot); if ($roleBoot['noGrant']) { $roleBoot['switchAccountUrl'] = (Get-PimManagerSwitchAccountUrl) } } catch { }
         # §98: the demo banner renders before first paint (on = demo mode; viewer = THIS person is a demo viewer).
         try { $roleBoot['demoMode'] = (Get-PimManagerDemoBoot) } catch { $roleBoot['demoMode'] = @{ on = $false } }
         $roleJson = ($roleBoot | ConvertTo-Json -Compress -Depth 4)
@@ -15478,7 +15805,8 @@ function Handle-Request {
     }
 
     # ---- REQ 93 -- the MCP server (Pro 'mcp.server'): POST /mcp, one JSON-RPC message per request ----------------------
-    # Hosted: the caller sends `Authorization: Bearer <Entra access token for api://<app>/mcp.access>` and the Manager
+    # Hosted: the caller sends `Authorization: Bearer <Entra access token for api://<app>/user_impersonation>` (AUTH-MODERN-1;
+    # mcp.access from earlier MCP setups is still accepted) and the Manager
     # VERIFIES IT ITSELF (Resolve-PimMcpBearer: tenant JWKS signature, pinned issuer + audience, a delegated scope, the
     # user from the token) -- 🔴 BUG-283: Easy Auth alone let an app-only token in as Reader. Because the token is the
     # proof, /mcp can be an Easy Auth excludedPath (Set-PimManagerMcpAuth.ps1) and answer 401 + WWW-Authenticate with the
@@ -15488,7 +15816,11 @@ function Handle-Request {
     if ($path -like '/.well-known/oauth-protected-resource*' -and $method -eq 'GET') {
         $mc = Get-PimManagerMcpAuthConfig -Request $req
         if (-not $script:PimHosted -or -not $mc.configured) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'not found' }; return 404 }
-        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ resource = $mc.resource; authorization_servers = @($mc.authorizationServer); scopes_supported = @($mc.scope); bearer_methods_supported = @('header'); resource_name = 'PIM Manager (MCP)' })
+        # RFC 9728 protected-resource metadata: this tenant's Entra v2 authorization server, scope api://<id>/user_impersonation
+        # RFC 9728 3.3: the document at /.well-known/oauth-protected-resource<suffix> describes the resource <origin><suffix>
+        $rmRes = if ($path -eq '/.well-known/oauth-protected-resource/mcp') { $mc.resource } elseif ($path -eq '/.well-known/oauth-protected-resource') { $mc.origin } else { '' }
+        if (-not $rmRes) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'not found' }; return 404 }
+        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ resource = $rmRes; authorization_servers = @($mc.authorizationServer); scopes_supported = @($mc.scope); bearer_methods_supported = @('header'); resource_name = 'PIM Manager (MCP)' })
         return 200
     }
     if ($path -eq '/mcp') {
@@ -15498,7 +15830,7 @@ function Handle-Request {
             $mc = Get-PimManagerMcpAuthConfig -Request $req
             $bv = if (Get-Command Resolve-PimMcpBearer -ErrorAction SilentlyContinue) {
                 $jw = if ($ah -match '^\s*Bearer\s+\S' -and $mc.configured) { Get-PimEntraJwks } else { $null }
-                Resolve-PimMcpBearer -Authorization $ah -Jwks $jw -ExpectedIssuers $mc.issuers -ExpectedAudiences $mc.audiences
+                Resolve-PimMcpBearer -Authorization $ah -Jwks $jw -ExpectedIssuers $mc.issuers -ExpectedAudiences $mc.audiences -TenantId "$($mc.tenantId)" -Scopes @($mc.scopes)
             } else { @{ ok = $false; status = 503; identity = ''; reason = 'PIM-HostedAuth.ps1 not loaded (refused)' } }
             # never the edge headers on this path: from here on the request's principal is the VERIFIED token's user, or nobody
             $script:CurrentRequestPrincipal = if ($bv.ok) { "$($bv.identity)" } else { $null }
@@ -15513,6 +15845,7 @@ function Handle-Request {
             if (-not $bv.ok) {
                 if ($ah) { Write-Host ("  [mcp] REFUSED ({0}) -- {1}" -f $bv.status, $bv.reason) -ForegroundColor Red }
                 if ([int]$bv.status -eq 401) {
+                    # RFC 9728 / the MCP authorization spec: the 401 names the protected-resource metadata (the discovery URL)
                     $wa = 'Bearer realm="pim-manager"'
                     if ($mc.configured) { $wa += ", resource_metadata=`"$($mc.metadataUrl)`", scope=`"$($mc.scope)`"" }
                     if ($ah) { $wa += ', error="invalid_token"' }
@@ -15520,6 +15853,8 @@ function Handle-Request {
                     Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = "$($bv.reason) -- send Authorization: Bearer <a token for $($mc.scope)>" }
                     return 401
                 }
+                # a VALID person's token without the scope: 403 insufficient_scope, with the same discovery hint
+                if ([int]$bv.status -eq 403 -and $mc.configured) { try { $resp.AddHeader('WWW-Authenticate', ('Bearer realm="pim-manager", error="insufficient_scope", resource_metadata="{0}", scope="{1}"' -f $mc.metadataUrl, $mc.scope)) } catch { } }
                 Write-JsonResponse -Response $resp -Status ([int]$bv.status) -Body @{ error = $(if ([int]$bv.status -eq 403) { 'forbidden' } else { 'unavailable' }); detail = "$($bv.reason)" }
                 return [int]$bv.status
             }
@@ -15594,6 +15929,50 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; ts = (Get-Date).ToUniversalTime().ToString('o') }
             return 200
+        }
+
+        # ---- MANAGER-CHAT-1 (owner 2026-11-15: "so i can chat and ask for actions") -- the AI chat in the Manager --------
+        # Pro 'ai.chat', off by default. The caller is the one this request resolved (the same as every /api route); the
+        # model reaches PIM only through the MCP tools of that caller's role (read + propose), dispatched exactly as /mcp
+        # does. A change is prepared, never saved. Bodies: _proroutes.ps1 (Pro); core: engine/ai-chat/PIM-AiChat.ps1 (Pro).
+        if ($path -eq '/api/chat' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Reader')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'A PIM Manager role (Reader or higher) is required to use the AI chat.' }; return 403 }
+            if (-not (Get-Command Invoke-PimAiChat -ErrorAction SilentlyContinue) -or -not (Get-Command Invoke-PimManagerAiChatTurn -ErrorAction SilentlyContinue) -or -not (Get-Command Invoke-PimMcpMessage -ErrorAction SilentlyContinue)) { return (Write-PimManagerProOnly -Response $resp -Status 503 -Feature 'ai.chat') }
+            if (-not (Test-PimManagerProFeature -Key 'ai.chat' -Response $resp)) { return 403 }
+            if ("$($req.ContentType)" -notmatch '^(?i)application/json') { Write-JsonResponse -Response $resp -Status 415 -Body @{ error = 'Content-Type must be application/json' }; return 415 }
+            $chatBody = $null
+            try { $chatBody = Read-RequestJson -Request $req } catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'the request is not JSON' }; return 400 }
+            $chatTurn = Invoke-PimManagerAiChatTurn -Body $chatBody
+            Write-JsonResponse -Response $resp -Status ([int]$chatTurn.status) -Body $chatTurn.body
+            return [int]$chatTurn.status
+        }
+        if ($path -eq '/api/chat/status' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Reader')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'A PIM Manager role (Reader or higher) is required.' }; return 403 }
+            if (-not (Get-Command Invoke-PimAiChat -ErrorAction SilentlyContinue) -or -not (Get-Command Get-PimManagerAiChatStatusBody -ErrorAction SilentlyContinue)) { return (Write-PimManagerProOnly -Response $resp -Status 503 -Feature 'ai.chat') }
+            # the readiness proof (a token + one tiny completion) is for Admin and up only
+            $chatCheck = ("$($req.QueryString['check'])" -match '^(?i:1|true)$')
+            if ($chatCheck -and -not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to run the AI chat readiness check.' }; return 403 }
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerAiChatStatusBody -Check:$chatCheck)
+            return 200
+        }
+        if ($path -eq '/api/settings/ai-chat' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Reader')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'A PIM Manager role (Reader or higher) is required.' }; return 403 }
+            if (-not (Get-Command Invoke-PimAiChat -ErrorAction SilentlyContinue) -or -not (Get-Command Get-PimManagerAiChatSettingsBody -ErrorAction SilentlyContinue)) { return (Write-PimManagerProOnly -Response $resp -Status 503 -Feature 'ai.chat') }
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerAiChatSettingsBody)
+            return 200
+        }
+        if ($path -eq '/api/settings/ai-chat' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the AI chat settings.' }; return 403 }
+            if (-not (Get-Command Invoke-PimAiChat -ErrorAction SilentlyContinue) -or -not (Get-Command Set-PimManagerAiChatSettingsFromBody -ErrorAction SilentlyContinue)) { return (Write-PimManagerProOnly -Response $resp -Status 503 -Feature 'ai.chat') }
+            if (-not (Test-PimManagerProFeature -Key 'ai.chat' -Response $resp)) { return 403 }
+            $aiSet = $null
+            try { $aiSet = Set-PimManagerAiChatSettingsFromBody -Body (Read-RequestJson -Request $req) } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the AI chat settings could not be saved: $($_.Exception.Message)" }; return 500 }
+            Write-JsonResponse -Response $resp -Status ([int]$aiSet.status) -Body $aiSet.body
+            return [int]$aiSet.status
         }
 
         # PIM 100.120 (lane listmenu): the saved layouts of the list menu -- personal (any signed-in role) and shared
@@ -17334,7 +17713,10 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     mode = $srCfg.mode; unknownValue = [bool]$srCfg.unknown; audiences = @($srCfg.audiences); setting = $srSet; stats = $srStats
                     latestAdoption = $(if ($srAd.Count) { [ordered]@{ commitId = "$($srAd[0].CommitId)"; by = "$($srAd[0].Identity)"; capturedUtc = "$($srAd[0].CapturedUtc)"; reason = "$($srAd[0].Reason)" } } else { $null })
-                    tokenOnThisRequest = [bool]"$($req.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])".Trim()
+                    tokenOnThisRequest = [bool]("$script:CurrentRequestToken".Trim() -or "$($req.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])".Trim())
+                    # AUTH-MODERN-1: which token verified the requests (access token = the standard; id-token-fallback = an
+                    # install whose sign-in does not request the API scope yet)
+                    authTokenPaths = (Get-PimManagerAuthPathStatus)
                 })
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
@@ -18643,10 +19025,11 @@ function Handle-Request {
         #   GET  /api/settings/mail            (any role) mode, sender, relay (NO password), done + note, setup values
         #   PUT  /api/settings/mail            (Admin)    { mode, sender?, smtp?: { host, port, security, username, from,
         #                                                   vaultName, secretName }, password? } -- validated as a whole
-        #                                                   (refused = 400 { errors }, nothing written); the password goes
-        #                                                   to Key Vault only, never to pim.Settings; audited without it
-        #   POST /api/settings/mail/test       (Admin)    { to? } a test mail through the CURRENT mode, to -to or the caller;
-        #                                                   the result is recorded against these settings (MailLastTest)
+        #                                                   (refused = 400 { errors }, nothing written); SECURE-WEB-1: a
+        #                                                   password is NEVER stored by the web app (no Key Vault write, no
+        #                                                   setting, no queue) -- the answer names the published script
+        #   POST /api/settings/mail/test       (Admin)    { to? } QUEUES the engine's test mail through the CURRENT mode, to
+        #                                                   -to or the caller; the engine records the result (MailLastTest)
         if ($path -eq '/api/settings/mail' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailState -RefreshChecks:("$($req.Url.Query)" -match "(?:^|[?&])refresh=1")); return 200 }
@@ -18678,8 +19061,9 @@ function Handle-Request {
             try {
                 $pwRes = $null
                 if ($pw) {
-                    $pwRes = Set-PimManagerVaultSecret -VaultName "$($relay.config.vaultName)" -SecretName "$($relay.config.secretName)" -Value $pw
+                    # 🔒 SECURE-WEB-1: never written by the web app (no Key Vault write, never through the queue) -- the script
                     $pw = $null
+                    $pwRes = Get-PimManagerSmtpPasswordRefusal -Setup $(try { (Get-PimManagerMailState -NoChecks).setup } catch { $null }) -Smtp $relay.config
                 }
                 if ($relay -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) { Set-PimManagerSetting -Name 'SmtpRelay' -Value $relay.config; $global:PIM_SmtpRelay = $relay.config }
                 if ($wantSender) { Set-PimManagerSetting -Name 'MailSender' -Value $wantSender; $global:PIM_MailSender = $wantSender }
@@ -18687,8 +19071,8 @@ function Handle-Request {
                 $script:PimMailCheckCache = $null   # MAIL CHECK: changed settings are checked again
                 $after = Get-PimManagerMailState
                 Write-PimManagerAuditEvent -Action 'settings.mail.save' -Target 'MailMode,MailSender,SmtpRelay' -Result 'ok' -Before $before `
-                    -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; passwordToKeyVault = $(if ($pwRes) { [bool]$pwRes.ok } else { $null }) })
-                $after['password'] = $(if ($pwRes) { [ordered]@{ stored = [bool]$pwRes.ok; reason = "$($pwRes.reason)" } } else { $null })
+                    -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; passwordToKeyVault = $(if ($pwRes) { $false } else { $null }) })
+                $after['password'] = $(if ($pwRes) { $pwRes } else { $null })
                 Write-JsonResponse -Response $resp -Status 200 -Body $after
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
@@ -18757,21 +19141,14 @@ function Handle-Request {
             if (-not $to) { try { $to = "$((Get-PimManagerRole).identity)".Trim() } catch { $to = '' } }
             if (-not (Test-PimMailAddress -Value $to)) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "Enter the address the test mail goes to$(if ($to) { " ($to is not a mail address)" })."; errors = @{ to = 'Enter a mail address.' } }; return 400 }
             try {
-                $tenantCtx = try { Get-PimManagerTenantContext } catch { @{ tenantName = ''; tenantId = '' } }
-                $r = Send-PimNotifyMail -Type 'alert-notice' -Recipient $to -Tokens @{
-                    AlertTitle = 'PIM Manager test mail'; AlertEvent = 'mail-test'; AlertTab = 'settings'; TenantName = "$($tenantCtx.tenantName)"; Instance = "$($script:PimInstanceName)"
-                    AlertDetail = 'This test mail was sent from Get Started / Settings > Mail & alerting to prove that this environment can send mail.'
-                    AlertHeadline = 'Mail from PIM Manager works.'; AlertAction = 'Nothing to do -- this was a test.'
-                    # PIM 100.105: who acts / status / problem / what to do (a test: the product works, nobody has to act)
-                    AlertWho = 'Customer'; AlertStatus = 'Warning'; AlertProblem = 'This is a test mail: PIM Manager can send mail'; AlertTodo = 'Nothing to do, this was a test'
-                    WhenUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
-                $ok = [bool]$r.sent
-                Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To $to
-                # MAIL-STEP-PROOF: the same press proves the ENGINE job too -- one engine test send queued, the tick started
+                # 🔒 SECURE-WEB-1 (3.1.26): the web app sends no mail. Send test mail QUEUES the engine's test send
+                # (pim.Settings 'MailEngineTest'); the engine sends it as its own identity at its next run and records the
+                # proof the step reads (MailLastTest, and for an SMTP relay whether it could read the password).
                 $eng = Request-PimManagerMailEngineTest -To $to
-                Write-PimManagerAuditEvent -Action 'settings.mail.test' -Target "mail:$to" -Result $(if ($ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ sent = $ok; via = "$($r.sentAs)"; reason = "$($r.reason)"; engineTestQueued = [bool]$eng.queued })
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $ok; to = $to; via = "$($r.sentAs)"; reason = "$($r.reason)"
-                    note = $(if ($ok) { "Test mail sent to $to." } else { "Not sent: $($r.reason)" }); engineTest = $eng })
+                $ok = [bool]$eng.queued
+                Write-PimManagerAuditEvent -Action 'settings.mail.test' -Target "mail:$to" -Result $(if ($ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ queued = $ok; sent = $false; via = 'engine'; reason = "$($eng.detail)"; engineTestQueued = $ok })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $ok; queued = $ok; sent = $false; to = $to; via = 'engine'; reason = "$($eng.detail)"
+                    note = $(if ($ok) { "Test mail to $to " + (Get-PimManagerQueuedMailNote).Substring(0, 1).ToLowerInvariant() + (Get-PimManagerQueuedMailNote).Substring(1) } else { "Not queued: $($eng.detail)" }); engineTest = $eng })
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500 }
         }
@@ -18788,18 +19165,21 @@ function Handle-Request {
                 # The test alert intentionally bypasses debounce so an operator always
                 # sees a fresh result (and a fresh recorded-send-proof feed entry).
                 $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0 -IgnoreNotifications `
-                    -Who 'Customer' -Status 'Warning' -Problem 'This is a test alert: PIM Manager can reach the alert recipients' -Todo 'Nothing to do, this was a test'
-                $ok = ($r.sent -gt 0)
-                # MAIL-1: a test alert that reached the mail path is also proof (or disproof) of the current mail mode
-                if ($r.fired -and @($r.recipients).Count) { Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To (@($r.recipients) -join ';') }
+                    -Who 'Customer' -Status 'Information' -Problem 'This is a test alert: PIM Manager can reach the alert recipients' -Todo 'Nothing to do, this was a test'
+                # SECURE-WEB-1 (3.1.26): the web app sends no mail -- the test alert is QUEUED for the engine (a delivered
+                # webhook still counts as sent at once). The engine's send records the proof the mail step reads.
+                $ok = ([int]$r.sent -gt 0 -or [int]$r.queued -gt 0)
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok         = $ok
                     fired      = [bool]$r.fired
                     sent       = [int]$r.sent
+                    queued     = [int]$r.queued
                     recipients = @($r.recipients)
                     reason     = "$($r.reason)"
                     recorded   = [bool]$r.recorded
-                    note       = $(if ($ok) { "Test alert sent to $([int]$r.sent) recipient(s)." } else { "Not sent: $($r.reason). Set up mail sending (Settings > Mail & alerting > Mail sending: a shared mailbox or your SMTP relay) and at least one recipient to enable delivery." })
+                    note       = $(if ([int]$r.queued -gt 0) { 'Test alert ' + (Get-PimManagerQueuedMailNote -Recipients ([int]$r.queued)).Substring(0, 1).ToLowerInvariant() + (Get-PimManagerQueuedMailNote -Recipients ([int]$r.queued)).Substring(1) }
+                                   elseif ($ok) { "Test alert delivered to the webhook." }
+                                   else { "Not queued: $($r.reason). Set up mail sending (Settings > Mail & alerting > Mail sending: a shared mailbox or your SMTP relay) and at least one recipient to enable delivery." })
                 })
                 return 200
             } catch {
@@ -20914,7 +21294,7 @@ function Handle-Request {
 
                 Write-PimManagerAuditEvent -Action 'sessions.revoke.queued' -Target $upn -After @{ userId = "$uid"; queueId = "$($change.id)"; requestedBy = $who }
                 try { Send-PimManagerAlert -Event 'sessions-revoked' -Title 'Sign-in session revoke QUEUED' -Detail ("$upn -- queued; refresh tokens are invalidated when the engine applies it") -LinkTab 'accounts' `
-                        -Who 'Customer' -Status 'Warning' -Problem "The sign-in sessions of $upn will be revoked at the next engine run" -Todo 'Nothing to do if this was intended; if not, open the Accounts page' | Out-Null } catch {}
+                        -Who 'Customer' -Status 'Information' -Problem "The sign-in sessions of $upn will be revoked at the next engine run" -Todo 'Nothing to do if this was intended; if not, open the Accounts page' | Out-Null } catch {}
 
                 Write-JsonResponse -Response $resp -Status 202 -Body @{
                     ok                = $true
@@ -22308,6 +22688,14 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 403 -Body (Get-PimRevauditRefusalBody -Verdict $rvCommit -Stage 'commit')
                 return 403
             }
+            # TRUST-1 round 5 G4 (NEGATIVE): a staged revoke / group delete is checked again against the data as it is NOW -- a
+            # source row or area that is no longer from today (carried / stale), or that cannot be checked, refuses the commit (409)
+            $trCommit = Get-PimTrustQueueCommitRefusal -Ids @($split.commit) -Entries $pendNow
+            if ($null -ne $trCommit) {
+                try { Write-PimManagerAuditEvent -Action 'queue.commit.refused' -Target 'trust' -Result 'refused' -After ([ordered]@{ reason = "$($trCommit.body.error)"; ids = @($split.commit) }) } catch { }
+                Write-JsonResponse -Response $resp -Status ([int]$trCommit.status) -Body $trCommit.body
+                return [int]$trCommit.status
+            }
             $res = @()
             if (@($split.commit).Count) {
                 try { $res = @(Set-PimSqlQueueCommitted -ConnectionString $cs -Ids @($split.commit) -By $who) }
@@ -23493,6 +23881,12 @@ function Handle-Request {
             $ib = if ($method -eq 'PUT') { Read-RequestJson -Request $req } else { [pscustomobject]@{ scope = "$($req.QueryString['scope'])"; key = "$($req.QueryString['key'])" } }
             $iScope = "$($ib.scope)".Trim(); $iKey = "$($ib.key)".Trim()
             if (-not $iScope -or -not $iKey) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'scope and key are required' }; return 400 }
+            # TRUST-1 round 4 item 5: an item of an area NOT compared this run (carried) is never acted on -- refused here, not by the page
+            # (round 5 G5: Get-PimDriftStoredRefusal is fail-closed -- a drift document that could not be READ refuses too)
+            if (Get-Command Get-PimDriftStoredRefusal -ErrorAction SilentlyContinue) {
+                $dcWhy = Get-PimDriftStoredRefusal -Scope $iScope -Key $iKey
+                if ($dcWhy) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; carried = $true; error = $dcWhy }; return 409 }
+            }
             $cur = @(Get-PimDriftIgnores)
             $k = Get-PimDriftIgnoreKey $iScope $iKey
             $rest = @($cur | Where-Object { (Get-PimDriftIgnoreKey "$($_.scope)" "$($_.key)") -ne $k })
@@ -23626,6 +24020,12 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'groupId and groupName are required. Nothing was queued.' }
                 return 400
             }
+            # TRUST-1 round 4 item 5: a group of an area NOT compared this run (carried) is never deleted from old data
+            # (round 5 G5: fail-closed -- a drift document that could not be READ refuses too)
+            if (Get-Command Get-PimDriftStoredRefusal -ErrorAction SilentlyContinue) {
+                $dcWhyG = Get-PimDriftStoredRefusal -GroupId $gidIn
+                if ($dcWhyG) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; carried = $true; error = $dcWhyG }; return 409 }
+            }
             # ACCESS PACKAGES LOCK (owner 2026-11-12): a group named '-AP' is an access package group -- it is retired only with its
             # package (Access > Access packages), never deleted from the drift page. In doubt: nothing is queued.
             if ((Get-Command Test-PimManagerAccessPackageLockedName -ErrorAction SilentlyContinue) -and (Test-PimManagerAccessPackageLockedName -Name $gnIn)) {
@@ -23700,13 +24100,40 @@ function Handle-Request {
                     error = 'Apply now never removes an EXTRA (live access with no desired row): the engine reconcile it queues never prunes. Choose Delete (a queued, audited removal), Import into PIM (stage the row that defines it) or Ignore for the extra on the Drift page. Nothing was queued.' }
                 return 409
             }
+            # TRUST-1 round 4 item 5: never apply from an area NOT compared this run (carried). Ticked items there are refused (409);
+            # all=true becomes "every item of the areas compared this run" and the answer says which areas were skipped.
+            $skippedD = @()
+            if (Get-Command Get-PimDriftCarriedSet -ErrorAction SilentlyContinue) {
+                $dDoc = $null; $dErr = ''
+                try { $dDoc = Get-PimTenantCacheEntry -Kind 'drift'; if ($null -eq $dDoc) { $dErr = "$(Get-PimTenantCacheReadError -Kind 'drift')".Trim() } } catch { $dErr = "$($_.Exception.Message)" }
+                # round 5 G5 / H7: fail-closed -- a drift document that could not be READ applies nothing
+                if ($dErr) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; carried = $true; error = "Could not check whether these items are current ($dErr) -- nothing was queued. Try again." }; return 409 }
+                $dSet = Get-PimDriftCarriedSet -Doc $dDoc
+                if (-not $selAll) {
+                    $dcWhyR = Get-PimDriftActionRefusal -Set $dSet -SelectKeys $selectKeys
+                    if ($dcWhyR) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; carried = $true; error = $dcWhyR }; return 409 }
+                } elseif ($dSet.scopes.Count) {
+                    $skippedD = @($dSet.scopes.Keys | Sort-Object)
+                    # round 6 F7: all=true stays ALL -- the engine runs EVERY area of the drift document except the carried ones (a
+                    # scope list = "All minus the excluded"), never a list of the stored items (capped at 500 per area: the rest
+                    # would silently not be applied)
+                    $allScopesD = @(@($dDoc.scopes) | Where-Object { $null -ne $_ -and "$($_.scope)".Trim() } | ForEach-Object { "$($_.scope)".Trim() } | Select-Object -Unique)
+                    $applyScopesD = @($allScopesD | Where-Object { -not $dSet.scopes.ContainsKey($_) })
+                    $applyHasDrift = @(@($dDoc.scopes) | Where-Object { $null -ne $_ -and $applyScopesD -contains "$($_.scope)" -and [bool]$_.ok -and [bool]$_.checked -and ([int]$_.missing + [int]$_.changed) -gt 0 }).Count
+                    if (-not $applyScopesD.Count -or -not $applyHasDrift) {
+                        Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; carried = $true; skipped = $skippedD; error = ("Nothing to apply: the only areas with drift were not compared this run ({0}) and are shown from their last complete check. Nothing was queued." -f ($skippedD -join ', ')) }
+                        return 409
+                    }
+                }
+            }
             $who = try { (Get-PimManagerRole).identity } catch { '' }
             $queuedD = $false; $qErrD = ''
             if (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue) {
                 # §100.12 DRIFT-EXTRAS (i), 2.4.555: the trigger CARRIES the ticked (scope,key) pairs; the scheduler's engine
                 # handler hands them to the engine as its change filter, so only the ticked items are re-applied (all=true = everything).
                 try {
-                    if ($selAll) { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who") }
+                    if ($selAll -and $skippedD.Count) { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope ($applyScopesD -join ',') -Reason "drift-remediate:$who") }   # round 6 F7: All minus the carried areas
+                    elseif ($selAll) { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who") }
                     else { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who" -Changes @($selectKeys)) }
                     $queuedD = $true
                 } catch { $qErrD = "$($_.Exception.Message)" }
@@ -23720,7 +24147,7 @@ function Handle-Request {
             $kickD = $null
             try { $kickD = Start-PimManagerTickNow -Reason 'drift-remediate' } catch { $kickD = $null }
             Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{
-                ok = $true; queued = $true; status = 'queued'; mode = 'engine-delta'
+                ok = $true; queued = $true; status = 'queued'; mode = 'engine-delta'; skippedCarried = @($skippedD)
                 selected = $(if ($selAll) { 'all' } else { $selectKeys.Count })
                 engineStarted = [bool]($kickD -and $kickD.started)
                 detail = ("Queued an engine run (trigger:engine-delta:All){0}. The engine re-applies {1} under its own identity; refresh the drift check afterwards to confirm. The Manager never changes the tenant itself." -f $(if ($kickD) { " -- $($kickD.detail)" } else { '' }), $(if ($selAll) { 'the whole desired state' } else { "ONLY the $($selectKeys.Count) ticked item(s)" }))

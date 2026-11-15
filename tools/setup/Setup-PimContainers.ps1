@@ -967,11 +967,11 @@ function Invoke-PimDbInitJob {
         throw "the bootstrap job '$DbInitJobName' was NOT created -- see the failure above. Without it no database user can be created, because this host has no route to a private SQL server."
     }
 
-    # DBINIT-MEMBERSHIP (framework 4.5 point 5; owner 2026-11-05 "both setup and upd"): the SAME membership convergence the
-    # updater runs (engine/_shared/PIM-DbInitMembership.ps1) -- the job's identity into the SQL admin group by (a) a direct add,
-    # else (b) an ACTIVE PIM-for-Groups assignment, permanent first -- and READ BACK before this first start. Not read back =
-    # NOT started (the reason names both refusals and what the identity running setup is missing). The group is only read,
-    # never changed (SEC-32).
+    # DBINIT-MEMBERSHIP, SECURE-WEB-1 (Invardia / owner 2026-11-14, 3.1.26): SETUP makes the job's identity a PERMANENT DIRECT
+    # member of the SQL admin group ONCE (engine/_shared/PIM-DbInitMembership.ps1 -DirectOnly: a direct add, never a PIM
+    # assignment) and READS IT BACK before this first start. Not read back = NOT started (the reason names the refusal and
+    # what the identity running setup is missing). The updater only reports the membership; it never writes it. The group
+    # is only read, never changed (SEC-32).
     $dbmRg = "/subscriptions/$SubscriptionId/resourceGroups/$(if ($SqlResourceGroup) { $SqlResourceGroup } else { $ResourceGroup })"
     $dbmArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
     $dbmGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }

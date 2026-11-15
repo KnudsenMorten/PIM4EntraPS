@@ -202,13 +202,30 @@ function ConvertTo-PimSharedPendingChange {
     $row = Get-PimSharedPendingField $Change 'row'; $before = Get-PimSharedPendingField $Change 'before'
     if ($op -ne 'remove' -and $null -eq $row) { return $null }
     if ($op -eq 'remove' -and $null -eq $before) { return $null }
-    [ordered]@{
+    $o = [ordered]@{
         key    = $key; op = $op
         row    = $(if ($op -eq 'remove') { $null } else { ConvertTo-PimSharedPendingRowMap $row })
         before = $(if ($null -eq $before) { $null } else { ConvertTo-PimSharedPendingRowMap $before })
         by     = "$(Get-PimSharedPendingField $Change 'by')"
         atUtc  = (ConvertTo-PimSharedPendingText (Get-PimSharedPendingField $Change 'atUtc'))
     }
+    # TRUST-1 round 6 F2: the finding a row was staged FROM ('coverage:<row key>' / 'drift:<scope>|<key>') is stored WITH the
+    # staged change, server-side and shared -- the commit checks it whoever commits and whatever their browser sends. Not part
+    # of the change's content (Get-PimSharedPendingChangeSig): an echo without it is still the same change.
+    $sk = "$(Get-PimSharedPendingField $Change 'sourceKey')".Trim()
+    if ($sk -and $sk.Length -le 400 -and $sk -match '^(coverage|drift):') { $o['sourceKey'] = $sk }
+    return $o
+}
+
+function Get-PimSharedPendingSourceKeys {
+    <# PURE. TRUST-1 round 6 F2: the source keys of one entity's staged changes in the shared pending document (unique). #>
+    param([AllowNull()][object]$Doc, [Parameter(Mandatory)][string]$Base)
+    if ($null -eq $Doc) { return @() }
+    $bases = Get-PimSharedPendingField $Doc 'bases'
+    $entry = $null
+    if ($bases -is [System.Collections.IDictionary]) { if ($bases.Contains($Base)) { $entry = $bases[$Base] } } elseif ($null -ne $bases) { $entry = Get-PimSharedPendingField $bases $Base }
+    if ($null -eq $entry) { return @() }
+    return @(@(Get-PimSharedPendingField $entry 'changes') | Where-Object { $null -ne $_ } | ForEach-Object { "$(Get-PimSharedPendingField $_ 'sourceKey')".Trim() } | Where-Object { $_ } | Select-Object -Unique)
 }
 
 function Merge-PimSharedPendingChanges {
@@ -242,6 +259,8 @@ function Merge-PimSharedPendingChanges {
             $same = ((Get-PimSharedPendingChangeSig $c) -ceq (Get-PimSharedPendingChangeSig $s))
             if ($same) { $out.Add($c); continue }
             if (-not $mine) { $locked.Add([ordered]@{ key = $k; by = "$($c.by)"; atUtc = "$($c.atUtc)"; reason = 'changed' }); continue }
+            # TRUST-1 round 6 F2: an edit of a row staged from a finding is still from that finding -- its source key stays
+            if (-not $s.Contains('sourceKey') -and $c.Contains('sourceKey')) { $s['sourceKey'] = $c['sourceKey'] }
             $s.by = $By; $s.atUtc = $now; $out.Add($s); $replaced++
         } else {
             $s.by = $By; $s.atUtc = $now; $out.Add($s); $added++

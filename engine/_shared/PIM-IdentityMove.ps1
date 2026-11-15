@@ -398,11 +398,13 @@ function Get-PimIdentityMoveRoleNeeds {
     }
     $acr = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
     $rdr = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'   # Reader (a job's Reader on ITSELF reads its own runs, 100.166 (a))
-    $kvf = 'e147488a-f6f5-4113-8e2d-b22465e65bf6'   # Key Vault Crypto Service Encryption User on the sign-in front key -- web only
+    $sbdc = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'  # Storage Blob Data Contributor
     $n = switch ("$Role".ToLowerInvariant()) {
         # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the internet-facing web identity takes NO job right (Container Apps Jobs
-        # Operator on the engine job was dropped) -- see 'never' below
-        'web'      { @{ azure = @($rdr, $kvf, $acr); groups = @(); dirRoles = @() } }
+        # Operator on the engine job was dropped) -- see 'never' below. 3.1.26: NO Key Vault role either (the signin-front key
+        # is retired, the break-glass check reads the PIM database); + Storage Blob Data Contributor on the token-store container
+        # of the built-in sign-in ONLY (azureContainerOnly below)
+        'web'      { @{ azure = @($rdr, $sbdc, $acr); groups = @(); dirRoles = @() } }
         # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): + Container Apps Jobs Operator and Contributor, held
         # on the UPDATER job only -- the engine starts the updater (update-expedite) and the watchdog restores its image
         # (tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess grants them, scope = that job)
@@ -421,10 +423,14 @@ function Get-PimIdentityMoveRoleNeeds {
     $kvsu = '4633458b-17de-408a-b874-0445c86b69e6'
     $n['azureVaultOnly'] = @()
     if ("$Role".ToLowerInvariant() -in @(Get-PimIdentityMoveSkvReaders)) { $n.azure = @(@($n.azure) + $kvsu); $n['azureVaultOnly'] = @($kvsu) }
-    # SECURE-WEB-1 F1 b (Invardia 2026-11-14): the web identity is no vault reader; it keeps Key Vault Secrets User on the ONE
-    # secret PIM-EmergencyPasscode only (the break-glass hash) -- taken over at exactly that secret, never at the vault or wider
+    # SECURE-WEB-1 (3.1.26, owner: "the internet-facing identity has NO Key Vault edge"): the web identity takes NO Key Vault
+    # role at all -- not at a vault, not on the one secret PIM-EmergencyPasscode (the 2026-11-14 F1 b exception is gone: the
+    # break-glass check reads a verifier in the PIM database). azureSecretOnly stays as an (empty) map for its callers.
     $n['azureSecretOnly'] = @{}
-    if ("$Role".ToLowerInvariant() -eq 'web') { $n.azure = @(@($n.azure) + $kvsu); $n['azureSecretOnly'] = @{ $kvsu = 'PIM-EmergencyPasscode' } }
+    # ...and its one data role (the built-in sign-in's token store) is taken over ONLY at that blob container, never at the
+    # storage account, the resource group or wider
+    $n['azureContainerOnly'] = @{}
+    if ("$Role".ToLowerInvariant() -eq 'web') { $n['azureContainerOnly'] = @{ $sbdc = 'pim-auth-tokens' } }
     # SEC-10 (Invardia decision 2026-11-11): the UPDATER writes the moved secrets -- Key Vault Secrets Officer, at a vault only
     # (PIM-SecretsToKeyVault.ps1 Get-PimSkvWriterRole / Get-PimSkvOfficerRoleId)
     if ("$Role".ToLowerInvariant() -eq 'updater') { $kvso = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'; $n.azure = @(@($n.azure) + $kvso); $n['azureVaultOnly'] = @(@($n['azureVaultOnly']) + $kvso) }
@@ -435,12 +441,36 @@ function Get-PimIdentityMoveRoleNeeds {
     # right from ANY source either -- the move lists them as not copied
     if ("$Role".ToLowerInvariant() -eq 'web') {
         $n['never'] = @(@($n['never']) + @('b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c', '8311e382-0749-4cb8-b61a-304f252e45ec',
-                                            'b86a8fe4-44ce-4948-aee5-eccb2c155cd7', '00482a5a-887f-4fb3-b363-3b7fe8e74483') | Select-Object -Unique)
+                                            'b86a8fe4-44ce-4948-aee5-eccb2c155cd7', '00482a5a-887f-4fb3-b363-3b7fe8e74483') + @(Get-PimIdentityMoveKeyVaultRoleIds) | Select-Object -Unique)
     }
     # RIGHTS-LIVE-1: the engine's Jobs Operator + Contributor are taken over ONLY at a Container Apps job scope (the updater job),
     # never at the resource group or wider -- Select-PimIdentityMoveNeeded lists any other as not copied
     $n['azureJobOnly'] = if ("$Role".ToLowerInvariant() -eq 'engine') { @('b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c') } else { @() }
+    # WAKE-1 (3.1.26, framework SECURE-WEB-1 point 1): the wake queue's rights (engine\_shared\PIM-Wake.ps1 Get-PimWakeRoleIds) --
+    # web: Storage Queue Data Message Sender; engine (the wake job runs as it): Message Processor + Data Reader
+    if ("$Role".ToLowerInvariant() -eq 'web') { $n.azure = @(@($n.azure) + 'c6a89b2d-59bc-44d0-9896-0f6e12d7b80a') }
+    if ("$Role".ToLowerInvariant() -eq 'engine') { $n.azure = @(@($n.azure) + @('8a0f0c08-91a1-4084-bc3d-661d67233fed', '19e7f393-937e-4f77-808e-94535e297925')) }
+    # MANAGER-CHAT-1 (3.1.26): web's Cognitive Services OpenAI User (inference only) on the AI chat's Azure OpenAI resource --
+    # a move carries it where the old identity held it, so the chat keeps working (granted by the operator, never by PIM)
+    if ("$Role".ToLowerInvariant() -eq 'web') { $n.azure = @(@($n.azure) + '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd') }
     return $n
+}
+
+function Get-PimIdentityMoveKeyVaultRoleIds {
+    <# PURE. Every built-in Key Vault data / management role (Microsoft built-in role ids) -- SECURE-WEB-1 (3.1.26): the
+       internet-facing web identity takes none of them from any source. #>
+    @('4633458b-17de-408a-b874-0445c86b69e6',   # Key Vault Secrets User
+      'b86a8fe4-44ce-4948-aee5-eccb2c155cd7',   # Key Vault Secrets Officer
+      '00482a5a-887f-4fb3-b363-3b7fe8e74483',   # Key Vault Administrator
+      'f25e0fa2-a7c8-4377-a976-54943a77a395',   # Key Vault Contributor
+      '8b54135c-b56d-4d72-a534-26097cfdc8d8',   # Key Vault Data Access Administrator
+      '21090545-7ca7-4776-b22c-e363652d74d2',   # Key Vault Reader
+      '12338af0-0e69-4776-bea7-57ae8d297424',   # Key Vault Crypto User
+      '14b46e9e-c2b7-41b4-b07b-48a6ebf60603',   # Key Vault Crypto Officer
+      'e147488a-f6f5-4113-8e2d-b22465e65bf6',   # Key Vault Crypto Service Encryption User
+      '08bbd89e-9f13-488c-ac41-acfcb10c90ab',   # Key Vault Crypto Service Release User
+      'a4417e6f-fecd-4de8-b567-7b0420556985',   # Key Vault Certificates Officer
+      'db79e9a7-68ee-4b58-9aeb-b90e7c24fcba')   # Key Vault Certificate User
 }
 
 function Get-PimIdentityMoveRootRoleIds {
@@ -463,6 +493,10 @@ function Select-PimIdentityMoveNeeded {
         # SECURE-WEB-1 F1 b: a role the map allows on ONE named secret only (the web's emergency hash) is never taken elsewhere
         $so = $need['azureSecretOnly']
         if ($so -and $so.ContainsKey($g) -and "$($a.scope)".TrimEnd('/') -notmatch ('(?i)/providers/Microsoft\.KeyVault/vaults/[^/]+/secrets/' + [regex]::Escape("$($so[$g])") + '$')) { $jobOk = $false }
+        # SECURE-WEB-1 (3.1.26): a role the map allows on ONE named blob container only (the web's token store) is never taken
+        # at the storage account, the resource group or wider
+        $co = $need['azureContainerOnly']
+        if ($co -and $co.ContainsKey($g) -and "$($a.scope)".TrimEnd('/') -notmatch ('(?i)/providers/Microsoft\.Storage/storageAccounts/[^/]+/blobServices/default/containers/' + [regex]::Escape("$($co[$g])") + '$')) { $jobOk = $false }
         if ($need.azure -contains $g -and $jobOk) { $keep.azure += $a } else { $not.Add("Azure role $g at $($a.scope) (from $SourceName)") }
     }
     foreach ($m in @($Rights.groups)) { if (-not $m) { continue }; if (@($need.groups | Where-Object { $_ -ieq "$($m.displayName)" }).Count) { $keep.groups += $m } else { $not.Add("PIM group $($m.displayName) (from $SourceName)") } }

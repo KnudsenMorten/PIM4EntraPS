@@ -206,6 +206,67 @@ function Get-PimTenantCacheStamps {
     return [pscustomobject]@{ ok = $true; error = ''; stamps = $out }
 }
 
+function Get-PimTenantCacheDocStamp {
+    # TRUST-1 round 4: what a job saw of its stored document when it STARTED (one JSON value, e.g. '$.refreshedUtc').
+    # { known; exists; value; error } -- known = $false when this process cannot ask (no SQL store / the reader not loaded): the
+    # writes below then fall back to the plain write. A failed read = known $false + error (the caller treats it as unreadable).
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Path)
+    $cs = Get-PimTenantCacheStoreCs
+    if (-not $cs -or -not (Get-Command Get-PimSqlTenantCacheDocStamp -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ known = $false; exists = $false; value = ''; error = '' } }
+    try { $s = Get-PimSqlTenantCacheDocStamp -ConnectionString $cs -Kind $Kind -Path $Path; return [pscustomobject]@{ known = $true; exists = [bool]$s.exists; value = "$($s.value)"; error = '' } }
+    catch { return [pscustomobject]@{ known = $false; exists = $false; value = ''; error = "$($_.Exception.Message)" } }
+}
+
+function Set-PimTenantCacheEntryIfUnchanged {
+    # TRUST-1 round 4 item 1 (second guard): store -Value only over the document the run STARTED with (-Start from
+    # Get-PimTenantCacheDocStamp); a newer one stored meanwhile is kept. -Start unknown / no SQL compare-and-set in this
+    # process = the plain write (as before). Returns { stored; newer; where }. A store error THROWS.
+    param([Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind, [AllowNull()][object]$Value,
+          [Parameter(Mandatory)][string]$Path, [AllowNull()][object]$Start = $null)
+    $cs = Get-PimTenantCacheStoreCs
+    if ($null -eq $Start -or -not [bool]$Start.known -or -not $cs -or -not (Get-Command Set-PimSqlTenantCacheIfUnchanged -ErrorAction SilentlyContinue)) {
+        $w = Set-PimTenantCacheEntry -Kind $Kind -Value $Value
+        return [pscustomobject]@{ stored = $true; newer = $false; where = "$w" }
+    }
+    $json = $Value | ConvertTo-Json -Depth 12 -Compress
+    $n = Set-PimSqlTenantCacheIfUnchanged -ConnectionString $cs -Kind $Kind -ValueJson $json -Path $Path -StartExists ([bool]$Start.exists) -StartValue "$($Start.value)"
+    if ([int]$n -le 0) { return [pscustomobject]@{ stored = $false; newer = $true; where = '' } }
+    return [pscustomobject]@{ stored = $true; newer = $false; where = "sql:pim.TenantCache/$Kind" }
+}
+
+function Set-PimTenantCacheLastRun {
+    # TRUST-1 round 4 items 6 + 12: 'lastRun' on the stored document the run STARTED with (Set-PimSqlTenantCacheLastRun); the
+    # document is otherwise kept. Returns the rows marked; -1 = this process cannot mark (no SQL store / the writer not loaded).
+    # Round 5 G3: a process WITHOUT a SQL store (the in-memory store of a test / a dev run, no concurrent writer) marks the stored
+    # document with a plain read + write, so the kept document still carries the failure -- and its stale mark (one fix request).
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Path, [AllowNull()][object]$Start = $null, [Parameter(Mandatory)][object]$LastRun)
+    $cs = Get-PimTenantCacheStoreCs
+    if (-not $cs -or -not (Get-Command Set-PimSqlTenantCacheLastRun -ErrorAction SilentlyContinue)) {
+        if ($cs) { return -1 }
+        $d = Get-PimTenantCacheEntry -Kind $Kind
+        if ($null -eq $d) { return 0 }
+        $d | Add-Member -NotePropertyName 'lastRun' -NotePropertyValue (($LastRun | ConvertTo-Json -Depth 6 -Compress) | ConvertFrom-Json) -Force
+        [void](Set-PimTenantCacheEntry -Kind $Kind -Value $d)
+        return 1
+    }
+    if ($null -eq $Start -or -not [bool]$Start.known) { return -1 }
+    return [int](Set-PimSqlTenantCacheLastRun -ConnectionString $cs -Kind $Kind -LastRunJson ($LastRun | ConvertTo-Json -Depth 6 -Compress) -Path $Path -StartValue "$($Start.value)")
+}
+
+function Get-PimTenantCacheChangeStamp {
+    # TRUST-1 (review finding 4): when a kind's row last CHANGED (pim.TenantCache.UpdatedUtc) -- also when only its document
+    # changed and its RefreshedUtc ("as of") did not, e.g. the active-assignments header's lastRun mark. '' when it cannot
+    # be read (no SQL store, no row, a failed read): the caller then keys on RefreshedUtc alone, as before. Never throws.
+    param([Parameter(Mandatory)][string]$Kind)
+    try {
+        $cs = Get-PimTenantCacheStoreCs
+        if (-not $cs -or -not (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) { return '' }
+        $v = Invoke-PimSqlScalar -ConnectionString $cs -Sql 'SELECT CONVERT(nvarchar(40), UpdatedUtc, 126) FROM pim.TenantCache WHERE Kind = @k' -Parameters @{ k = $Kind }
+        if ($null -eq $v -or $v -is [System.DBNull]) { return '' }
+        return "$v".Trim()
+    } catch { return '' }
+}
+
 function Write-PimTenantCache {
     param(
         [Parameter(Mandatory)][string]$Kind,

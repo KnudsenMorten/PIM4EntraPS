@@ -242,10 +242,11 @@ function Select-PimStallReportsDue {
     foreach ($e in $vals) {
         if ($null -eq $e) { continue }
         if ("$(Get-PimUplinkField $e 'sentUtc')".Trim()) { continue }
-        if ("$(Get-PimUplinkField $e 'trigger')" -notin @('no-progress', 'over-2x-usual')) { continue }
+        if ("$(Get-PimUplinkField $e 'trigger')" -notin @('no-progress', 'over-2x-usual', 'source-stale')) { continue }   # source-stale: TRUST-1 point 8 (Register-PimTrustStaleReport)
         if ("$(Get-PimUplinkField $e 'job')" -notmatch '^pim-[a-z0-9-]{1,56}$') { continue }
         $at = ConvertTo-PimUplinkUtc (Get-PimUplinkField $e 'registeredUtc')
-        if (-not $at -or ($NowUtc.ToUniversalTime() - $at).TotalHours -gt 48) { continue }
+        # TRUST-1 round 4 item 13: a source-stale fix request is sent whenever it gets its turn -- it never expires unsent
+        if (-not $at -or ("$(Get-PimUplinkField $e 'trigger')" -ne 'source-stale' -and ($NowUtc.ToUniversalTime() - $at).TotalHours -gt 48)) { continue }
         $out.Add($e)
     }
     return @($out.ToArray() | Sort-Object { "$(Get-PimUplinkField $_ 'registeredUtc')" })
@@ -262,7 +263,14 @@ function New-PimStallRunReportRecord {
     param([Parameter(Mandatory)][object]$Entry, [Parameter(Mandatory)][hashtable]$Common)
     $job = "$(Get-PimUplinkField $Entry 'job')"; $jn = "$(Get-PimUplinkField $Entry 'jobName')"; $step = "$(Get-PimUplinkField $Entry 'step')"
     $trig = "$(Get-PimUplinkField $Entry 'trigger')"; $min = 0; [void][int]::TryParse("$(Get-PimUplinkField $Entry 'minutes')", [ref]$min)
-    if ($trig -notin @('no-progress', 'over-2x-usual') -or $job -notmatch '^pim-[a-z0-9-]{1,56}$') { return $null }
+    if ($trig -notin @('no-progress', 'over-2x-usual', 'source-stale') -or $job -notmatch '^pim-[a-z0-9-]{1,56}$') { return $null }
+    # TRUST-1 point 8: a part not read for a week -> ONE run report with its stable code (lower case) and the part as FailedStep
+    if ($trig -eq 'source-stale') {
+        $cls = "$(Get-PimUplinkField $Entry 'errorClass')".ToLowerInvariant(); if ($cls -notmatch '^[a-z0-9-]{1,40}$') { return $null }
+        if ($step -notmatch '^[a-z0-9][a-z0-9.-]{0,59}$') { return $null }
+        $stxt = "source not read for more than a week (TRUST-1 point 8): job $job, part $step (not read since $(Get-PimUplinkField $Entry 'sinceUtc')). Its last findings stay listed with their date; nothing was resolved."
+        return (New-AitUplinkReport -Kind run @Common -Job $job -Outcome 'warning' -ErrorClass $cls -ErrorText $stxt -FailedStep $step)
+    }
     if ($jn -notmatch '^[a-z0-9-]{1,60}$') { $jn = $job }
     # the engine scope's StepsOk id (ConvertTo-PimRunStepId shape) or none -- set by New-PimStallReportEntry, never an area
     if ($step -notmatch '^[a-z0-9][a-z0-9.-]{0,59}$') { $step = '' }
@@ -474,6 +482,18 @@ function Test-PimUplinkFixKindEnabled {
 function Test-PimUplinkAdditiveEnabled {
     <# PURE. ON by default; PIM_UPLINK_ADDITIVE = 0 / false / off / no switches every additive field off. #>
     param([AllowNull()][string]$Value = $env:PIM_UPLINK_ADDITIVE)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function Test-PimUplinkTrustFieldsOn {
+    <#
+      PURE. TRUST-1 round 5 (Invardia 2026-11-13): ONE switch for the trust fields Invardia's schema does not hold yet -- the
+      top-level CountsAsOf and Security.domains[] collectionUtc / partNotRead. Invardia took both LIVE as SOFT fields
+      (2026-11-13), so the switch is ON BY DEFAULT for the TRUST-1 release: PIM_UPLINK_TRUSTFIELDS = 0 / false / off / no is
+      the ROLLBACK (today's closed shape). OFF never sends a wrong number either: a snapshot key / Security domain whose part
+      has no data this run is LEFT OUT.
+    #>
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_TRUSTFIELDS)
     return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
 }
 
@@ -1085,6 +1105,81 @@ function Get-PimUplinkRolePolicySummarySql {
     return "$(Get-PimUplinkSettingJsonSql -Name 'RolePolicySummary') SELECT CASE WHEN @v IS NULL OR ISJSON(@v) = 0 THEN NULL WHEN ISNULL(JSON_VALUE(@v, '$.complete'), N'') <> N'true' THEN NULL WHEN ISNULL(TRY_CONVERT(datetimeoffset, JSON_VALUE(@v, '$.computedUtc')), CAST('0001-01-01' AS datetimeoffset)) < DATEADD(hour, -$h, SYSDATETIMEOFFSET()) THEN NULL ELSE TRY_CAST(JSON_VALUE(@v, '$.$Field') AS bigint) END AS n"
 }
 
+function Get-PimUplinkSnapshotKeyParts {
+    <# PURE. LITERAL. TRUST-1 round 3 item 4: which active-assignments PARTS (surfaces) each snapshot-based Counts key counts. #>
+    return [ordered]@{
+        activeAssignments              = @{ parts = @('entra-role', 'azure-rbac') }
+        azureRoleAssignments           = @{ parts = @('azure-rbac'); absentToo = $true }
+        permanentPrivilegedAssignments = @{ parts = @('entra-role') }
+        permanentGlobalAdmins          = @{ parts = @('entra-role') }
+        privilegedGuests               = @{ parts = @('entra-role', 'azure-rbac', 'pim-for-groups') }
+        privilegedSpns                 = @{ parts = @('entra-role', 'azure-rbac', 'pim-for-groups') }
+        roleAssignmentsOutsidePim      = @{ parts = @('entra-role', 'azure-rbac') }
+        assignmentsExpiring7d          = @{ parts = @('entra-role', 'azure-rbac', 'pim-for-groups', 'app-permission') }
+    }
+}
+
+function Get-PimUplinkSnapshotPartsExpr {
+    <#
+      PURE. TRUST-1 round 5 (G2 / G7 / H9): the SQL expression over pim.TenantCache.ValueJson (active-assignments) that gives the
+      header's part lists as ONE JSON text {"u":[partsUnread],"a":[partsAbsent],"c":[{"s":<carried surface>}],"t":"<lastRun.trusted>"}.
+      H9 (the cheaper read, chosen): ONLY a TABLE-form header is parsed -- it is small (the rows are in pim.ActiveAssignmentRows).
+      The form is told from the first 40 characters (LIKE, no JSON parse); a ONE-DOCUMENT snapshot (up to 22 MB) is never
+      parsed here and answers {"doc":true} -- the snapshot-based keys then hold (their rows are in no table generation of that
+      document). The LIKE comes BEFORE ISJSON on purpose: ISJSON validates the whole text.
+    #>
+    return @'
+CASE WHEN LEFT(ValueJson, 40) NOT LIKE N'{"rowStore":"table"%' THEN N'{"doc":true}' WHEN ISJSON(ValueJson) = 1 THEN CONCAT(N'{"u":', ISNULL(JSON_QUERY(ValueJson, '$.partsUnread'), N'[]'), N',"a":', ISNULL(JSON_QUERY(ValueJson, '$.partsAbsent'), N'[]'), N',"c":', ISNULL((SELECT JSON_VALUE(c.[value], '$.surface') AS s FROM OPENJSON(ValueJson, '$.carried') c WHERE c.[type] = 5 FOR JSON PATH), N'[]'), N',"t":"', ISNULL(JSON_VALUE(ValueJson, '$.lastRun.trusted'), N''), N'"}') END
+'@.Trim()
+}
+
+function Get-PimUplinkSnapshotPartsSql {
+    <#
+      PURE. TRUST-1 round 4 item 15: the stored active-assignments header's part lists, read ONCE per heartbeat (not one per
+      Counts key), as ONE scalar (Get-PimUplinkSnapshotPartsExpr: {"u","a","c","t"} or {"doc":true}); no header = no row (NULL).
+    #>
+    return "SELECT $(Get-PimUplinkSnapshotPartsExpr) AS n FROM pim.TenantCache WHERE Kind = N'active-assignments'"
+}
+
+function ConvertFrom-PimUplinkSnapshotParts {
+    <#
+      PURE. The scalar of Get-PimUplinkSnapshotPartsSql -> @{ unread = [string[]]; absent = [string[]] }. No header at all (NULL)
+      = empty lists (each key's own query decides: no complete generation = NULL). Round 5: unread = partsUnread (missing /
+      stale) + every CARRIED surface (G7: not read this run) + EVERY part when the newest run was not trusted (G2:
+      lastRun.trusted = false -- nothing of the kept generation was read this time). A one-document header ({"doc":true}) or a
+      text that does not parse = $null = every snapshot-based key held (fail-safe, G9).
+    #>
+    param([AllowNull()][object]$Value)
+    $o = @{ unread = [string[]]@(); absent = [string[]]@() }
+    if ($null -eq $Value -or $Value -is [System.DBNull]) { return $o }
+    if ($Value -isnot [string] -or -not "$Value".Trim().StartsWith('{')) { return $null }
+    try {
+        $j = "$Value" | ConvertFrom-Json
+        if ($j.PSObject.Properties['doc']) { return $null }
+        $u = [System.Collections.Generic.List[string]]::new()
+        foreach ($x in @(@($j.u) + @(@($j.c) | ForEach-Object { if ($null -ne $_ -and $_.PSObject.Properties['s']) { $_.s } }))) { if ("$x".Trim() -and -not $u.Contains("$x".Trim())) { $u.Add("$x".Trim()) } }
+        if ($j.PSObject.Properties['t'] -and "$($j.t)" -eq 'false') { foreach ($p in 'entra-role', 'azure-rbac', 'pim-for-groups', 'app-permission') { if (-not $u.Contains($p)) { $u.Add($p) } } }
+        $o.unread = $u.ToArray(); $o.absent = [string[]]@(@($j.a) | Where-Object { "$_".Trim() })
+    } catch { return $null }
+    return $o
+}
+
+function Test-PimUplinkSnapshotKeyHeld {
+    <#
+      PURE. TRUST-1 round 3 item 4 / round 4 item 15 (Invardia: an unreported key is "-", never 0 -- the fleet dashboard SUMS the
+      values): is a snapshot-based Counts key LEFT OUT -- one of the parts it counts has no data this run (partsUnread: missing,
+      or stale past Get-PimTrustCarryMaxAgeDays); azureRoleAssignments also while Azure is not part of the install (partsAbsent).
+      -Parts: ConvertFrom-PimUplinkSnapshotParts; $null = the lists could not be READ = every snapshot key held (fail-safe).
+    #>
+    param([Parameter(Mandatory)][string]$Key, [AllowNull()][hashtable]$Parts)
+    $map = Get-PimUplinkSnapshotKeyParts
+    if (-not $map.Contains($Key)) { return $false }
+    if ($null -eq $Parts) { return $true }
+    $kp = $map[$Key]
+    foreach ($s in @($kp.parts)) { if (@($Parts.unread) -contains $s) { return $true }; if ($kp.absentToo -and @($Parts.absent) -contains $s) { return $true } }
+    return $false
+}
+
 function Get-PimUplinkAdoptionQueries {
     <#
       PURE. key -> one scalar SQL statement (column n). -MspMaster adds managedTenants (a managing install's registry);
@@ -1139,8 +1234,12 @@ function Get-PimUplinkAdoptionQueries {
         # 2.4.650: ROLE assignments only (Entra roles + Azure RBAC), as the key says -- not group memberships (see activeAssignments)
         roleAssignmentsOutsidePim = "SELECT CASE WHEN $snap IS NULL OR NOT $(Get-PimUplinkMarksCurrentSql -SnapshotExpr $snap) THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND Managed = 0 AND Kind IN (N'entra-role', N'azure-rbac')) END AS n"
         assignmentsExpiring7d = "SELECT CASE WHEN $snap IS NULL THEN NULL ELSE (SELECT COUNT_BIG(*) FROM pim.ActiveAssignmentRows WHERE SnapshotId = $snap AND State = N'active' AND EndUtc >= SYSUTCDATETIME() AND EndUtc < DATEADD(day, 7, SYSUTCDATETIME())) END AS n"
-        # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out
-        driftItems           = "SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN TRY_CAST(JSON_VALUE(ValueJson, '$.total') AS bigint) END AS n FROM pim.TenantCache WHERE Kind = N'drift'"
+        # the drift document's own total (pim.TenantCache kind 'drift'); no document = left out. TRUST-1 gap 2 (i): ONLY from a
+        # FULLY CHECKED drift run -- ok = true (no scope failed) and no scope NOT CHECKED for a data reason (a scope whose
+        # feature is off for this install, skippedFeature set, is not part of this install's check and does not count -- point 7)
+        # and no scope CARRIED from an earlier run (gap 4) -- else NULL = left out: the total of a partial run is not today's drift.
+        # Round 5 G2: and NOT while the newest run failed (lastRun.trusted = false: the kept document is not today's either).
+        driftItems           = "SELECT CASE WHEN d.j IS NULL THEN NULL WHEN ISNULL(CASE WHEN ISJSON(d.j) = 1 THEN JSON_VALUE(d.j, '$.ok') END, N'') <> N'true' THEN NULL WHEN ISNULL(CASE WHEN ISJSON(d.j) = 1 THEN JSON_VALUE(d.j, '$.lastRun.trusted') END, N'') = N'false' THEN NULL WHEN EXISTS (SELECT 1 FROM OPENJSON(d.j, '$.scopes') s WHERE s.[type] = 5 AND ((ISNULL(CASE WHEN s.[type] = 5 THEN JSON_VALUE(s.[value], '$.checked') END, N'false') <> N'true' AND ISNULL(CASE WHEN s.[type] = 5 THEN JSON_VALUE(s.[value], '$.skippedFeature') END, N'') = N'') OR ISNULL(CASE WHEN s.[type] = 5 THEN JSON_VALUE(s.[value], '$.carried') END, N'false') = N'true')) THEN NULL ELSE TRY_CAST(CASE WHEN ISJSON(d.j) = 1 THEN JSON_VALUE(d.j, '$.total') END AS bigint) END AS n FROM (SELECT CASE WHEN ISJSON(ValueJson) = 1 THEN ValueJson END AS j FROM pim.TenantCache WHERE Kind = N'drift') d"
         # items verify-convergence holds as not yet converged (pim.Settings 'ConvergenceState' firstSeen map); never ran = left out
         unconvergedItems     = "$(Get-PimUplinkSettingJsonSql -Name 'ConvergenceState') SELECT CASE WHEN @has = 0 OR @v IS NULL OR ISJSON(@v) = 0 THEN NULL ELSE (SELECT COUNT_BIG(*) FROM OPENJSON(@v, '$.firstSeen')) END AS n"
         # §33.0 round 2 -- policy quality from the per-role summary the EntraRolePolicies live read persists
@@ -1159,6 +1258,7 @@ function Get-PimUplinkAdoptionQueries {
         # approval queue is 0); a value that is not JSON = left out. Scope: the tick's job processes (not the Manager's calls).
         graphThrottled24h    = "$(Get-PimUplinkSettingJsonSql -Name 'GraphRetryCounts') SELECT CASE WHEN @v IS NULL THEN CAST(0 AS bigint) WHEN ISJSON(@v) = 0 THEN NULL ELSE ISNULL((SELECT SUM(ISNULL(TRY_CAST(CASE WHEN h.[type] = 5 THEN JSON_VALUE(h.[value], '$.r429') END AS bigint), 0)) FROM OPENJSON(@v, '$.hours') h WHERE TRY_CONVERT(datetimeoffset, h.[key]) >= DATEADD(hour, -24, SYSDATETIMEOFFSET())), CAST(0 AS bigint)) END AS n"
     }
+
     if ($MspMaster) { $q['managedTenants'] = 'SELECT COUNT_BIG(*) AS n FROM platform.Tenants WHERE Enabled = 1' }
     if ($HybridAd) {
         # the AD groups the worker keeps in sync: its sync memory (pim.Settings 'HybridAdSyncMemory.<job>.<bucket>', '$.g' = one
@@ -1188,7 +1288,13 @@ function Get-PimUplinkAdoptionCounts {
     if ($null -ne $BreakGlassAccounts) { $bgN = 0L; if ([long]::TryParse("$BreakGlassAccounts", [ref]$bgN) -and $bgN -ge 0) { $out['breakGlassAccounts'] = $bgN } }
     try {
         $qs = Get-PimUplinkAdoptionQueries -MspMaster:$MspMaster -HybridAd:$HybridAd
+        # TRUST-1 round 4 item 15: the snapshot header's part lists, read ONCE (not per key); a key whose part has no data this run is
+        # LEFT OUT (never 0 -- Test-PimUplinkSnapshotKeyHeld). Round 5 G9: a read of the lists that FAILS = $parts = $null = EVERY
+        # snapshot-based key held (fail-safe; the other keys still go) -- never "no lists, each key decides".
+        $parts = $null
+        try { $pv = & $Query 'snapshotParts' (Get-PimUplinkSnapshotPartsSql); $pv = @($pv) | Select-Object -First 1; if ($null -ne $pv -and $pv -isnot [string] -and $pv -isnot [ValueType] -and $pv -isnot [System.DBNull]) { $pv = Get-PimUplinkField $pv 'n' }; $parts = ConvertFrom-PimUplinkSnapshotParts -Value $pv } catch { $parts = $null }
         foreach ($k in @($qs.Keys)) {
+            if (Test-PimUplinkSnapshotKeyHeld -Key "$k" -Parts $parts) { continue }
             $v = $null
             try { $v = & $Query "$k" "$($qs[$k])" } catch { continue }
             $v = @($v) | Select-Object -First 1
@@ -2173,16 +2279,38 @@ $sub;
 "@
 }
 
+function Get-PimUplinkSecurityHeaderSql {
+    <# PURE. TRUST-1 round 4 item 3: the active-assignments header's part lists (one JSON text, Get-PimUplinkSnapshotPartsSql's shape) and per-part read times; read-only, one row or none. #>
+    # round 5 H9: the read times only from a TABLE-form header (small); a one-document snapshot is not parsed (parts = {"doc":true})
+    # (nested CASE, never AND: SQL Server does not promise to short-circuit an AND, and ISJSON validates the whole text)
+    $v = { param($p) "CASE WHEN LEFT(ValueJson, 40) LIKE N'{`"rowStore`":`"table`"%' THEN CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$p') END END" }
+    return "SELECT $(Get-PimUplinkSnapshotPartsExpr) AS parts, $(& $v '$.entraReadUtc') AS e, $(& $v '$.azureReadUtc') AS z, $(& $v '$.groupsReadUtc') AS g, $(& $v '$.appPermissionsReadUtc') AS p FROM pim.TenantCache WHERE Kind = N'active-assignments'"
+}
+
 function New-PimUplinkSecurityField {
     <#
       PURE. Security from the rows of Get-PimUplinkSecuritySql: { collectionUtc; domains = [ ... ] }, or $null (no complete
       snapshot = no rows). A number that is not a whole number >= 0 is left out of its domain; outsidePim only once the
       snapshot's marks were computed; permanent / expiring not for a domain without end dates.
     #>
-    param([AllowNull()][object[]]$Rows)
+    param([AllowNull()][object[]]$Rows, [AllowNull()][object]$Header = $null, [switch]$HeaderUnreadable, [bool]$TrustFields = (Test-PimUplinkTrustFieldsOn))
     $rows = @(@($Rows) | Where-Object { $null -ne $_ -and -not ($_ -is [System.DBNull]) })
     if (-not $rows.Count) { return $null }
     $map = @{}; foreach ($k in @(Get-PimUplinkSecurityKinds) + @(Get-PimUplinkSecuritySubKinds)) { $map["$($k.kind)"] = "$($k.domain)" }
+    # TRUST-1 round 4 item 3: the same gate as Counts -- a domain whose PART (surface) has no data this run (partsUnread: missing
+    # or stale; round 5: carried, or the newest run not trusted) or is not part of the install (partsAbsent) is HELD; each
+    # domain's collectionUtc is its part's READ time (a carried part keeps its own), the generation's CompletedUtc only for a
+    # header without per-part times. -Header: the row of Get-PimUplinkSecurityHeaderSql ($null = no header row).
+    # Round 5 G9: -HeaderUnreadable (the header read FAILED) or a header whose lists cannot be used = EVERY domain held.
+    # Round 5 (Invardia): collectionUtc / partNotRead are SOFT fields of Security.domains[] (live 2026-11-13). -TrustFields OFF (the rollback; ON is the default, Test-PimUplinkTrustFieldsOn) sends
+    # exactly today's shape -- domain + the metric ints, no collectionUtc / partNotRead -- and a HELD domain is LEFT OUT of
+    # domains entirely. ON = the round-4 shape (collectionUtc per domain; a held domain stays with partNotRead and no snapshot metric).
+    $surfOf = @{}; foreach ($k in @(Get-PimUplinkSecurityKinds)) { $surfOf["$($k.kind)"] = "$($k.kind)" }; foreach ($k in @(Get-PimUplinkSecuritySubKinds)) { $surfOf["$($k.kind)"] = "$($k.parent)" }
+    $hp = ConvertFrom-PimUplinkSnapshotParts -Value $(if ($null -ne $Header) { "$(Get-PimUplinkField $Header 'parts')" } else { $null })
+    $allHeld = [bool]$HeaderUnreadable -or ($null -ne $Header -and $null -eq $hp)
+    if ($null -eq $hp) { $hp = @{ unread = [string[]]@(); absent = [string[]]@() } }
+    $readOf = @{ 'entra-role' = (Get-PimUplinkField $Header 'e'); 'azure-rbac' = (Get-PimUplinkField $Header 'z'); 'pim-for-groups' = (Get-PimUplinkField $Header 'g'); 'app-permission' = (Get-PimUplinkField $Header 'p') }
+    $snapMetrics = @('activeAssignments', 'permanentAssignments', 'outsidePim', 'privilegedPrincipals', 'guestsPrivileged', 'spnsPrivileged', 'assignmentsExpiring7d')
     $allowed = @(Get-PimUplinkSecurityDomains); $noSched = @(Get-PimUplinkSecurityNoScheduleDomains)
     $collected = $null; $domains = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rows) {
@@ -2192,7 +2320,16 @@ function New-PimUplinkSecurityField {
         if ($null -eq $collected) { $collected = ConvertTo-PimUplinkIso (Get-PimUplinkField $r 'collectionUtc') }
         $marks = ("$(Get-PimUplinkField $r 'marksKnown')" -match '^(1|True)$')
         $d = [ordered]@{ domain = $dom }
+        $surf = "$($surfOf["$(Get-PimUplinkField $r 'kind')"])"
+        $held = $allHeld -or (($null -ne $Header) -and (@($hp.unread) -contains $surf -or @($hp.absent) -contains $surf))
+        if (-not $TrustFields) { if ($held) { continue } }
+        elseif ($null -ne $Header -or $allHeld) {
+            $rt = ConvertTo-PimUplinkIso $readOf[$surf]
+            $d['collectionUtc'] = $(if ($rt) { $rt } else { ConvertTo-PimUplinkIso (Get-PimUplinkField $r 'collectionUtc') })
+            if ($held) { $d['partNotRead'] = $true }
+        }
         foreach ($f in 'eligibleAssignments', 'activeAssignments', 'permanentAssignments', 'outsidePim', 'privilegedPrincipals', 'guestsPrivileged', 'spnsPrivileged', 'assignmentsExpiring7d', 'activations30d') {
+            if ($held -and $snapMetrics -contains $f) { continue }
             if ($f -eq 'outsidePim' -and -not $marks) { continue }
             if ($f -in @('permanentAssignments', 'assignmentsExpiring7d') -and $noSched -contains $dom) { continue }
             $n = ConvertTo-PimUplinkCount (Get-PimUplinkField $r $f)
@@ -2225,6 +2362,95 @@ SELECT s.State AS state, s.StartedUtc AS startedUtc, s.RowsExpected AS expected,
        (SELECT MAX(CompletedUtc) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete') AS lastCompleteUtc
 FROM pim.ActiveAssignmentSnapshots s WHERE s.SnapshotId = @l;
 '@
+}
+
+function Get-PimUplinkCountsAsOfSql {
+    <#
+      PURE. TRUST-1 gap 1 addition (a) (Invardia 2026-11-12) + review finding 7: WHEN the data behind the snapshot-based Counts
+      was READ -- the stored header's per-part read times (entraReadUtc / azureReadUtc / groupsReadUtc; a part carried from an
+      earlier read keeps ITS read time, a part never read is ''), with the last COMPLETE generation's CompletedUtc as the
+      fallback for a header written before the per-part times. kept = 1 when a part is carried (the header's 'carried' list) or
+      the newest read was not stored at all (lastRun.trusted = false). Read-only; no complete generation = no row. Round 5 H9: only
+      a TABLE-form header is read (a one-document snapshot is never parsed per heartbeat; no row = CountsAsOf left out).
+    #>
+    return @'
+SET NOCOUNT ON;
+DECLARE @s BIGINT = (SELECT MAX(SnapshotId) FROM pim.ActiveAssignmentSnapshots WHERE State = N'complete');
+IF @s IS NULL RETURN;
+SELECT (SELECT CompletedUtc FROM pim.ActiveAssignmentSnapshots WHERE SnapshotId = @s) AS asOfUtc,
+       h.e AS entraReadUtc, h.a AS azureReadUtc, h.g AS groupsReadUtc,
+       CASE WHEN ISNULL(h.lr, N'') = N'false' OR ISNULL(h.cc, 0) > 0 OR ISNULL(h.pt, N'') = N'true' OR ISNULL(h.mc, 0) > 0 OR ISNULL(h.uc, 0) > 0 THEN 1 ELSE 0 END AS kept,
+       h.uj AS partsUnread, h.aj AS partsAbsent
+FROM (SELECT CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_VALUE(t.ValueJson, '$.entraReadUtc') END AS e,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_VALUE(t.ValueJson, '$.azureReadUtc') END AS a,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_VALUE(t.ValueJson, '$.groupsReadUtc') END AS g,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_VALUE(t.ValueJson, '$.lastRun.trusted') END AS lr,
+             (SELECT COUNT(*) FROM OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.carried')) AS cc,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_VALUE(t.ValueJson, '$.partial') END AS pt,
+             (SELECT COUNT(*) FROM OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.missing')) AS mc,
+             (SELECT COUNT(*) FROM OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.partsUnread')) AS uc,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_QUERY(t.ValueJson, '$.partsUnread') END AS uj,
+             CASE WHEN ISJSON(t.ValueJson) = 1 THEN JSON_QUERY(t.ValueJson, '$.partsAbsent') END AS aj
+      FROM pim.TenantCache t WHERE t.Kind = N'active-assignments' AND LEFT(t.ValueJson, 40) LIKE N'{"rowStore":"table"%') h;
+'@
+}
+
+function New-PimUplinkCountsAsOfField {
+    <#
+      PURE. The row of Get-PimUplinkCountsAsOfSql -> CountsAsOf for the IDENTIFIED heartbeat (additive), so Invardia never shows
+      an old count as today's: { activeAssignmentsUtc = the OLDEST read time of the parts activeAssignments counts (Entra roles,
+      Azure); entraReadUtc; azureReadUtc; groupsReadUtc (null = never read: unknown); activeAssignmentsKept }. A header without
+      per-part times = the generation's CompletedUtc. No row / no readable time = $null.
+    #>
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row -or $Row -is [System.DBNull]) { return $null }
+    $iso = { param($v) $t = ConvertTo-PimUplinkUtc $v; if ($t) { $t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) } else { $null } }
+    $done = & $iso (Get-PimUplinkField $Row 'asOfUtc')
+    $e = & $iso (Get-PimUplinkField $Row 'entraReadUtc'); $a = & $iso (Get-PimUplinkField $Row 'azureReadUtc'); $g = & $iso (Get-PimUplinkField $Row 'groupsReadUtc')
+    # round 3 item 4: never the oldest time of only the parts that WERE read -- a counted part with no data this run (partsUnread,
+    # or an empty read time on a header that has the per-part times) leaves activeAssignmentsUtc null (unknown); a part this
+    # install does not have (partsAbsent: Azure on an Entra-only tenant) is not counted
+    $lst = { param($j) $o = @(); if ("$j".Trim()) { try { $o = @(@("$j" | ConvertFrom-Json) | ForEach-Object { @($_) } | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) } catch { $o = @() } }; $o }
+    $unread = & $lst (Get-PimUplinkField $Row 'partsUnread'); $absentP = & $lst (Get-PimUplinkField $Row 'partsAbsent')
+    $eRaw = Get-PimUplinkField $Row 'entraReadUtc'; $aRaw = Get-PimUplinkField $Row 'azureReadUtc'
+    $perPart = ($null -ne $eRaw -and $eRaw -isnot [System.DBNull]) -or ($null -ne $aRaw -and $aRaw -isnot [System.DBNull])
+    $countAz = ($absentP -notcontains 'azure-rbac')
+    $gap = ($unread -contains 'entra-role') -or ($countAz -and $unread -contains 'azure-rbac') -or ($perPart -and (-not $e -or ($countAz -and -not $a)))
+    $parts = @(@($e, $(if ($countAz) { $a })) | Where-Object { $_ } | Sort-Object)
+    $at = if ($gap) { $null } elseif ($parts.Count) { $parts[0] } else { $done }
+    if (-not $at -and -not $gap) { return $null }
+    $kept = ("$(Get-PimUplinkField $Row 'kept')" -match '^(1|True)$')
+    return [pscustomobject][ordered]@{ activeAssignmentsUtc = $at; entraReadUtc = $e; azureReadUtc = $a; groupsReadUtc = $g; activeAssignmentsKept = [bool]$kept }
+}
+
+function New-PimUplinkTrustHoldField {
+    <#
+      PURE. TRUST-1 round 6 (Invardia SI #1237 wire, packages/core/src/heartbeatstate.ts DataOut): the data-out entry of the
+      snapshot-based data while it is HELD for a trust reason -- { output = 'active-assignments'; phase = 'held'; lastResult =
+      'held'; heldReason = 'untrusted'; heldSinceUtc (the first held heartbeat in a row); newestTrustedUtc (the newest TRUSTED
+      collection: CountsAsOf.activeAssignmentsUtc, null = unknown) }. Held = the part lists could not be read (-Parts $null), a
+      counted part is unread this run, or CountsAsOf says the counts were kept. -State: { heldSinceUtc } of the previous
+      heartbeat. Returns @{ entry ($null = not held, or the trust fields OFF); state ({ heldSinceUtc } or $null = clear) }.
+      🔴 NOT SENT: Invardia's PIM_HEARTBEAT_CONTRACT has no DataOut field, and an unknown field refuses the record
+      (parseHeartbeatState: "another product's field") -- sent only once Invardia adds DataOut to the pim-manager contract.
+    #>
+    param([AllowNull()][object]$CountsAsOf, [AllowNull()][hashtable]$Parts, [AllowNull()][object]$State = $null, [datetime]$NowUtc = [datetime]::UtcNow,
+          [bool]$TrustFields = (Test-PimUplinkTrustFieldsOn), [switch]$PartsUnreadable)
+    $iso = { param($v) $t = ConvertTo-PimUplinkUtc $v; if ($t) { $t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) } else { $null } }
+    $kept = ($null -ne $CountsAsOf -and [bool](Get-PimUplinkField $CountsAsOf 'activeAssignmentsKept'))
+    $held = [bool]$PartsUnreadable -or ($null -ne $Parts -and @($Parts.unread).Count -gt 0) -or $kept
+    if (-not $TrustFields -or -not $held) { return @{ entry = $null; state = $null } }
+    $since = & $iso (Get-PimUplinkField $State 'heldSinceUtc'); if (-not $since) { $since = & $iso $NowUtc }
+    $e = [ordered]@{ output = 'active-assignments'; phase = 'held'; lastResult = 'held'; heldReason = 'untrusted'; heldSinceUtc = $since
+                     newestTrustedUtc = (& $iso (Get-PimUplinkField $CountsAsOf 'activeAssignmentsUtc')) }
+    return @{ entry = [pscustomobject]$e; state = [pscustomobject]@{ heldSinceUtc = $since } }
+}
+
+function Get-PimUplinkCountsAsOf {
+    <# -Query { param($sql) rows } (read-only) -> New-PimUplinkCountsAsOfField of its first row, or $null. Never throws. #>
+    param([Parameter(Mandatory)][scriptblock]$Query)
+    try { $row = @(& $Query (Get-PimUplinkCountsAsOfSql)) | Select-Object -First 1; return (New-PimUplinkCountsAsOfField -Row $row) }
+    catch { Write-Warning "[uplink] CountsAsOf could not be read: $($_.Exception.Message)"; return $null }
 }
 
 function Get-PimUplinkRunsByName {
@@ -2816,14 +3042,21 @@ function Get-PimUplinkStateFields {
           [bool]$HybridAdOn = $false, [AllowNull()][object]$HybridWorkerState = $null, [datetime]$NowUtc = [datetime]::UtcNow,
           # framework 8.18: UpdatePending's { signal; raisedAt; startedUtc } -- ON by default (UPDATE-NOW-HEAD);
           # PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no is the off-switch (the same rule as Test-PimUpdateNowFieldsOn)
-          [bool]$UpdateNowFields = (-not [bool]("$env:PIM_UPLINK_UPDATENOWFIELDS".Trim() -match '^(?i)(0|false|off|no)$')))
+          [bool]$UpdateNowFields = (-not [bool]("$env:PIM_UPLINK_UPDATENOWFIELDS".Trim() -match '^(?i)(0|false|off|no)$')),
+          # TRUST-1 round 5: Security's per-domain collectionUtc / partNotRead -- ON by default, PIM_UPLINK_TRUSTFIELDS=0 = rollback (Test-PimUplinkTrustFieldsOn)
+          [bool]$TrustFields = (Test-PimUplinkTrustFieldsOn))
     # every local here starts with __sf (or is $out): a caller's seam scriptblock reads ITS variables through dynamic
     # scope, and a local named like one of them would shadow it (a test stub returned $null that way)
     $out = [ordered]@{}
     if ($null -eq $Switches) { return $out }
     $__sfOn = { param($f) $Switches.Contains($f) -and [bool]$Switches[$f] }
     if ((& $__sfOn 'Security') -and $Query) {
-        try { $__sfSecRows = @(& $Query (Get-PimUplinkSecuritySql)); $__sfV = New-PimUplinkSecurityField -Rows $__sfSecRows; if ($null -ne $__sfV) { $out['Security'] = $__sfV } }
+        try {
+            $__sfSecRows = @(& $Query (Get-PimUplinkSecuritySql))
+            # TRUST-1 round 4 item 3: the header's part lists + read times, ONE small read (unreadable = $null = as before)
+            # round 5 G9: a header read that FAILS holds every domain (never "as before"); the trust-field switch decides the shape
+            $__sfHdr = $null; $__sfHdrBad = $false; try { $__sfHdr = @(& $Query (Get-PimUplinkSecurityHeaderSql)) | Select-Object -First 1 } catch { $__sfHdr = $null; $__sfHdrBad = $true }
+            $__sfV = New-PimUplinkSecurityField -Rows $__sfSecRows -Header $__sfHdr -HeaderUnreadable:$__sfHdrBad -TrustFields $TrustFields; if ($null -ne $__sfV) { $out['Security'] = $__sfV } }
         catch { Write-Warning "[uplink] Security could not be read: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'Collections') -and $null -ne $Runs) {
@@ -3267,6 +3500,10 @@ function Invoke-PimUplinkCycle {
           # §33.0 MORE TELEMETRY: { } -> the switched-on structured fields (Get-PimUplinkStateFields: field -> value). INVOKED
           # ONLY when the IDENTIFIED heartbeat is due and the additive fields are on; $null = none.
           [AllowNull()][scriptblock]$StateFields = $null,
+          # TRUST-1 gap 1 (a): { } -> CountsAsOf (Get-PimUplinkCountsAsOf: when the snapshot-based Counts were read, and whether
+          # the newest read was kept back). INVOKED ONLY when the IDENTIFIED heartbeat is due and the additive fields are on;
+          # $null / a throw = left out.
+          [AllowNull()][scriptblock]$CountsAsOf = $null,
           # INV-S16: { param($Name, $Value) } an insert that never replaces a value (Add-PimSqlSettingIfAbsent), used ONCE to
           # create the install's lasting id; $null = -SetSetting. The id rides on every IDENTIFIED record (Add-PimUplinkInstallId).
           [AllowNull()][scriptblock]$CreateSetting = $null,
@@ -3600,6 +3837,17 @@ function Invoke-PimUplinkCycle {
                 if ($envHb.Length -gt 100) { $envHb = $envHb.Substring(0, 100).Trim() }
                 if ($envHb) { $hb | Add-Member -NotePropertyName 'EnvironmentName' -NotePropertyValue $envHb -Force; $hbAdd += 'EnvironmentName' }
             } catch { }
+            # TRUST-1 gap 1 (a) (Invardia 2026-11-12): CountsAsOf { activeAssignmentsUtc; activeAssignmentsKept } -- the snapshot-based
+            # Counts carry WHEN they were read, and say so when the newest read was not whole and the previous one was kept, so
+            # Invardia never shows an old count as today's. Additive (a refusal naming it holds just it 24 h); unreadable = left out.
+            # Round 5 (Invardia, live as a soft field): only while PIM_UPLINK_TRUSTFIELDS is on (Test-PimUplinkTrustFieldsOn, ON by default; 0 = rollback).
+            if ($CountsAsOf -and (Test-PimUplinkTrustFieldsOn)) {
+                try {
+                    $caoV = & $CountsAsOf
+                    $caoV = @($caoV | Where-Object { $null -ne $_ -and $_.PSObject.Properties['activeAssignmentsUtc'] }) | Select-Object -First 1
+                    if ($caoV) { $hb | Add-Member -NotePropertyName 'CountsAsOf' -NotePropertyValue $caoV -Force; $hbAdd += 'CountsAsOf' }
+                } catch { Write-Warning "[uplink] CountsAsOf could not be built: $($_.Exception.Message)" }
+            }
             # framework §12.11b GUARD-STRICT item 5 (CR4): GuardMode on the identified heartbeat, so Invardia shows it; additive
             # (a refusal drops it for 24 h); left out when the mode cannot be read. The contract (Invardia 2026-10-14): the plain
             # word "normal", and while Strict the OBJECT { mode = "Strict"; until = <UTC>; startedBy = <the release version> } --
@@ -4281,6 +4529,14 @@ function Invoke-PimUplinkJob {
         # §33.0 round 2: breakGlassAccounts from the guards' own list reader, read inside the block (once per due heartbeat)
         $adoption = { Get-PimUplinkAdoptionCounts -Query { param($n, $s) Invoke-PimSqlScalar -ConnectionString $cs -Sql $s } -MspMaster:$adMsp -HybridAd:$adHy -Runs $adRuns -NowUtc $NowUtc -BreakGlassAccounts (Get-PimUplinkBreakGlassCount) }
     }
+    # TRUST-1 gap 1 (a): CountsAsOf -- a PLAIN scriptblock (dynamic scope: $caoJobCs, a name nothing in the cycle shadows), invoked
+    # by the cycle only when the identified heartbeat is due and the additive fields are on.
+    # Round 5 (Invardia, live as a soft field): CountsAsOf only while PIM_UPLINK_TRUSTFIELDS is on (ON by default; 0 = rollback).
+    $countsAsOfSb = $null
+    if ($adoption -and (Test-PimUplinkTrustFieldsOn) -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) {
+        $caoJobCs = $cs
+        $countsAsOfSb = { Get-PimUplinkCountsAsOf -Query { param($sql) @(Invoke-PimSqlQuery -ConnectionString $caoJobCs -Sql $sql) } }
+    }
     if ($on) {
         try { $ef = & $get 'EngineItemFailures'; if ($ef -is [string] -and "$ef".Trim()) { $ef = $ef | ConvertFrom-Json }; $engFails = @(@($ef) | Where-Object { $null -ne $_ }) } catch { $engFails = @() }
         $updRun = ConvertTo-PimUplinkUpdateRun -UpdateState $us
@@ -4441,7 +4697,7 @@ function Invoke-PimUplinkJob {
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField `
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField -CountsAsOf $countsAsOfSb `
             -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport -CountFailedCycle ($MaxPerCycle -le 0)
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }

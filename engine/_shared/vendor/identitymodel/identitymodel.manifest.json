@@ -1,0 +1,36 @@
+{
+  "package": "Microsoft.IdentityModel",
+  "version": "8.23.0",
+  "source": "https://api.nuget.org (packages signed by Microsoft; nupkg SHA512 checked against the nuget.org catalog 2026-11-15)",
+  "targetFramework": "net10.0",
+  "files": [
+    {
+      "name": "Microsoft.IdentityModel.Abstractions.dll",
+      "nuget": "microsoft.identitymodel.abstractions",
+      "sha256": "46f14d67dfc1894eb24d80282895526db25a854af227eee2fa06a0383fd09e4c",
+      "bytes": 19264,
+      "authenticode": "Valid CN=Microsoft Corporation"
+    },
+    {
+      "name": "Microsoft.IdentityModel.Logging.dll",
+      "nuget": "microsoft.identitymodel.logging",
+      "sha256": "90b6fa70f28a3b7711fe95aa30a0c5551f1e6aa28565187aa7b3681194215c84",
+      "bytes": 38192,
+      "authenticode": "Valid CN=Microsoft Corporation"
+    },
+    {
+      "name": "Microsoft.IdentityModel.Tokens.dll",
+      "nuget": "microsoft.identitymodel.tokens",
+      "sha256": "84409b8c3a52313fe4f4f621fce39544f42074109e870ac2631e627c8b70210f",
+      "bytes": 416024,
+      "authenticode": "Valid CN=Microsoft Corporation"
+    },
+    {
+      "name": "Microsoft.IdentityModel.JsonWebTokens.dll",
+      "nuget": "microsoft.identitymodel.jsonwebtokens",
+      "sha256": "b48515aeaa4a8fadc5fcacb45978c808a4d5bbffaf74f8894cc57c0769a9fb9e",
+      "bytes": 174384,
+      "authenticode": "Valid CN=Microsoft Corporation"
+    }
+  ]
+}

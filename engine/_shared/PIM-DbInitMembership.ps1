@@ -6,6 +6,12 @@
     database job is never started on a membership that was not read back.
 
 .DESCRIPTION
+    SECURE-WEB-1 (Invardia / owner 2026-11-14, 3.1.26): id-pim-dbinit is a PERMANENT DIRECT member of the SQL admin group,
+    set ONCE by setup (Invoke-PimDbInitMembershipBeforeStart -> Invoke-PimDbInitMembershipEnsure -DirectOnly) or a recorded
+    Invardia Support-app step. The UPDATER only READS and REPORTS it (Invoke-PimDbInitMembershipReport) -- it no longer holds
+    PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup (tenant-wide) and never writes a membership or renews one. The (b)
+    PIM-for-Groups path and the renewal below remain in Invoke-PimDbInitMembershipEnsure (without -DirectOnly) for a caller
+    that holds the right; no product caller uses them since 3.1.26.
     THE ORDER (framework 4.5 point 5):
       (a) a direct member add (POST /groups/<group>/members/$ref);
       (b) else an ACTIVE PIM-for-Groups member assignment (POST /identityGovernance/privilegedAccess/group/
@@ -357,11 +363,13 @@ function Invoke-PimDbInitMembershipRead {
       principal here -- a principalId filter omits schedules) and the identity's memberOf; -> Get-PimDbInitMembershipState
       + readErrors[] + missing[] (the permission a refused read needs). Never throws.
     #>
+    # -MemberOfOnly (framework G5a, Invardia 2026-11-15): the UPDATER's read -- ONLY the identity's memberOf (GroupMember.Read.All
+    # + Application.Read.All); the group's PIM assignments are NOT read (the updater holds no PrivilegedAssignmentSchedule right).
     param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$GroupId, [Parameter(Mandatory)][string]$PrincipalId,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow, [switch]$MemberOfOnly)
     $errs = New-Object System.Collections.Generic.List[string]
     $inst = $null; $instErr = ''; $moErr = ''
-    try {
+    if (-not $MemberOfOnly) { try {
         $all = New-Object System.Collections.Generic.List[object]
         $path = "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$GroupId'"
         $guard = 0
@@ -372,7 +380,7 @@ function Invoke-PimDbInitMembershipRead {
             $path = "$(Get-PimDbInitObjField $page '@odata.nextLink')".Trim()
         }
         $inst = $all.ToArray()
-    } catch { $instErr = Get-PimDbInitGraphError $_; [void]$errs.Add("the group's PIM assignments could not be read: $instErr") }
+    } catch { $instErr = Get-PimDbInitGraphError $_; [void]$errs.Add("the group's PIM assignments could not be read: $instErr") } }
     $mo = $null
     try {
         $path = "/servicePrincipals/$PrincipalId/memberOf/microsoft.graph.group" + '?$select=id&$top=999'
@@ -391,6 +399,10 @@ function Invoke-PimDbInitMembershipRead {
         if ($null -eq $inst) { [void]$errs.Add("the identity's memberships could not be read: $(Get-PimDbInitGraphError $_)") }
     }
     $s = Get-PimDbInitMembershipState -PrincipalId $PrincipalId -Instances $inst -MemberOf $mo -NowUtc $NowUtc
+    if ($MemberOfOnly) {
+        if ($s.member -eq $true) { $s.reason = 'a member (the identity''s group memberships, read)' }
+        elseif ($null -eq $s.member) { $s.reason = 'the identity''s group memberships could not be read' }
+    }
     $s['readErrors'] = @($errs.ToArray())
     $s['missing'] = @(@(if ($null -eq $inst -and (Test-PimDbInitPermissionError $instErr)) { Get-PimDbInitMembershipPermission -Step read }) + @(if ($moErr -and (Test-PimDbInitPermissionError $moErr)) { Get-PimDbInitMembershipPermission -Step memberof }))
     return $s
@@ -448,7 +460,10 @@ function Invoke-PimDbInitMembershipEnsure {
     param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$GroupId, [string]$GroupName = '',
           [Parameter(Mandatory)][string]$PrincipalId, [string]$IdentityName = '', [datetime]$NowUtc = [datetime]::UtcNow,
           [scriptblock]$Sleep = $null, [int[]]$ReadBackWaits = (Get-PimDbInitMembershipReadBackWaits),
-          [string]$Who = "the updater's identity")
+          [string]$Who = "the updater's identity",
+          # SECURE-WEB-1 (3.1.26): (a) a direct add ONLY -- never a PIM-for-Groups assignment, never a renewal. Setup's mode:
+          # id-pim-dbinit is a PERMANENT DIRECT member of the SQL admin group, set once.
+          [switch]$DirectOnly)
     if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
     $lines = New-Object System.Collections.Generic.List[object]
     $errors = New-Object System.Collections.Generic.List[string]; $missing = New-Object System.Collections.Generic.List[string]
@@ -478,6 +493,55 @@ function Invoke-PimDbInitMembershipEnsure {
             $o.reason = 'the SQL admin group or the identity is not known by its object id -- nothing done'; & $add 'warn' $o.reason; return (& $fin)
         }
         $st = Invoke-PimDbInitMembershipRead -Graph $Graph -GroupId $GroupId -PrincipalId $PrincipalId -NowUtc $NowUtc
+        if ($DirectOnly) {
+            # ---- SECURE-WEB-1 (3.1.26): SETUP sets a PERMANENT DIRECT membership ONCE -- (a) only, never a PIM assignment --
+            if ($st.member -eq $true -and $st.via -ne 'pim-timed') {
+                $o.member = $true; $o.readBack = $true; $o.via = "$($st.via)"; $o.reason = "$($st.reason)"
+                & $add 'info' "$idn is a member of $gn ($($st.reason)) -- nothing written"
+                return (& $fin)
+            }
+            $why = "$($st.reason)"
+            $roleAsg = Get-PimDbInitGroupRoleAssignable -Graph $Graph -GroupId $GroupId; $o.roleAssignable = $roleAsg
+            if ($roleAsg -eq $true) { $gn = "$gn (role-assignable)" }
+            $directErr = ''; $wrote = $false
+            try {
+                [void](& $Graph 'POST' "/groups/$GroupId/members/`$ref" @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$PrincipalId" })
+                $wrote = $true
+            } catch {
+                $directErr = Get-PimDbInitGraphError $_
+                if (Test-PimDbInitAlreadyMember $directErr) { $directErr = '' }
+            }
+            $need = "$Who needs the right to add a member to the group$(if ($roleAsg -eq $true) { ' (a role-assignable group: Privileged Role Administrator)' })"
+            if ($directErr) {
+                [void]$errors.Add("(a) direct add refused: $directErr")
+                if ($st.member -eq $true) {
+                    # still a member (time-limited) -- the job may start; the permanent direct membership stays open, said
+                    $o.member = $true; $o.readBack = $true; $o.via = 'pim-timed'; $o.endUtc = $st.endUtc; $o.timeLimited = $true
+                    $o.reason = "$idn is a member of $gn only through a TIME-LIMITED PIM assignment (ends $(Format-PimDbInitUtc $st.endUtc)); the permanent direct add was refused: $directErr -- $need"
+                    $o.note = "member through a TIME-LIMITED PIM assignment, ends $(Format-PimDbInitUtc $st.endUtc); not yet a permanent direct member"
+                    & $add 'warn' "WARNING: $($o.reason)"
+                    return (& $fin)
+                }
+                $o.member = $(if ($st.member -eq $false) { $false } else { $null }); $o.readBack = $false
+                $o.reason = "$idn could NOT be made a permanent direct member of $gn ($why): (a) direct add refused: $directErr -- $need (nothing was changed; no PIM assignment is made)"
+                & $add 'warn' $o.reason
+                return (& $fin)
+            }
+            $rb = & $readBack { param($r) $r.member -eq $true }
+            if ($rb.member -ne $true) {
+                $o.member = $(if ($rb.member -eq $false) { $false } else { $null }); $o.readBack = $false
+                $o.reason = "$idn was added to $gn as a direct member but the membership was NOT read back ($($rb.reason)$(if (@($rb.readErrors).Count) { '; ' + (@($rb.readErrors) -join '; ') }))"
+                foreach ($mm in @($rb.missing)) { [void]$missing.Add($mm) }
+                [void]$errors.Add($o.reason)
+                & $add 'warn' "$($o.reason) -- the database job is not started on it"
+                return (& $fin)
+            }
+            $o.member = $true; $o.readBack = $true; $o.via = 'direct'
+            if ($wrote) { $o.addedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+            & $add $(if ($wrote) { 'changed' } else { 'info' }) "$idn $(if ($wrote) { 'added to' } else { 'already in' }) $gn as a PERMANENT direct member (read back)$(if ($why) { " -- was: $why" })"
+            $o.reason = "read back: a permanent direct member"
+            return (& $fin)
+        }
         if ($st.member -eq $true) {
             $o.member = $true; $o.readBack = $true; $o.via = "$($st.via)"; $o.endUtc = $st.endUtc; $o.timeLimited = ($st.via -eq 'pim-timed'); $o.reason = "$($st.reason)"
             if ($st.renew -ne 'adminExtend') {
@@ -573,6 +637,69 @@ function Invoke-PimDbInitMembershipEnsure {
     return (& $fin)
 }
 
+function Get-PimDbInitMembershipFixText {
+    <# PURE. Who sets the membership (SECURE-WEB-1, 3.1.26): setup or a recorded Support-app step -- never the updater (a literal). #>
+    return 'setup (Setup-PimContainers.ps1) or a recorded Invardia Support-app step makes it a PERMANENT DIRECT member; the updater never writes it'
+}
+
+function Invoke-PimDbInitMembershipReport {
+    <#
+      READ ONLY -- the UPDATER's membership step since 3.1.26 (SECURE-WEB-1, Invardia / owner 2026-11-14: the updater holds no
+      PIM-for-Groups WRITE right). Reads the membership of -PrincipalId in the SQL admin group (Invoke-PimDbInitMembershipRead)
+      and REPORTS it; it NEVER writes (no member add, no PIM assignment request, no renewal). Same result shape as
+      Invoke-PimDbInitMembershipEnsure (ok; member; readBack; via; endUtc; timeLimited; renewed $false; renewFailed $false;
+      roleAssignable $null; addedUtc ''; changed 0; warnings; lines; errors; missing; reason; note), so the callers and the job
+      gate (Get-PimDbInitJobStartGate) are unchanged. Framework G5a (Invardia 2026-11-15): ONE plain read -- the identity's
+      memberOf (GroupMember.Read.All + Application.Read.All); the group's PIM assignments are not read (no PIM-for-Groups right):
+        a member                               info, ok
+        (a TIME-LIMITED PIM member is only seen by a caller that reads the assignments -- never the updater)
+        NOT a member (read)                    WARN "dbinit not a member" + who sets it; ok $false (the job is not started on it)
+        not readable                           WARN with the reason + the read rights named; member $null (unknown)
+      Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Graph, [Parameter(Mandatory)][string]$GroupId, [string]$GroupName = '',
+          [Parameter(Mandatory)][string]$PrincipalId, [string]$IdentityName = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $errors = New-Object System.Collections.Generic.List[string]; $missing = New-Object System.Collections.Generic.List[string]
+    $idn = $(if ("$IdentityName".Trim()) { "$IdentityName".Trim() } else { $PrincipalId }); $gn = $(if ("$GroupName".Trim()) { "$GroupName".Trim() } else { $GroupId })
+    $add = { param($level, $text) $lines.Add([pscustomobject]@{ id = 'dbinit-member'; level = $level; text = "database job identity: $text" }) }
+    $o = [ordered]@{ ok = $false; member = $null; readBack = $false; via = ''; endUtc = $null; timeLimited = $false; renewed = $false; renewFailed = $false
+                     roleAssignable = $null; addedUtc = ''; changed = 0; warnings = 0; lines = $null; errors = $null; missing = $null; reason = ''; note = '' }
+    $fix = Get-PimDbInitMembershipFixText
+    try {
+        $g = [guid]::Empty
+        if (-not [guid]::TryParse("$GroupId", [ref]$g) -or -not [guid]::TryParse("$PrincipalId", [ref]$g)) {
+            $o.reason = 'the SQL admin group or the identity is not known by its object id -- not checked'; & $add 'warn' $o.reason
+        } else {
+            $st = Invoke-PimDbInitMembershipRead -Graph $Graph -GroupId $GroupId -PrincipalId $PrincipalId -NowUtc $NowUtc -MemberOfOnly
+            foreach ($mm in @($st.missing)) { [void]$missing.Add($mm) }
+            $o.via = "$($st.via)"; $o.endUtc = $st.endUtc; $o.reason = "$($st.reason)"
+            if ($st.member -eq $true) {
+                $o.member = $true; $o.readBack = $true; $o.timeLimited = ($st.via -eq 'pim-timed')
+                if ($o.timeLimited) {
+                    $endTxt = Format-PimDbInitUtc $st.endUtc
+                    $o.note = "member through a TIME-LIMITED PIM assignment, ends $endTxt; not renewed by the updater"
+                    if ($st.renew -eq 'adminExtend') { & $add 'warn' "WARNING: $idn is a member of $gn only through a TIME-LIMITED PIM assignment that ENDS $endTxt -- the updater does not renew it; $fix" }
+                    else { & $add 'info' "$idn is a member of $gn through a TIME-LIMITED PIM assignment (ends $endTxt) -- $fix" }
+                } else {
+                    & $add 'info' "$idn is a member of $gn ($($st.reason)) -- read only, nothing written"
+                }
+            } elseif ($st.member -eq $false) {
+                $o.member = $false
+                $o.reason = "$idn is NOT a member of the SQL admin group $gn ($($st.reason)) -- $fix; the database job is not started on it"
+                [void]$errors.Add($o.reason); & $add 'warn' $o.reason
+            } else {
+                $o.reason = "the membership of $idn in $gn could not be read ($($st.reason)$(if (@($st.readErrors).Count) { '; ' + (@($st.readErrors) -join '; ') }))$(if ($missing.Count) { " -- the updater's identity needs $(@($missing.ToArray() | Select-Object -Unique) -join '; ') to read it" })"
+                [void]$errors.Add($o.reason); & $add 'warn' $o.reason
+            }
+        }
+    } catch { $o.reason = "not checked: $(Get-PimDbInitGraphError $_)"; [void]$errors.Add($o.reason); & $add 'warn' $o.reason }
+    $o.lines = @($lines.ToArray()); $o.errors = @($errors.ToArray()); $o.missing = @($missing.ToArray() | Select-Object -Unique)
+    $o.warnings = @($lines | Where-Object { $_.level -eq 'warn' }).Count
+    $o.ok = ($o.member -eq $true -and $o.readBack -eq $true)
+    return [pscustomobject]$o
+}
+
 function Invoke-PimDbInitMembershipGate {
     <#
       READ ONLY, for the moment BEFORE a job that runs as the database job's identity is started (the support consent job is a
@@ -605,7 +732,8 @@ function Invoke-PimDbInitMembershipGate {
         if ($adm.isGroup -eq $false) { $o.reason = "$($adm.reason) -- the database job cannot act as an admin through a group; it is not started"; return $o }
         if (-not $adm.groupId) { $o.reason = "$($adm.reason) -- the job is not started"; return $o }
         if (-not $Graph) { $o.reason = 'Microsoft Graph was not asked -- the membership is not read back; the job is not started'; return $o }
-        $m = Invoke-PimDbInitMembershipRead -Graph $Graph -GroupId $adm.groupId -PrincipalId "$($ua.principalId)" -NowUtc $NowUtc
+        # framework G5a: the gate runs in the UPDATER -- memberOf only (it holds no PrivilegedAssignmentSchedule right)
+        $m = Invoke-PimDbInitMembershipRead -Graph $Graph -GroupId $adm.groupId -PrincipalId "$($ua.principalId)" -NowUtc $NowUtc -MemberOfOnly
         $m['readBack'] = ($m.member -eq $true)
         $m['errors'] = @($m.readErrors)
         $o.membership = $m
@@ -622,10 +750,10 @@ function Invoke-PimDbInitMembershipGate {
 
 function Invoke-PimDbInitMembershipBeforeStart {
     <#
-      SETUP's call site (owner 2026-11-05 "both setup and upd"): right BEFORE the install starts the database job for the first
-      time (tools/setup/Setup-PimContainers.ps1 Invoke-PimDbInitJob), the SAME membership convergence the updater runs
-      (Invoke-PimDbInitMembershipEnsure: (a) direct, (b) ACTIVE PIM for Groups permanent first, (c) read back) for the job's
-      identity -- as the identity running setup. Reads the identity's object id (ARM) and the SQL server's Entra admin (ARM).
+      SETUP's call site: right BEFORE the install starts the database job for the first time (tools/setup/Setup-PimContainers.ps1
+      Invoke-PimDbInitJob). SECURE-WEB-1 (Invardia / owner 2026-11-14): setup makes the job's identity a PERMANENT DIRECT member
+      of the SQL admin group ONCE (Invoke-PimDbInitMembershipEnsure -DirectOnly: (a) a direct add, (c) read back -- never a PIM
+      assignment) -- as the identity running setup. The updater only REPORTS it (Invoke-PimDbInitMembershipReport). Reads the identity's object id (ARM) and the SQL server's Entra admin (ARM).
         * the admin is a GROUP  -> ensure; start only when it was READ BACK (else NOT started, both errors named);
         * the admin is NOT a group (an older install whose admin is a single identity) -> nothing to join; started as before,
           and said (SEC-03: the group-as-admin move is a separate step);
@@ -649,7 +777,7 @@ function Invoke-PimDbInitMembershipBeforeStart {
         if ($adm.isGroup -eq $false) { $o.start = $true; $o.reason = "$($adm.reason) -- no group to join; started as before (the group-as-admin move is a separate step)"; return $o }
         if (-not $adm.groupId) { $o.reason = "$($adm.reason) -- the job is not started"; return $o }
         if (-not $Graph) { $o.reason = 'Microsoft Graph was not asked -- the membership is not read back; the job is not started'; return $o }
-        $m = Invoke-PimDbInitMembershipEnsure -Graph $Graph -GroupId $adm.groupId -GroupName $adm.name -PrincipalId $oid -IdentityName $(if ($idn) { $idn } else { $oid }) -NowUtc $NowUtc -Sleep $Sleep -ReadBackWaits $ReadBackWaits -Who 'the identity running setup'
+        $m = Invoke-PimDbInitMembershipEnsure -Graph $Graph -GroupId $adm.groupId -GroupName $adm.name -PrincipalId $oid -IdentityName $(if ($idn) { $idn } else { $oid }) -NowUtc $NowUtc -Sleep $Sleep -ReadBackWaits $ReadBackWaits -Who 'the identity running setup' -DirectOnly
         $o.membership = $m
         $gate = Get-PimDbInitJobStartGate -Membership $m
         $o.start = [bool]$gate.start

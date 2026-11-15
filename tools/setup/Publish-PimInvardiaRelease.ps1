@@ -91,6 +91,10 @@ function Test-PimImageOnlyPath {
     # Invardia 2026-11-11 (868a703f, kind "version-string"): the sign-in front's version constant and VERSION file may move
     # too -- Invardia accepts ONLY lines that differ in their version numbers (any other change refuses the claim there).
     if ($p -match '(?i)(^|/)signin-front/(src/SecurityHeaders\.cs|VERSION)$' -or $leaf -match '(?i)\.version$') { return 'bookkeeping' }
+    # SEC-LANE-1 agreed rule (Invardia 2026-11-14, server check 9b72b2f3): tests, the What's new entries + their checksum list
+    # + the rendered WHATSNEW.md, and README.md are notes / never in the image -- they never make a release non-image-only.
+    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/(tests/.+|whats-new/[^/]+\.json|whats-new/SHA256SUMS\.txt|WHATSNEW\.md|README\.md)$' -or
+        $p -match '(?i)(^|/)FRAMEWORK/signin-front/(tests/.+|README\.md)$') { return 'bookkeeping' }
     return ''
 }
 function Get-PimImageOnlyDiff {

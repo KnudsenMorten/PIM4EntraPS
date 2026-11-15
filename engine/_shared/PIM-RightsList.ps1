@@ -177,8 +177,6 @@ function Get-PimRightsListExtraFeatureKeys {
         # SEC-10 (framework 4 "secrets in Key Vault only"; Invardia ruling 2026-11-11): on once the install's secrets were moved to
         # Key Vault references (tools\setup\Move-PimSecretsToKeyVault.ps1) -- before that no identity holds the right.
         'secrets-in-keyvault' = 'The install''s secrets were moved into its own Key Vault (Move-PimSecretsToKeyVault.ps1): the apps and jobs read them as Key Vault references with their own identity. Not a catalog gate -- the setup step keyvault-secrets-only reports it.'
-        # REQ-F: on once the emergency override passphrase was set up (Set-PimEmergencyPassphrase.ps1); before that no grant exists.
-        'emergency-override' = 'The emergency override (break-glass) passphrase is set up (Set-PimEmergencyPassphrase.ps1): the web app reads its hash from the one secret PIM-EmergencyPasscode. Not a catalog gate -- Settings > Emergency access shows it.'
         'azure-rbac' ='Azure resource role delegations (the workload connector id, engine\_shared\PIM-PermissionHealth.ps1 Get-PimWorkloadConnectorRequirements). Free and not a catalog gate: the engine needs User Access Administrator only where the store defines Azure scopes (engine\_shared\PIM-EngineAzureAccess.ps1, 95.2k)'
     }
 }
@@ -215,7 +213,12 @@ function Get-PimRightsAzureTable {
         # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the web identity holds NO job right any more (it was 'Container Apps Jobs
         # Operator' on the engine job: a job start accepts a container override, so the internet-facing app could run a command
         # as the engine). Commit / Run now wait for the next scheduled start of the engine job.
-        (& $r 'web' 'key-vault-crypto-service-encryption-user@signin-front-key' 'azure-rbac' 'Key Vault Crypto Service Encryption User' $kvCseu 'resource' 'the key signin-front in the install''s own Key Vault' 'always' '' 'The sign-in front wraps and unwraps its session keys' 'tools\setup\_PimInstallSigninFront.ps1 (signin-front-vault)')
+        # SECURE-WEB-1 (3.1.26, owner: "the internet-facing identity has NO Key Vault edge"): the web holds NO Key Vault role. The
+        # signin-front container is retired fleet-wide (its Key Vault Crypto Service Encryption User on the key signin-front went
+        # with it) and the break-glass check reads a verifier in the PIM database (its Key Vault Secrets User on the one secret
+        # PIM-EmergencyPasscode went too). What it gains is a DATA role on its OWN data: the token store of Microsoft's built-in
+        # sign-in (one blob container, not the account) -- not a never-right, so the SECURE-WEB-1 lint stays green.
+        (& $r 'web' 'storage-blob-data-contributor@token-store-container' 'azure-rbac' 'Storage Blob Data Contributor' $sbdc 'resource' 'the token-store container pim-auth-tokens in the install''s storage account only (not the account)' 'always' '' 'Microsoft''s built-in sign-in in front of the web app keeps its sign-in tokens there (the token store)' 'tools\setup\Set-PimManagerEasyAuth.ps1 (the token store: Storage Blob Data Contributor on the container pim-auth-tokens)')
         (& $r 'web' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls the web app image' 'tools\setup\Setup-PimContainers.ps1 (AcrPull per workload identity)')
         # ---- updater (the update job's identity)
         (& $r 'updater' 'contributor@install-rg' 'azure-rbac' 'Contributor' $contrib 'install-rg' 'the PIM resource group only; also on the registry itself when it lives in another resource group' 'always' '' 'Rolls the web app and the jobs to the approved image and builds it in the registry; after a healthy update deletes the images older than the previous release from the install''s own registry (IMAGE-PRUNE)' 'tools\setup\Deploy-PimUpdateJob.ps1 (step 2)')
@@ -252,10 +255,20 @@ function Get-PimRightsAzureTable {
     $wr = @($cat | Where-Object { $_.codeRole -eq (Get-PimSkvWriterRole) })[0]
     if (-not $wr) { throw "Get-PimSkvWriterRole names '$(Get-PimSkvWriterRole)', which is no identity of the rights list" }
     $rows += (& $r $wr.role 'key-vault-secrets-officer@install-vault' 'azure-rbac' (Get-PimSkvOfficerRoleName) (Get-PimSkvOfficerRoleId) 'resource' 'the install''s own Key Vault' 'feature' (Get-PimSkvFeatureKey) 'Writes the install''s secrets into its own Key Vault and switches the apps and jobs to Key Vault references (the update run''s secrets step); granted once by the Support app' 'engine\_shared\PIM-SecretsToKeyVault.ps1 Invoke-PimSkvUpdaterStep (tools\pim-engine\update-job-entry.ps1 step 2f-ter); granted by tools\setup\Move-PimSecretsToKeyVault.ps1 -GrantOnly')
-    # REQ-F (Invardia decision 2026-11-11: document the grant that already exists): the web identity reads the ONE secret
-    # PIM-EmergencyPasscode (the hash of the break-glass passphrase) -- tools\setup\Set-PimEmergencyPassphrase.ps1 grants it on
-    # that secret, not the vault. The format has no 'secret' scope value: scope resource, the secret named in scopeNote.
-    $rows += (& $r 'web' 'key-vault-secrets-user@emergency-passcode' 'azure-rbac' (Get-PimSkvRoleName) (Get-PimSkvRoleId) 'resource' 'the one secret PIM-EmergencyPasscode in the install''s own Key Vault (not the vault)' 'feature' 'emergency-override' 'Checks the emergency override (break-glass) passphrase against its stored hash' 'tools\setup\Set-PimEmergencyPassphrase.ps1 (step 2: Key Vault Secrets User on the secret PIM-EmergencyPasscode)')
+    # SECURE-WEB-1 (3.1.26): no row for the web on the secret PIM-EmergencyPasscode any more -- the break-glass check reads the
+    # verifier in the PIM database (engine\_shared\PIM-EmergencyVerifier.ps1); Set-PimEmergencyPassphrase.ps1 makes no grant.
+    # ---- WAKE-1 (3.1.26, framework SECURE-WEB-1 point 1): the wake queue 'pim-wake' -- ONE queue in the install's own storage
+    # account. The web may only SEND a message (a job name) to it; the wake job, which runs as the ENGINE identity, reads and
+    # deletes it and the platform counts it. Granted by setup (Deploy-PimWakeJob.ps1); the updater only reports a missing one.
+    $wkSrc = 'tools\setup\Deploy-PimWakeJob.ps1 (engine\_shared\PIM-Wake.ps1 Invoke-PimWakeConverge -Grant, Get-PimWakeRoleIds)'
+    $wkScope = 'the wake queue pim-wake in the install''s own storage account only (not the account)'
+    $rows += (& $r 'web' 'storage-queue-data-message-sender@wake-queue' 'azure-rbac' 'Storage Queue Data Message Sender' 'c6a89b2d-59bc-44d0-9896-0f6e12d7b80a' 'resource' $wkScope 'always' '' 'Commit / Run now put one wake message (the job name only) on the wake queue, so the engine starts within a minute' $wkSrc)
+    $rows += (& $r 'engine' 'storage-queue-data-message-processor@wake-queue' 'azure-rbac' 'Storage Queue Data Message Processor' '8a0f0c08-91a1-4084-bc3d-661d67233fed' 'resource' $wkScope 'always' '' 'The wake job (caj-pim-wake, as the engine identity) reads and deletes the wake message, checks its age and name, then runs the engine once' $wkSrc)
+    $rows += (& $r 'engine' 'storage-queue-data-reader@wake-queue' 'azure-rbac' 'Storage Queue Data Reader' '19e7f393-937e-4f77-808e-94535e297925' 'resource' $wkScope 'always' '' 'The platform counts the wake messages (event trigger) to start the wake job' $wkSrc)
+    # ---- MANAGER-CHAT-1 (3.1.26): the chat in the Manager calls Azure OpenAI KEYLESSLY as the web identity. An outbound,
+    # inference-only data role on ONE Azure OpenAI resource (the one named in Settings AiChat); no key, no management right.
+    # Granted by the operator on that resource, never by PIM's code; Set-PimAiChat.ps1 / the chat readiness check only report it.
+    $rows += (& $r 'web' 'cognitive-services-openai-user@ai-chat-resource' 'azure-rbac' 'Cognitive Services OpenAI User' '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd' 'resource' 'the one Azure OpenAI resource the AI chat settings name (not a subscription or resource group)' 'feature' 'ai.chat' 'The chat in the Manager sends the person''s question and the read results of their own role to the model, keyless' 'tools\setup\Set-PimAiChat.ps1 (readiness check only; the grant is made on the Azure OpenAI resource by the operator)')
     return $rows
 }
 
@@ -277,8 +290,8 @@ function Get-PimRightsIdentityCatalog {
       PURE. The identities of the list: role (the id-pim-<role> word), the code role key (engine\_shared\PIM-IdentitySplit.ps1),
       the old names (renamed identities), the Graph set it gets (a key of Get-PimRightsCodeGraphSets, '' = none) and when.
     #>
-    # internetFacing (SECURE-WEB-1 point 4): the identity of an app WITH INGRESS -- web = ca-pim-manager (the Manager + its
-    # signin-front container), requests = the RFA broker app (public portal). In Container Apps every container of an app can
+    # internetFacing (SECURE-WEB-1 point 4): the identity of an app WITH INGRESS -- web = ca-pim-manager (the Manager; its
+    # signin-front container is retired, 3.1.26), requests = the RFA broker app (public portal). In Container Apps every container of an app can
     # take every identity assigned to that app, so these identities may hold only their own data (Get-PimRightsNeverRules).
     return @(
         [ordered]@{ role = 'engine';   codeRole = 'engine';   oldNames = @();                  graph = 'engine';   when = 'always';  featureKey = '';             internetFacing = $false }
@@ -298,11 +311,12 @@ function Get-PimRightsNeverRules {
       one lets a compromised web container reach beyond its own data. Matched on the role id (Azure built-ins) and, for Graph,
       on the permission name; an Azure role also by its NAME (azureRoleName), so a built-in whose id is not listed here (any
       Container Apps job role, any Contributor of the compute plane) is still caught. A data role on the identity's own data
-      (Storage Table / Blob Data Contributor, Crypto Service Encryption User on its one key) is not a never-right.
+      (Storage Table / Blob Data Contributor on its own table / container) is not a never-right. SECURE-WEB-1 (3.1.26): ANY
+      Key Vault role is a never-right (azureRoleName '\bkey vault\b') -- an internet-facing identity has no Key Vault edge.
       Returns @{ azureRoleIds = @{ id = name }; azureRoleName = regex; graphPattern = regex }.
     #>
     return @{
-        azureRoleName = '(?i)(\bjobs?\b|^owner$|^contributor$|container apps contributor|managedenvironments contributor|user access administrator|role based access control administrator|^acrpush$|key vault secrets|key vault administrator|key vault contributor|key vault data access administrator|managed identity (operator|contributor))'
+        azureRoleName = '(?i)(\bjobs?\b|^owner$|^contributor$|container apps contributor|managedenvironments contributor|user access administrator|role based access control administrator|^acrpush$|\bkey vault\b|managed identity (operator|contributor))'
         azureRoleIds = [ordered]@{
             'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b' = 'Container Apps Jobs Operator'
             'b24988ac-6180-42a0-ab88-20f7382dd24c' = 'Contributor'
@@ -326,14 +340,12 @@ function Get-PimRightsNeverRules {
 
 function Get-PimRightsNeverExceptions {
     <#
-      PURE. LITERAL. The ONLY never-right an internet-facing identity may hold: Invardia decision 2026-11-14 (SECURE-WEB-1 F1 b) --
-      Key Vault Secrets User on the ONE secret PIM-EmergencyPasscode (the hash of the break-glass passphrase, per-secret scope).
-      Reported by the gate, never failed. Target: the check moves behind built-in auth / the engine. Any OTHER never-right
-      fails the gate; this list only shrinks. (F1 a: the web left the SEC-10 vault reader set -- Get-PimSkvReaderRoles.)
+      PURE. LITERAL. The never-rights an internet-facing identity may still hold -- EMPTY since 3.1.26 (SECURE-WEB-1, owner: "the
+      internet-facing identity has NO Key Vault edge"). The one exception there was (Invardia 2026-11-14 F1 b: the web's Key Vault
+      Secrets User on the secret PIM-EmergencyPasscode) is gone: the break-glass check reads a verifier in the PIM database. Every
+      never-right now fails the gate; this list only shrinks, so it stays empty.
     #>
-    return @(
-        'web.azure.key-vault-secrets-user@emergency-passcode'
-    )
+    return @()
 }
 
 function Test-PimRightsInternetFacing {

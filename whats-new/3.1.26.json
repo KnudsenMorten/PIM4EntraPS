@@ -1,0 +1,34 @@
+{
+  "version": "3.1.26",
+  "date": "2026-11-15",
+  "type": "security",
+  "summary": "Security release: Microsoft's own sign-in and token checks protect PIM Manager, the request API uses Entra tokens only, and Pro adds a chat in the Manager.",
+  "new": [
+    {
+      "title": "Chat in the Manager (Pro)",
+      "text": "Ask in plain words and have changes prepared, answered by your own Azure OpenAI deployment without any key, under your own role. Changes are only prepared; you save them. Off by default."
+    }
+  ],
+  "fixes": [
+    {
+      "title": "Microsoft's token library",
+      "text": "Every sign-in token is checked with Microsoft's own library, which PIM Manager tests at every start before it serves a request."
+    },
+    {
+      "title": "Your sign-in stays fresh",
+      "text": "The page renews your sign-in before it ends, and offers Sign in again or Sign in with another account when needed."
+    },
+    {
+      "title": "Entra tokens instead of API keys",
+      "text": "The access request API accepts only Microsoft Entra application tokens with an app role. Applications on your allow-list get the role automatically."
+    },
+    {
+      "title": "Commit and Run now within a minute",
+      "text": "Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job."
+    },
+    {
+      "title": "Smaller fixes",
+      "text": "The web app holds no Key Vault role (the break-glass passphrase is checked against a protected verifier in the PIM database), and discovery mails are marked as information, not warnings."
+    }
+  ]
+}

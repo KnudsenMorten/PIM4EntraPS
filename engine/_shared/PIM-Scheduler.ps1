@@ -3400,6 +3400,8 @@ function Write-PimJobRunRecord {
         warning     = [bool]$warnR
         warningKind = $(if ($warnR -and $inner.PSObject.Properties['warningKind']) { "$($inner.warningKind)" } else { '' })
         warningSummary = $(if ($warnR -and $inner.PSObject.Properties['warningSummary']) { "$($inner.warningSummary)" } else { '' })
+        # TRUST-1 round 4 item 9 (additive): the handler's own word that its DATA is not whole (trusted = $false) -- $null when it says nothing
+        trusted = $(if ($Result.ok -and $inner -and $inner.PSObject.Properties['trusted'] -and $null -ne $inner.trusted) { [bool]$inner.trusted } else { $null })
         detail      = "$($Result.detail)"
         trigger     = [bool]$Trigger
         reason      = "$Reason"
@@ -3626,6 +3628,7 @@ function Invoke-PimJobForceStart {
         warning     = [bool]$warnF
         warningKind = $(if ($warnF -and $inner.PSObject.Properties['warningKind']) { "$($inner.warningKind)" } else { '' })
         warningSummary = $(if ($warnF -and $inner.PSObject.Properties['warningSummary']) { "$($inner.warningSummary)" } else { '' })
+        trusted = $(if ($res.ok -and $inner -and $inner.PSObject.Properties['trusted'] -and $null -ne $inner.trusted) { [bool]$inner.trusted } else { $null })   # TRUST-1 round 4 item 9
         detail      = "$($res.detail)"
         trigger     = $true
         reason      = 'force-start'

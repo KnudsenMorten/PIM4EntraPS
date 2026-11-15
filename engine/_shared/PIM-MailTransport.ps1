@@ -349,9 +349,11 @@ function Get-PimMailCheck {
         if ($relay.ok -and -not "$($c.username)".Trim()) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'ok' 'the relay needs no sign-in -- no password' '' }
         else {
             $pw = & $f 'smtpPassword'; $rd = & $gv $pw 'readable'
-            if ($rd -eq $true) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'ok' "secret '$($c.secretName)' in Key Vault '$($c.vaultName)' is readable by this PIM Manager" '' }
-            elseif ($rd -eq $false) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'failed' "the password cannot be read: $(& $gv $pw 'reason')" $pwFix }
-            else { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'unknown' 'not checked yet (the relay settings are incomplete, or Key Vault could not be asked)' $pwFix }
+            # SECURE-WEB-1 (3.1.26): the ENGINE (the sender) reads the password -- the web app reads no secret; the fact is
+            # the engine's own check at its test mail (pim.Settings 'MailSmtpPasswordCheck')
+            if ($rd -eq $true) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'ok' "secret '$($c.secretName)' in Key Vault '$($c.vaultName)' is readable by the engine (the sender)" '' }
+            elseif ($rd -eq $false) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'failed' "the engine cannot read the password: $(& $gv $pw 'reason')" $pwFix }
+            else { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'unknown' "not checked yet$(if ("$(& $gv $pw 'reason')".Trim()) { ': ' + "$(& $gv $pw 'reason')".Trim() } else { ' (the relay settings are incomplete)' })" $pwFix }
         }
         $lt = & $f 'lastTest'
         $fp = Get-PimMailTestFingerprint -Mode 'smtp' -Sender '' -Smtp $c
@@ -373,7 +375,9 @@ function Get-PimMailCheck {
         elseif ($found -eq $false) { & $add 'mail-mailbox' 'Sender mailbox exists' 'failed' "Microsoft Graph does not find '$sender' -- PIM sends as exactly this address" $mbFix }
         else { & $add 'mail-mailbox' 'Sender mailbox exists' 'unknown' "'$sender' could not be looked up$(if ("$(& $gv $lk 'error')".Trim()) { ": $(& $gv $lk 'error')" })" $mbFix }
         $ids = @(@(& $f 'identities') | Where-Object { $_ })
-        foreach ($role in 'engine', 'manager') {
+        # SECURE-WEB-1 (3.1.26): only the ENGINE sends mail -- the web app's identity holds no send right any more, so its
+        # row is gone (it is still named below when it holds a tenant-wide Mail.Send: that must never be).
+        foreach ($role in @('engine')) {
             $i = @($ids | Where-Object { "$(& $gv $_ 'role')" -eq $role }) | Select-Object -First 1
             $title = if ($role -eq 'engine') { 'Engine job: scoped send right' } else { 'PIM Manager: scoped send right' }
             $prove = if ($role -eq 'engine') { "the engine's next mail (a TAP code, a reminder or an alert) proves it" } else { 'PIM Manager > Get Started > Mail sender: Save and send a test mail (the Manager sends it as its own identity)' }

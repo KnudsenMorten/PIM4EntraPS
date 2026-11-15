@@ -203,8 +203,94 @@ function Test-PimInstallSigninFrontLive {
     return @{ live = (-not $eaOn); complete = ($miss.Count -eq 0); missing = @($miss) }
 }
 
+function Invoke-PimInstallVaultCore {
+    <#
+      The install's OWN Key Vault (no key, no role): found, or made (name checked first -- a deleted vault keeps its name for 90
+      days), Azure RBAC required, and on a private install made private and READ BACK private with its endpoint (framework
+      installer rule 11). Shared by the install's 'install-keyvault' step and the opt-in front's 'signin-front-vault'.
+      -OnLine { param($State, $Message) }. Returns @{ vault; customerTasks }. Throws on a refusal (the caller names its step).
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Location,
+          [Parameter(Mandatory)][string]$VaultPath, [Parameter(Mandatory)][string]$KeyVaultName, [AllowEmptyString()][string]$SqlServer = '',
+          [Parameter(Mandatory)][string]$SolutionRoot, [bool]$PrivateNetwork = $false, [Parameter(Mandatory)][hashtable]$Io,
+          [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$OnLine)
+    $kvApi = '2023-07-01'
+    $tasks = @()
+    $vault = & $Io.Arm 'GET' $VaultPath $null $kvApi
+    if (-not $vault) {
+        $avail = & $Io.Arm 'POST' "/subscriptions/$SubscriptionId/providers/Microsoft.KeyVault/checkNameAvailability" @{ name = $KeyVaultName; type = 'Microsoft.KeyVault/vaults' } $kvApi
+        if ($avail -and $avail.PSObject.Properties['nameAvailable'] -and -not [bool]$avail.nameAvailable) {
+            throw ("the Key Vault name '$KeyVaultName' is taken ($($avail.reason)) -- a deleted vault keeps its name for 90 days. " +
+                   "Set another name in the answers (keyVaultName) and resume the installation")
+        }
+        $vault = & $Io.Arm 'PUT' $VaultPath (New-PimInstallKeyVaultBody -Location $Location -TenantId $TenantId -Private:$PrivateNetwork) $kvApi
+        for ($i = 0; $i -lt 36 -and "$($vault.properties.provisioningState)" -notin 'Succeeded', ''; $i++) { & $Sleep 5; $vault = & $Io.Arm 'GET' $VaultPath $null $kvApi }
+        if (-not $vault) { throw "the Key Vault $KeyVaultName was not created" }
+    }
+    if (-not [bool]$vault.properties.enableRbacAuthorization) { throw "the Key Vault $KeyVaultName does not use Azure RBAC -- the install's vault must (it was not made by this install)" }
+    if ($PrivateNetwork) {
+        # rule 11: PATCH to the shape + READ BACK + the endpoint in the zone, BEFORE any key (a recovered vault ignores
+        # networkAcls and comes back with bypass None -> the ARM key calls answer 400 ForbiddenByConnection)
+        if (-not (Get-Command Invoke-PimKeyVaultRule11 -ErrorAction SilentlyContinue)) { . (Join-Path $SolutionRoot 'engine\_shared\PIM-KeyVaultPrivate.ps1') }
+        # no GetNewClosure() (see New-PimInstallSigninFrontIo): $Io / $kvApi are found through the call chain
+        $kvArm = { param($m, $p, $b) $pp, $q = "$p" -split '\?api-version=', 2; & $Io.Arm $m $pp $b $(if ($q) { $q } else { $kvApi }) }
+        $kv11 = Invoke-PimKeyVaultRule11 -Arm $kvArm -VaultId $VaultPath -SqlServerName (("$SqlServer" -split '\.')[0]) -Sleep $Sleep
+        foreach ($l in @($kv11.lines)) { if ($OnLine) { & $OnLine $(if ("$($l.level)" -eq 'warn') { 'warning' } else { 'waiting' }) "$($l.text)" } }
+        if ($kv11.ok -and "$($kv11.customerTask)".Trim()) { $tasks += "$($kv11.customerTask)" }
+        if (-not $kv11.ok) { throw "the install is private, so its Key Vault must be too -- $($kv11.reason). Nothing was stored in the vault; resume the installation once it is fixed" }
+    }
+    return @{ vault = $vault; customerTasks = @($tasks) }
+}
+
+function Get-PimInstallKeyVaultStepId { <# PURE. LITERAL. The install's Key Vault step (BUILT-IN-AUTH-1: no sign-in front steps any more). #> return 'install-keyvault' }
+
+function Invoke-PimInstallKeyVault {
+    <#
+      BUILT-IN-AUTH-1 (owner 2026-11-14): a NEW install ends on Microsoft's built-in sign-in (the deploy's 'easyauth' step --
+      secretless, read back), so the sign-in front is NOT installed: no 'signin-front' key, no
+      role on any key, no front state, no front image, no front container. What the install still needs from this file is
+      its OWN Key Vault (Standard, RBAC, soft delete 90 days, purge protection; private on a private install) -- the place
+      PIM's secrets go (SEC-10). ONE step, id 'install-keyvault'; -Done = step ids already completed (resume).
+      -OnStep { param($Id, $State, $Message) }; -Io as Invoke-PimInstallSigninFront (Arm; Sleep).
+      Returns @{ ok; failedStep; reason; completed[]; keyVaultId; customerTasks }.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$TenantId,
+          [Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$ManagerApp, [Parameter(Mandatory)][string]$KeyVaultName,
+          [Parameter(Mandatory)][string]$SolutionRoot, [string[]]$Done = @(), [scriptblock]$OnStep, [Parameter(Mandatory)][hashtable]$Io,
+          [bool]$PrivateNetwork = $false)
+    $step = Get-PimInstallKeyVaultStepId
+    $res = @{ ok = $false; failedStep = ''; reason = ''; completed = (New-Object System.Collections.Generic.List[string]); keyVaultId = ''; customerTasks = @() }
+    $say = { param($id, $st, $msg) if ($OnStep) { try { & $OnStep $id $st $msg } catch { } } }
+    $sleep = if ($Io.Sleep) { $Io.Sleep } else { { param($s) Start-Sleep -Seconds $s } }
+    $vaultPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.KeyVault/vaults/$KeyVaultName"
+    $res.keyVaultId = $vaultPath
+    if ($Done -contains $step) { & $say $step 'skipped' 'already done (resume)'; $res.completed.Add($step) | Out-Null; $res.ok = $true; $res.reason = 'already done'; return $res }
+    try {
+        & $say $step 'started' "the install's own Key Vault $KeyVaultName (the place PIM keeps its secrets)"
+        $sqlServer = ''
+        if ($PrivateNetwork) {
+            $app = & $Io.Arm 'GET' "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$ManagerApp" $null '2024-03-01'
+            foreach ($c in @($app.properties.template.containers)) { foreach ($e in @($c.env)) { if ($e -and "$($e.name)" -eq 'PIM_SqlServer' -and "$($e.value)".Trim()) { $sqlServer = "$($e.value)".Trim() } } }
+        }
+        $core = Invoke-PimInstallVaultCore -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location -VaultPath $vaultPath -KeyVaultName $KeyVaultName `
+                    -SqlServer $sqlServer -SolutionRoot $SolutionRoot -PrivateNetwork $PrivateNetwork -Io $Io -Sleep $sleep -OnLine { param($st, $msg) & $say $step $st $msg }
+        $res.customerTasks = @($core.customerTasks)
+        & $say $step 'ok' "Key Vault $KeyVaultName (Azure RBAC, soft delete 90 days, purge protection$(if ($PrivateNetwork) { ', private' })) -- no sign-in key and no role on it: the sign-in is Microsoft's built-in sign-in"
+        $res.completed.Add($step) | Out-Null
+        $res.ok = $true; $res.reason = 'the install''s Key Vault is in place'
+    } catch {
+        $res.ok = $false; $res.failedStep = $step
+        $res.reason = "$((("$($_.Exception.Message)") -split "`n")[0])"
+        & $say $step 'failed' $res.reason
+    }
+    return $res
+}
+
 function Invoke-PimInstallSigninFront {
     <#
+      OPT-IN ONLY since BUILT-IN-AUTH-1 (owner 2026-11-14): no install path calls this any more -- a new install is on
+      Microsoft's built-in sign-in (Install-PimManager runs Invoke-PimInstallKeyVault instead). Kept for an install whose
+      owner chooses the sign-in front (Set-PimManagerSigninFront.ps1).
       The five steps. -Done = step ids already completed (resume). -OnStep { param($Id, $State, $Message) } reports each.
       -Io (scriptblocks; the real ones come from New-PimInstallSigninFrontIo):
         Arm    { param($Method, $Path, $Body, $ApiVersion) }      ARM; a 404 answers $null on GET
@@ -256,29 +342,9 @@ function Invoke-PimInstallSigninFront {
         if ($Done -contains $step) { & $say $step 'skipped' 'already done (resume)' }
         else {
             & $say $step 'started' "the install's own Key Vault $KeyVaultName and its key for the sign-in front"
-            $vault = & $Io.Arm 'GET' $vaultPath $null $kvApi
-            if (-not $vault) {
-                $avail = & $Io.Arm 'POST' "/subscriptions/$SubscriptionId/providers/Microsoft.KeyVault/checkNameAvailability" @{ name = $KeyVaultName; type = 'Microsoft.KeyVault/vaults' } $kvApi
-                if ($avail -and $avail.PSObject.Properties['nameAvailable'] -and -not [bool]$avail.nameAvailable) {
-                    throw ("the Key Vault name '$KeyVaultName' is taken ($($avail.reason)) -- a deleted vault keeps its name for 90 days. " +
-                           "Set another name in the answers (keyVaultName) and resume the installation")
-                }
-                $vault = & $Io.Arm 'PUT' $vaultPath (New-PimInstallKeyVaultBody -Location $Location -TenantId $TenantId -Private:$PrivateNetwork) $kvApi
-                for ($i = 0; $i -lt 36 -and "$($vault.properties.provisioningState)" -notin 'Succeeded', ''; $i++) { & $sleep 5; $vault = & $Io.Arm 'GET' $vaultPath $null $kvApi }
-                if (-not $vault) { throw "the Key Vault $KeyVaultName was not created" }
-            }
-            if (-not [bool]$vault.properties.enableRbacAuthorization) { throw "the Key Vault $KeyVaultName does not use Azure RBAC -- the install's vault must (it was not made by this install)" }
-            if ($PrivateNetwork) {
-                # rule 11: PATCH to the shape + READ BACK + the endpoint in the zone, BEFORE the key (a recovered vault ignores
-                # networkAcls and comes back with bypass None -> the ARM key calls answer 400 ForbiddenByConnection)
-                if (-not (Get-Command Invoke-PimKeyVaultRule11 -ErrorAction SilentlyContinue)) { . (Join-Path $SolutionRoot 'engine\_shared\PIM-KeyVaultPrivate.ps1') }
-                # no GetNewClosure() (see New-PimInstallSigninFrontIo): $Io / $kvApi are found through the call chain
-                $kvArm = { param($m, $p, $b) $pp, $q = "$p" -split '\?api-version=', 2; & $Io.Arm $m $pp $b $(if ($q) { $q } else { $kvApi }) }
-                $kv11 = Invoke-PimKeyVaultRule11 -Arm $kvArm -VaultId $vaultPath -SqlServerName (("$sqlServer" -split '\.')[0]) -Sleep $sleep
-                foreach ($l in @($kv11.lines)) { & $say $step $(if ("$($l.level)" -eq 'warn') { 'warning' } else { 'waiting' }) "$($l.text)" }
-                if ($kv11.ok -and "$($kv11.customerTask)".Trim()) { $res.customerTasks = @(@($res.customerTasks) + "$($kv11.customerTask)" | Where-Object { $_ }) }   # rules 14/16: the install goes on
-                if (-not $kv11.ok) { throw "the install is private, so its Key Vault must be too -- $($kv11.reason). Nothing was stored in the vault; resume the installation once it is fixed" }
-            }
+            $core = Invoke-PimInstallVaultCore -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location -VaultPath $vaultPath -KeyVaultName $KeyVaultName `
+                        -SqlServer $sqlServer -SolutionRoot $SolutionRoot -PrivateNetwork $PrivateNetwork -Io $Io -Sleep $sleep -OnLine { param($st, $msg) & $say $step $st $msg }
+            if (@($core.customerTasks).Count) { $res.customerTasks = @(@($res.customerTasks) + @($core.customerTasks) | Where-Object { $_ }) }   # rules 14/16: the install goes on
             $key = & $Io.Arm 'GET' $keyPath $null $kvApi
             if (-not $key) { $key = & $Io.Arm 'PUT' $keyPath @{ properties = @{ kty = 'RSA'; keySize = 2048; keyOps = @('wrapKey', 'unwrapKey') } } $kvApi }
             if (-not $key) { throw "the key '$($script:PimSfiKeyName)' could not be created in $KeyVaultName" }

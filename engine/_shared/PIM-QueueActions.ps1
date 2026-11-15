@@ -78,6 +78,12 @@ function Get-PimQueueActionCatalog {
         @{ type='group-delete'
            description='Delete ONE Entra group the Drift page listed as an extra (its own commit; prefix, unique name, not defined in PIM, no break-glass member, removal budget; verified by the group being gone)'
            verifiable=$true }
+        # SECURE-WEB-1 (3.1.26): the web app sends no mail (its identity holds no Exchange send right). An alert / notice it
+        # raises is queued here and the ENGINE sends it as its own identity (Invoke-PimQueueNotifyMail). Sent ONCE -- never
+        # retried, so a recipient never gets it twice; a send acknowledgement is all there is (no read-back of a mailbox).
+        @{ type='notify-mail'
+           description='Send a mail the web app raised (an alert, a notice) through the engine''s mail sender, once'
+           verifiable=$false }
     ) | ForEach-Object { [pscustomobject]$_ }
 }
 
@@ -637,6 +643,57 @@ function Invoke-PimQueueGroupDelete {
     return [pscustomobject]@{ ok = $false; verification = 'indeterminate'; detail = "$what, but the group is still present on read-back (directory may not have caught up) -- retried" }
 }
 
+# ---------------------------------------------------------------------------
+# SECURE-WEB-1 (3.1.26, framework): the internet-facing web app sends NO mail and reads / writes NO Key Vault secret. A mail
+# it raises (an alert, a notice) becomes ONE queued 'notify-mail' action -- committed at once, the tick started -- and the
+# engine sends it here, as its own identity, through the one mail chokepoint (Send-PimNotifyMail: kill switch, redirect,
+# allowlist, template, frame). Credential mails (TAP, first password) are never queued. The payload is built by
+# New-PimNotifyMailAction (PIM-Notify.ps1: loaded by the web app too).
+# ---------------------------------------------------------------------------
+function Invoke-PimQueueNotifyMail {
+    <#
+      The ENGINE half of a queued notify request: one Send-PimNotifyMail per recipient, as this process's identity.
+      Returns the queue's @{ ok; terminal; verification = 'none'; detail }. ALWAYS terminal when not every recipient got it
+      (sent ONCE: a retry would mail the others twice). Refused, nothing sent: a credential mail kind, a request older than
+      -MaxAgeHours (24; an alert days late misleads), or a process that is itself the web app ($global:PIM_NotifyMailQueue).
+      -Sender: test seam param($MailType, $Tokens, $Recipient, $Attachments) -> @{ sent; reason }.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [scriptblock]$Sender, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxAgeHours = 24)
+    $g = { param($n) if ($Payload -is [System.Collections.IDictionary]) { $Payload[$n] } elseif ($Payload.PSObject.Properties[$n]) { $Payload.$n } else { $null } }
+    $no = { param($why) [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; detail = "notify-mail NOT sent: $why" } }
+    $type = "$(& $g 'mailType')".Trim()
+    if (-not $type) { return (& $no 'the request names no mail kind') }
+    $cred = if (Get-Command Get-PimNotifyCredentialMailTypes -ErrorAction SilentlyContinue) { @(Get-PimNotifyCredentialMailTypes) } else { @('tap-delivery', 'ad-password-delivery') }
+    if ($cred -contains $type) { return (& $no "a '$type' mail carries a credential and is never sent from a queued request") }
+    if ($global:PIM_NotifyMailQueue -is [scriptblock] -and -not $Sender) { return (& $no 'this process is the web app, which sends no mail (the engine drains this queue)') }
+    $raised = $null; $d = [datetime]::MinValue; $rawRaised = & $g 'raisedUtc'
+    # ConvertFrom-Json (pwsh 7) may already have turned the ISO stamp into a [datetime]: never round-trip it through text
+    if ($rawRaised -is [datetime]) { $raised = $rawRaised.ToUniversalTime() }
+    elseif ([datetime]::TryParse("$rawRaised", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$d)) { $raised = $d.ToUniversalTime() }
+    if ($raised -and ($NowUtc.ToUniversalTime() - $raised).TotalHours -gt $MaxAgeHours) { return (& $no "the request is older than $MaxAgeHours h (raised $(& $g 'raisedUtc')) -- a late alert would mislead") }
+    $tok = @{}
+    $src = & $g 'tokens'
+    if ($src -is [System.Collections.IDictionary]) { foreach ($k in @($src.Keys)) { $tok["$k"] = $src[$k] } }
+    elseif ($src) { foreach ($pp in @($src.PSObject.Properties)) { $tok[$pp.Name] = $pp.Value } }
+    $att = @(@(& $g 'attachments') | Where-Object { $_ -and "$($_.base64)".Trim() } | ForEach-Object { @{ name = "$($_.name)"; contentType = "$($_.contentType)"; bytes = [Convert]::FromBase64String("$($_.base64)") } })
+    $to = @(@(& $g 'recipients') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $to.Count) { return [pscustomobject]@{ ok = $true; verification = 'none'; detail = "notify-mail '$type': no recipient -- nothing to send" } }
+    $send = if ($Sender) { $Sender } else { { param($t, $k, $r, $a) Send-PimNotifyMail -Type $t -Tokens $k -Recipient $r -Attachments @($a) } }
+    $ok = 0; $fails = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $to) {
+        $res = $null
+        try { $res = & $send $type $tok $r $att } catch { $res = @{ sent = $false; reason = "$($_.Exception.Message)" } }
+        $sent = $false; $why = ''
+        if ($res -is [System.Collections.IDictionary]) { $sent = ("$($res['sent'])" -match '(?i)^true$'); $why = "$($res['reason'])" }
+        elseif ($res -and $res.PSObject.Properties['sent']) { $sent = ("$($res.sent)" -match '(?i)^true$'); $why = "$($res.reason)" }
+        if ($sent) { $ok++ } else { $fails.Add("${r}: $(if ($why) { $why } else { 'not sent' })") }
+    }
+    $evt = "$(& $g 'event')".Trim()
+    $what = "notify-mail '$type'$(if ($evt) { " ($evt)" })"
+    if (-not $fails.Count) { return [pscustomobject]@{ ok = $true; verification = 'none'; detail = "$what sent by the engine to $ok recipient(s)" } }
+    return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; detail = "$what sent to $ok of $($to.Count) recipient(s) (not retried, so nobody gets it twice): $($fails -join '; ')" }
+}
+
 function Invoke-PimQueueAction {
     [CmdletBinding()]
     param(
@@ -660,6 +717,8 @@ function Invoke-PimQueueAction {
         return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'
             detail="unknown action type '$type' -- no applier is registered for it" }
     }
+    # SECURE-WEB-1 (3.1.26): a mail the web app raised -- no directory call, so none of the directory guards below apply.
+    if ($type -eq 'notify-mail') { return (Invoke-PimQueueNotifyMail -Payload $p) }
 
     # REQ-Y (operator 2026-09-19: "revoke is pro", hard): a queued revoke of a current delegation needs a Pro licence at
     # EXECUTION too (the Manager refuses to queue one without it; this covers an entry queued before). Refused before any

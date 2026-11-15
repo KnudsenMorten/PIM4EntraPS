@@ -2,29 +2,30 @@
   "script": "Set-PimEmergencyPassphrase.ps1",
   "product": "pim",
   "title": "Set up the emergency override passphrase",
-  "purpose": "Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores its SHA-256 hash as a secret in the environment's key vault, gives the Manager's managed identity read access to that one secret, and points the Manager at the vault.",
-  "whenToRun": "Once per installation, before the emergency override is needed (Settings > Emergency access shows 'Not set up yet' and the two-line command with this installation's values until it has run), and again to change the passphrase.",
+  "purpose": "Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores a check of it (a salted, slow PBKDF2-SHA256 hash, never the passphrase) in the environment's PIM database, where the Manager reads it at once; the Manager needs no Key Vault access.",
+  "whenToRun": "Once per installation, before the emergency override is needed (Settings > Emergency access shows 'Not set up yet' and the two-line command with this installation's values until it has run), and again to change the passphrase. An installation set up before 3.1.26 kept the passphrase in a key vault: the update moves it by itself where it may read that secret; otherwise run this once with -VaultName and -MigrateFromKeyVault (the passphrase is not asked for and does not change).",
   "standalone": true,
   "sourcePath": "tools/setup/Set-PimEmergencyPassphrase.ps1",
   "runAs": [
-    { "kind": "azureRbac", "name": "Key Vault Secrets Officer (or Key Vault Administrator)", "scope": "the environment's key vault", "why": "Writes the secret PIM-EmergencyPasscode and reads it back." },
-    { "kind": "azureRbac", "name": "User Access Administrator or Role Based Access Control Administrator (or Owner)", "scope": "the environment's key vault (the grant is made on one secret in it)", "why": "Creates the Azure role assignment that lets the Manager read that one secret." },
-    { "kind": "azureRbac", "name": "Contributor (or Container Apps Contributor)", "scope": "the resource group of the Manager container app", "why": "Reads the Manager app and sets its PIM_EmergencyVault setting (a new revision)." }
+    { "kind": "other", "name": "Member of the installation's SQL admin group", "scope": "the environment's PIM database", "why": "Writes the setting EmergencyPassphraseVerifier in pim.Settings, reads it back and writes the audit event." },
+    { "kind": "azureRbac", "name": "Reader", "scope": "the resource group of the Manager container app", "why": "Reads the Manager app to find its database (PIM_SqlServer / PIM_SqlDatabase) -- not needed when -SqlServerFqdn and -SqlDatabase are given." },
+    { "kind": "azureRbac", "name": "Key Vault Secrets User", "scope": "only with -MigrateFromKeyVault: the secret PIM-EmergencyPasscode in the key vault an earlier version used", "why": "Reads the passphrase hash an earlier version stored there, once, to move it into the database." }
   ],
   "changes": [
-    { "target": "Azure Key Vault", "action": "create", "object": "secret PIM-EmergencyPasscode (-SecretName) holding the SHA-256 hex of the passphrase; a new version when it already exists", "scope": "the environment's key vault", "why": "The Manager checks a typed passphrase against this hash. The clear passphrase is never stored, never on a command line, never logged.", "undo": "Disable or delete the secret version in the key vault (break-glass activation is then refused until it is set again)." },
-    { "target": "Azure role assignment", "action": "grant", "object": "the Manager container app's managed identity (system- and/or user-assigned)", "permission": "Key Vault Secrets User (Azure role 4633458b-17de-408a-b874-0445c86b69e6)", "scope": "the one secret <vault>/secrets/PIM-EmergencyPasscode (not the whole vault)", "why": "So the Manager can read the hash -- least privilege: read access to that secret only. An existing grant on the vault or the secret is left alone.", "undo": "Remove that role assignment on the secret (Azure portal > key vault > Secrets > the secret > Access control)." },
-    { "target": "Azure Container Apps", "action": "update", "object": "environment variable PIM_EmergencyVault=<vault> on the Manager container app (read-modify-write; every other setting kept)", "scope": "the Manager container app (-ManagerApp), a new revision", "why": "Tells the Manager which vault holds the passphrase.", "undo": "Remove PIM_EmergencyVault from the container app (a new revision)." },
-    { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result file named by -OutFile (never the passphrase or its hash)", "scope": "this computer", "why": "For a caller that reads the outcome.", "undo": "Delete the file." }
+    { "target": "PIM database (pim.Settings)", "action": "update", "object": "the setting EmergencyPassphraseVerifier: PBKDF2-SHA256 over the passphrase's SHA-256 hex, 600000 iterations, 16 random bytes of salt of its own -- never the passphrase, never its plain hash", "scope": "the environment's PIM database", "why": "The Manager checks a typed passphrase against it (constant time; 5 wrong attempts lock activation for 15 minutes). It works at once, with no restart and no engine run. The clear passphrase is never stored, never on a command line, never logged.", "undo": "Run the script again to set another passphrase. Without the setting, emergency override activation is refused." },
+    { "target": "PIM database (audit)", "action": "create", "object": "one audit event emergency.passphrase.set (the algorithm and iteration count; never the check itself)", "scope": "the environment's PIM database", "why": "Every change of the passphrase is recorded.", "undo": "Audit events are kept by design." },
+    { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result file named by -OutFile (never the passphrase, its hash or the check)", "scope": "this computer", "why": "For a caller that reads the outcome.", "undo": "Delete the file." }
   ],
   "parameters": [
     { "name": "SubscriptionId", "required": true, "default": null, "help": "The environment's subscription (always explicit)." },
     { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the Manager container app." },
-    { "name": "ManagerApp", "required": false, "default": "ca-pim-manager", "help": "The Manager container app." },
+    { "name": "ManagerApp", "required": false, "default": "ca-pim-manager", "help": "The Manager container app; its PIM_SqlServer / PIM_SqlDatabase name the database." },
     { "name": "ContainerName", "required": false, "default": null, "help": "The Manager's container, when the app has more than one." },
-    { "name": "VaultName", "required": true, "default": null, "help": "The environment's own key vault (must use Azure RBAC authorization)." },
-    { "name": "VaultResourceGroup", "required": false, "default": "-ResourceGroup", "help": "The vault's resource group." },
-    { "name": "SecretName", "required": false, "default": "PIM-EmergencyPasscode", "help": "The secret name the Manager reads." },
+    { "name": "SqlServerFqdn", "required": false, "default": "the Manager app's PIM_SqlServer", "help": "The database server." },
+    { "name": "SqlDatabase", "required": false, "default": "the Manager app's PIM_SqlDatabase, else PimPlatform", "help": "The database." },
+    { "name": "VaultName", "required": false, "default": null, "help": "Only with -MigrateFromKeyVault: the key vault an earlier version kept the passphrase in." },
+    { "name": "SecretName", "required": false, "default": "PIM-EmergencyPasscode", "help": "Only with -MigrateFromKeyVault: the secret an earlier version used." },
+    { "name": "MigrateFromKeyVault", "required": false, "default": false, "help": "Move the passphrase an earlier version kept in -VaultName into the database, once. The passphrase is not asked for and does not change." },
     { "name": "Passphrase", "required": false, "default": null, "help": "The passphrase as a SecureString (at least 12 characters). Omit it to be prompted twice. Never plain text." },
     { "name": "TenantId", "required": true, "default": null, "help": "The tenant id." },
     { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Sign in as yourself in the browser (or use the Invardia Support session open in this window); asserted to be a user in -TenantId with -SubscriptionId visible. No command-line tool, no module. The recommended way." },
@@ -33,16 +34,17 @@
     { "name": "OutFile", "required": false, "default": null, "help": "Write the outcome as JSON to this file." }
   ],
   "readsOnly": [
-    "the Manager container app (its managed identities and environment variables)",
-    "the key vault (exists, uses Azure RBAC authorization) and its role assignments",
-    "whether the secret already exists (to say CREATE or REPLACE)"
+    "the Manager container app (its PIM_SqlServer / PIM_SqlDatabase), unless -SqlServerFqdn and -SqlDatabase are given",
+    "whether a check is already stored (to say STORE or REPLACE)",
+    "with -MigrateFromKeyVault: the secret PIM-EmergencyPasscode in -VaultName (once)"
   ],
   "network": [
     "login.microsoftonline.com (sign-in / tokens)",
     "management.azure.com (Azure Resource Manager)",
-    "<vault>.vault.azure.net (Key Vault data plane)"
+    "*.database.windows.net (the PIM database)",
+    "*.vault.azure.net (Key Vault data plane, only with -MigrateFromKeyVault)"
   ],
-  "whatIf": "Asks for no passphrase. Signs in, reads the Manager app, the vault and its role assignments, and prints each change it would make: 'What if: would CREATE (or REPLACE) secret PIM-EmergencyPasscode in <vault>', 'What if: would GRANT Key Vault Secrets User on secret PIM-EmergencyPasscode to the Manager identity <id>', 'What if: would SET PIM_EmergencyVault=<vault> on <app> (new revision)'. Nothing is written.",
-  "undo": "Remove the Key Vault Secrets User role assignment on the secret, remove PIM_EmergencyVault from the Manager container app, and disable or delete the secret. Emergency override activation is then refused until the script runs again.",
+  "whatIf": "Asks for no passphrase. Signs in, reads the Manager app and whether a check is already stored, and prints the change it would make: 'What if: would STORE (or REPLACE) the emergency passphrase check in the PIM database (pim.Settings EmergencyPassphraseVerifier ...)'. Nothing is written.",
+  "undo": "Run the script again with another passphrase. Emergency override activation is refused while no check is stored.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimEmergencyPassphrase/"
 }

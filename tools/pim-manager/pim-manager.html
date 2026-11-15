@@ -2747,6 +2747,25 @@
       'or set <code>PIM_SuperAdmins</code> to your identity and restart the Manager.';
     bar.parentElement.insertBefore(div, bar.nextSibling);
   })();
+  // SIGNIN-SWITCH (3.1.26): signed in, but nobody gave THIS account a role (the server says noGrant). One calm line and a
+  // link that signs out of Microsoft's sign-in and back in, where the account picker lets the person choose another account.
+  // Not shown on a fresh store (the bootstrap banner above says what to do there). The link is a fixed same-site path.
+  (function () {
+    const boot = window.PIM_ROLE_BOOT || {};
+    if (!boot.noGrant || (boot.accessBootstrap && boot.accessBootstrap.configured === false)) { return; }
+    const anchor = document.getElementById('tabRight');
+    const bar = anchor && anchor.parentElement;
+    if (!bar || !bar.parentElement || document.getElementById('noAccessBanner')) { return; }
+    const href = (typeof boot.switchAccountUrl === 'string' && /^\/\.auth\/logout\?post_logout_redirect_uri=\/\.auth\/login\/aad$/.test(boot.switchAccountUrl))
+      ? boot.switchAccountUrl : '/.auth/logout?post_logout_redirect_uri=/.auth/login/aad';
+    const div = document.createElement('div');
+    div.id = 'noAccessBanner';
+    div.setAttribute('role', 'status');
+    div.style.cssText = 'margin:6px 12px;padding:8px 12px;border:1px solid #d0d7de;border-left:4px solid #0969da;border-radius:6px;background:#f6f8fa;color:#24292f;font-size:12.5px;';
+    div.innerHTML = 'You are signed in as <b>' + escapeHtml(String(boot.identity || 'this account')) + '</b>, and this account has no role in PIM Manager yet, so you can only look. ' +
+      'Ask a SuperAdmin to give you a role, or <a id="noAccessSwitch" href="' + href + '">sign in with another account</a>.';
+    bar.parentElement.insertBefore(div, bar.nextSibling);
+  })();
   // s98 DEMO MODE BANNER -- on every page while demo mode is on. A demo viewer reads that nothing they do is saved (the
   // server refuses every write; this is only the hint); anyone else reads that demo mode is on for the demo group.
   function showDemoBanner(forceViewer) {
@@ -5093,13 +5112,13 @@
     accountsState.busy = upn;
     renderAccounts();
     try {
-      const r = await fetch('/api/admin-tap/reset', {
+      const r = await pimAuthRetry(() => fetch('/api/admin-tap/reset', {
         method: 'POST',
         // Same defect as the admin-tap READ: a bare fetch with no session token is answered 401,
         // and the panel then blames TAP rather than the stale page.
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN },
+        headers: { 'Content-Type': 'application/json', 'X-PIM-Token': PIM_TOKEN },
         body: JSON.stringify({ userPrincipalName: upn })
-      });
+      }));
       const d = await r.json();
       try { refreshQueueBadge(); } catch (_) {}
       accountsState.busy = '';
@@ -7826,6 +7845,7 @@
     "the management report — a PowerPoint for management under Reports > Management report: key figures with trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly report is off until you switch it on)",
     "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up",
     "the AI assistant (MCP) — an assistant reads every view of the portal and does routine work under the person's own role",
+    "the chat in the Manager — ask questions and have changes prepared, answered by your own Azure OpenAI deployment under the person's own role",
     "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a person saves every change they prepare",
     "the API and MCP reference in the portal — every route and assistant tool of the version you run, for your role",
     "PIM for on-premises Active Directory — admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups, applied by a small hybrid worker"];
@@ -8962,7 +8982,7 @@
       const msg = document.getElementById('asBuiltMsg');
       msg.textContent = 'Building the PDF…'; msg.style.color = '#57606a'; btn.disabled = true;
       try {
-        const resp = await fetch('/api/asbuilt/pdf', { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
+        const resp = await pimAuthRetry(() => fetch('/api/asbuilt/pdf', { headers: { 'X-PIM-Token': PIM_TOKEN } }));
         if (!resp.ok) {
           let t = ''; try { const j = await resp.json(); t = j && j.error; } catch (_) { }
           throw new Error(t || ('HTTP ' + resp.status));
@@ -9162,7 +9182,7 @@
     (document.getElementById('alertTest') || {}).onclick = async () => {
       const msg = document.getElementById('alertMsg');
       msg.textContent = 'Sending test…'; msg.style.color = '#57606a';
-      try { const r = await api('POST', '/api/alerting/test'); msg.textContent = r.note || (r.ok ? 'Sent ✓' : 'Not sent'); msg.style.color = r.ok ? '#116329' : '#bc4c00'; renderAlertFeed(); }
+      try { const r = await api('POST', '/api/alerting/test'); msg.textContent = r.note || (r.ok ? 'Queued ✓ -- the engine sends it at its next run (within about 5 minutes)' : 'Not queued'); msg.style.color = r.ok ? '#116329' : '#bc4c00'; renderAlertFeed(); }
       catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
     };
   }
@@ -9219,7 +9239,7 @@
   // A section no rule claims lands in "Other", so nothing can disappear. The last category is remembered per browser.
   const SETTINGS_CATEGORIES = [
     { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
-    { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
+    { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setAiChatHost','setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setGroupRetirementHost', 'setOpPolicyCard'] },   // PIM 100.117: Group deletion
     { key: 'automation', label: 'Automation',            match: ['setAutomationHost'] },   // §100.49: auto-extend policy
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
@@ -9322,6 +9342,8 @@
     h += `<div id="setAdminDomainHost"><div style="color:#57606a;font-size:12px;">Loading admin account domain…</div></div>`;
     // s98 demo mode: a live demo environment where visitors in the demo guest group can look and stage, never save.
     h += `<div id="setDemoModeHost"><div style="color:#57606a;font-size:12px;">Loading demo mode…</div></div>`;
+    // MANAGER-CHAT-1: the AI chat (Pro) -- on / endpoint / deployment; empty on a Community installation.
+    h += `<div id="setAiChatHost"></div>`;
 
     // Operator 2026-09-21: "admin name prefixes must go befor naming conventions section (move up one)".
     const naming = s.naming || {};   // declared HERE: the prefixes card, the "Naming words" card and the naming table all read it
@@ -9693,6 +9715,7 @@
     renderConfigBackupRetentionCard(document.getElementById('setConfigBackupHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
     renderDemoModeSection(document.getElementById('setDemoModeHost'));
+    renderAiChatSettingsSection(document.getElementById('setAiChatHost'));   // MANAGER-CHAT-1
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
     renderRfaBrandingSection(document.getElementById('setRfaBrandingHost'));
@@ -11774,9 +11797,9 @@
       h += '</div>';
     }
     h += '</div>';   // the Consultants & companies card
-    // §82/§90 (operator 2026-10-02: "settings should contain rfa broker config like api keys"): the broker settings and the
-    // API keys live in Settings > RFA broker & API (renderRfaBrokerSection); this page is for the requests and reviews.
-    if (d.isSuperAdmin) h += '<div style="max-width:1200px;color:#57606a;font-size:12.5px;margin:4px 0 0;">The broker settings and API keys are under <a href="#" id="rfaToSettings">Settings &gt; RFA broker &amp; API</a>.</div>';
+    // §82/§90 (operator 2026-10-02): the broker settings and the applications allowed on the API live in Settings > RFA
+    // broker & API (renderRfaBrokerSection); this page is for the requests and reviews.
+    if (d.isSuperAdmin) h += '<div style="max-width:1200px;color:#57606a;font-size:12.5px;margin:4px 0 0;">The broker settings and the applications allowed on the API are under <a href="#" id="rfaToSettings">Settings &gt; RFA broker &amp; API</a>.</div>';
     host.innerHTML = h;
     try { renderMspLicenceBanners(); } catch (_) { }
     rfaFillAdminPicker();
@@ -12028,13 +12051,14 @@
   }
 
   // ----- Settings: RFA broker & API (§82 / §90, Pro; SuperAdmin) ---------------------------------------------------------
-  // The public broker's settings (its store, the portal URL, the Entra applications allowed on the API) and the API keys.
+  // The public broker's settings (its store, the portal URL, the Entra applications allowed on the API).
+  // RFA-API-TOKENS-1 (owner 2026-11-15): the API takes Microsoft Entra application tokens only -- there are no API keys.
   async function renderRfaBrokerSection(host) {
     if (!host) return;
     if (!isServer) { host.innerHTML = ''; return; }
     let d = null;
     try { d = await api('GET', '/api/rfa/requests'); } catch (e) { host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div style="color:#57606a;">Not available here: ' + escapeHtml(e.message || String(e)) + '</div></div>'; return; }
-    if (!d.isSuperAdmin) { host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div style="color:#57606a;">Only a SuperAdmin changes the broker settings and API keys.</div></div>'; return; }
+    if (!d.isSuperAdmin) { host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div style="color:#57606a;">Only a SuperAdmin changes the broker settings.</div></div>'; return; }
     let h = '<div class="set-card" id="setRfaBroker"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div class="pro-lic-banner" data-feature="rfa.portal"></div>' +
       '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">The public access request portal + REST API (the broker). The engine pulls requests from the store of the broker; nothing on the public side can reach PIM.</div>';
     const s = d.settings || {};
@@ -12051,60 +12075,35 @@
          '<select id="rfaSetAdHoc" multiple size="6" style="min-height:110px;">' + Array.from(new Set(collectKnownGroupTags().concat(asList(s.adHocGroups)))).sort().map(t => '<option value="' + escapeHtml(t) + '"' + (asList(s.adHocGroups).indexOf(t) >= 0 ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') + '</select>' +
          '<label>Default ad-hoc length (hours)' + settingInfoBtn('RfaBroker.AdHocHours') + '</label><span><input id="rfaSetAdHocHours" type="number" min="1" max="744" value="' + escapeHtml(String(s.adHocHours || 24)) + '" style="width:90px;"> <span style="color:#57606a;font-size:11.5px;">ad-hoc access (default 24 h) is removed automatically; delegated access (typically 6&ndash;12 months) is set in the delegation grid</span></span>' +
          '</div><button id="rfaSetSave" style="margin-top:6px;">Save settings</button>' +
-         // §90: API keys for systems without Entra OAuth (shown ONCE; only the hash is stored)
-         '<h3 style="margin:18px 0 4px;">API keys' + settingInfoBtn('RfaApiKeys') + '</h3><div style="color:#57606a;font-size:12px;">The API is described at <code>' + escapeHtml((s.portalUrl || 'https://<portal>') + '/api/v1/openapi.json') + '</code>.</div><div class="pro-lic-banner" data-feature="api.broker"></div>' +
-         '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">For a system that cannot use an Entra application token. Prefer the Entra app (add its client id above). A key is shown once, expires, and can be revoked.</div>' +
-         '<div id="rfaKeys" style="margin-bottom:6px;color:#57606a;">Loading keys&hellip;</div>' +
-         '<input id="rfaKeyName" placeholder="who uses it (e.g. ServiceNow test)" style="width:240px;"> ' +
-         '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyW" checked> requests.write</label> ' +
-         '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyR" checked> requests.read</label> ' +
-         '<input id="rfaKeyDays" type="number" min="1" max="3650" value="365" style="width:80px;" title="1 to 3650 days (10 years)"> days ' +
-         '<input id="rfaKeyGroups" placeholder="groups it may request (optional)" title="Optional: group tags or group ids, comma separated. Empty = every group offered for ad-hoc access." style="width:220px;"> <button id="rfaKeyNew">Create key</button>' +
-         '<div id="rfaKeyOnce" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;"></div>';
+         // RFA-API-TOKENS-1 (owner 2026-11-15): how other systems sign in -- a Microsoft Entra application token only
+         '<h3 style="margin:18px 0 4px;">How other systems sign in</h3><div class="pro-lic-banner" data-feature="api.broker"></div>' +
+         '<div style="color:#57606a;font-size:12px;margin-bottom:6px;max-width:760px;">The API accepts a Microsoft Entra application token only: the calling application is listed above and holds the app role <code>Requests.Submit</code> on the PIM access request API. It gets its token with a managed identity, or else a certificate. The API is described at <code>' + escapeHtml((s.portalUrl || 'https://<portal>') + '/api/v1/openapi.json') + '</code>. <a href="#" id="rfaAuthDoc">How to authenticate</a></div>' +
+         '<div id="rfaKeyNotice" style="display:none;max-width:760px;margin:6px 0;padding:8px 10px;border:1px solid #d0d7de;background:#f6f8fa;border-radius:6px;font-size:12.5px;"></div>';
     h += '<div id="rfaSetMsg" style="margin-top:8px;"></div></div>';
     host.innerHTML = h;
     try { renderMspLicenceBanners(); } catch (_) { }
     const msg = function (t, bad) { const m = document.getElementById('rfaSetMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
-    // §90 API keys
-    const keysHost = document.getElementById('rfaKeys');
-    const loadKeys = async function () {
-      if (!keysHost) return;
-      try {
-        const k = await api('GET', '/api/rfa/api-keys');
-        const ks = (k && k.keys) || [];
-        keysHost.innerHTML = ks.length ? '<table class="grid"><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Groups</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody>' + ks.map(x =>
-          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td>' +
-          '<td>' + (asList(x.groups).length ? escapeHtml(asList(x.groups).join(', ')) : '<span style="color:#57606a;">any offered group</span>') + '</td>' +
-          '<td>' + escapeHtml(fmtTime(x.expiresUtc, { dateOnly: true })) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
-          '<td>' + (x.revoked ? '<span style="color:#cf222e;">revoked</span>' : '<button class="rfaKeyGrp" data-id="' + escapeHtml(x.id) + '" data-groups="' + escapeHtml(asList(x.groups).join(', ')) + '">Groups</button> <button class="rfaKeyRev" data-id="' + escapeHtml(x.id) + '">Revoke</button>') + '</td></tr>').join('') + '</tbody></table>' : 'No API keys.';
-        keysHost.querySelectorAll('.rfaKeyRev').forEach(b => b.onclick = async function () {
-          if (!confirm('Revoke this API key? Calls with it are refused from now on.')) return;
-          try { const r = await api('POST', '/api/rfa/api-keys/revoke', { id: b.dataset.id }); msg(r.note || 'Revoked.'); loadKeys(); } catch (e) { msg(e.message || String(e), true); }
-        });
-        // SEC-96: the groups ONE key may request (group tags or ids; empty = every group offered for ad-hoc access)
-        keysHost.querySelectorAll('.rfaKeyGrp').forEach(b => b.onclick = async function () {
-          const v = prompt('Groups this key may request (group tags or group ids, comma separated). Leave empty for every group offered for ad-hoc access.', b.dataset.groups || '');
-          if (v === null) return;
-          const groups = String(v).split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-          try { const r = await api('POST', '/api/rfa/api-keys/groups', { id: b.dataset.id, groups: groups }); msg(r.note || 'Saved.'); loadKeys(); } catch (e) { msg(e.message || String(e), true); }
-        });
-      } catch (e) { keysHost.textContent = 'The keys could not be read: ' + (e.message || e); }
-    };
-    loadKeys();
-    const kn = document.getElementById('rfaKeyNew');
-    if (kn) kn.onclick = async function () {
-      const scopes = []; if (document.getElementById('rfaKeyW').checked) scopes.push('requests.write'); if (document.getElementById('rfaKeyR').checked) scopes.push('requests.read');
-      // §12.9: a new key is a new way into the request API -- ask with the catalog text.
-      if (!(await pimSettingInfoConfirm('RfaApiKeys', true))) return;
-      try {
-        const keyGroups = String((document.getElementById('rfaKeyGroups') || {}).value || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-        const r = await api('POST', '/api/rfa/api-keys', { name: document.getElementById('rfaKeyName').value, scopes: scopes, days: document.getElementById('rfaKeyDays').value, groups: keyGroups });
-        const once = document.getElementById('rfaKeyOnce');
-        once.style.display = 'block';
-        once.innerHTML = '<b>Copy this key now -- it is shown only once:</b><br><code style="user-select:all;word-break:break-all;">' + escapeHtml(r.key) + '</code><div style="color:#57606a;font-size:11px;margin-top:4px;">' + escapeHtml(r.note || '') + ' Send it as the header <code>X-Api-Key</code>.</div>';
-        loadKeys();
-      } catch (e) { msg(e.message || String(e), true); }
-    };
+    // RFA-API-TOKENS-1: the doc link, and the ONE-TIME calm notice when API keys existed here before (the engine removed them;
+    // GET /api/rfa/api-keys/retired = a count + names + last use, never a key). Closed once = not shown again in this browser.
+    const openAuthDoc = function (ev) { if (ev) ev.preventDefault(); switchTab('docs'); setTimeout(function () { renderDocsPage('authenticate'); }, 300); };
+    const ad = document.getElementById('rfaAuthDoc'); if (ad) ad.onclick = openAuthDoc;
+    (async function () {
+      const box = document.getElementById('rfaKeyNotice');
+      if (!box) return;
+      let n = null;
+      try { const r = await api('GET', '/api/rfa/api-keys/retired'); n = r && r.retired; } catch (_) { n = null; }
+      if (!n || !n.count) return;
+      const seenKey = 'pimRfaKeysRetiredSeen';
+      let seen = ''; try { seen = localStorage.getItem(seenKey) || ''; } catch (_) { seen = ''; }
+      if (seen && seen === String(n.retiredUtc || '')) return;
+      const last = (n.keys || []).map(k => k.lastUsedUtc).filter(Boolean).sort().pop();
+      box.innerHTML = escapeHtml(n.text || 'API keys were removed; callers use Entra tokens.') + ' <span style="color:#57606a;">(' + escapeHtml(String(n.count)) + (n.count === 1 ? ' key' : ' keys') + (last ? ', last used ' + escapeHtml(fmtTime(last)) : '') + ')</span> ' +
+        '<a href="#" id="rfaKeyNoticeDoc">How to authenticate</a> <button id="rfaKeyNoticeOk" style="margin-left:8px;">OK</button>';
+      box.style.display = 'block';
+      const dl = document.getElementById('rfaKeyNoticeDoc'); if (dl) dl.onclick = openAuthDoc;
+      const ok = document.getElementById('rfaKeyNoticeOk');
+      if (ok) ok.onclick = function () { try { localStorage.setItem(seenKey, String(n.retiredUtc || '')); } catch (_) { } box.style.display = 'none'; };
+    })();
     const ss = document.getElementById('rfaSetSave');
     if (ss) ss.onclick = async function () {
       const apps = (document.getElementById('rfaSetApps').value || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
@@ -12834,8 +12833,12 @@
       const expandable = (s.ok === false) || skipped || n > 0;
       const open = expandable && DRIFT_OPEN.has(s.scope);
       const skipWhy = s.notCheckedReason || (s.skippedFeature ? ('the feature ' + s.skippedFeature + ' is off') : 'the engine did not compare this area');
+      // TRUST-1 point 2: an area that failed THIS run keeps its last complete result (carried), SHOWN with its date and never offered for an action
+      const carried = !!s.carried; const canAct = canApply && !carried;
+      const carriedWhen = carried ? fmtTime(s.carriedFromUtc) : '';
       let status;
-      if (s.ok === false) status = '<span style="color:#cf222e;font-weight:600;">error &mdash; could not check</span>';
+      if (carried) status = '<span class="driftCarried" style="color:#9a6700;font-weight:600;" title="' + esc(s.carriedReason || '') + '">' + (s.stale ? 'UNKNOWN (DRIFT-SOURCE-STALE) &mdash; ' : '') + 'not checked since ' + esc(carriedWhen) + ' &mdash; shown from the last complete read</span>';
+      else if (s.ok === false) status = '<span style="color:#cf222e;font-weight:600;">error &mdash; could not check</span>';
       else if (skipped) status = '<span style="color:#9a6700;font-weight:600;">not checked &mdash; ' + esc(skipWhy) + '</span>';
       else if (n === 0) status = '<span style="color:#1a7f37;font-weight:600;">in sync</span>';
       else status = '<span style="color:#9a6700;font-weight:600;">' + n + ' to review' + (wn ? ' (' + wn + ' warning' + (wn === 1 ? '' : 's') + ')' : '') + '</span>';
@@ -12857,6 +12860,7 @@
           '<div style="color:#57606a;font-size:11px;">The engine did not compare this area, so it is not counted as in sync. Turn the feature on (Settings &rarr; Features) or grant the missing permission, and the next check includes it.</div>');
       } else {
         const its = asList(s.items);
+        if (carried) det.push('<div class="driftCarriedNote" style="color:#9a6700;font-size:11.5px;padding:4px 0;">Not checked since ' + esc(carriedWhen) + ' (' + esc(s.carriedReason || 'this area could not be compared') + ') &mdash; these items are from the last complete read, shown for reference; no action is offered on them until the area is compared again.</div>');
         // REQ-AU-DRIFT-1 (operator 2026-09-30): an area with NO definitions still lists what is live there, read-only
         if (s.noDefinitions) det.push('<div class="driftNoDefs" style="color:#9a6700;font-size:11.5px;padding:4px 0;">This area has no definitions yet &mdash; ' +
           'only objects named with the PIM naming prefix (for example older PIM groups) are listed as extra, so you can import them; nothing else in the tenant is listed. PIM removes nothing from an area it has no definitions for; ' +
@@ -12867,7 +12871,7 @@
           escapeHtml(String(s.overRemoveBudget.budget)) + '). All are listed; an automatic run would hold them rather than remove them &mdash; ' +
           'use <b>Import into PIM</b> or <b>Delete</b> per item, or fix the definitions if they are missing.</div>');
         det.push('<table class="grid" style="font-size:11.5px;margin:4px 0;"><thead><tr>' +
-          (canApply ? '<th style="width:24px;"><input type="checkbox" class="driftScopeAll" data-scope="' + esc(s.scope) + '" title="select every item in this area"></th>' : '') +
+          (canAct ? '<th style="width:24px;"><input type="checkbox" class="driftScopeAll" data-scope="' + esc(s.scope) + '" title="select every item in this area"></th>' : '') +
           '<th style="width:70px;">Drift</th><th>What</th></tr></thead><tbody>');
         its.forEach(it => {
           const sel = '' + s.scope + '|' + it.key;
@@ -12875,7 +12879,7 @@
           // API, not planned -- nothing to select for "Apply now"; one the plan already lists is counted once.
           const isWarn = it.type === 'warning';
           det.push('<tr' + (isWarn ? ' class="driftWarnRow" data-kind="' + esc(it.kind || '') + '"' : '') + '>' +
-            (canApply ? (isWarn ? '<td></td>' : ('<td><input type="checkbox" class="govDriftSel' + (it.type === 'extra' ? ' govDriftExtra' : '') + '" data-scope="' + esc(s.scope) + '" data-sel="' + esc(sel) + '"></td>')) : '') +
+            (canAct ? (isWarn ? '<td></td>' : ('<td><input type="checkbox" class="govDriftSel' + (it.type === 'extra' ? ' govDriftExtra' : '') + '" data-scope="' + esc(s.scope) + '" data-sel="' + esc(sel) + '"></td>')) : '') +
             '<td><span style="color:' + (typeStyle[it.type] || '#57606a') + ';font-weight:600;">' + esc(it.type) + '</span></td>' +
             '<td>' + esc(it.label || it.key) + ((isWarn && it.counted === false) ? ' <span style="color:#8c959f;font-size:10.5px;">(also in the plan above &mdash; counted once)</span>' : '') +
             // §79.3: a changed item says WHAT differs (live -> desired), from the engine's plan.
@@ -12885,7 +12889,7 @@
             // REQ-DRIFT-2 + DRIFT-EXTRAS (100.12, owner 2026-10-09): an EXTRA has exactly three explicit choices -- Import into PIM
             // (stage the PIM row that defines it, so PIM manages the EXISTING object), Delete (a queued revoke; for a whole group
             // its staged retirement) and Ignore. "Keep" read like Ignore, so it is named for what it does.
-            (canApply ? '<div>' +
+            (canAct ? '<div>' +
               (it.type === 'extra' ? (it.keep
                   ? '<button class="driftKeepBtn driftImportBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;color:#1a7f37;" data-sel="' + esc(sel) + '" title="Import into PIM: stage the PIM row that defines this EXISTING ' + (it.keep.kind === 'group' ? 'group (adopted by its exact name -- never a second group)' : 'item') + ' (' + esc(it.keep.base) + '), so PIM manages it from now on -- Review &amp; commit">Import into PIM</button> '
                   : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.keepWhy || 'cannot be imported from here') + '">Import into PIM</button> ') : '') +
@@ -12905,7 +12909,8 @@
 
     // 2.4.378: WARNINGS (orphan group / unmanaged binding / wrong permissions) are review items the engine cannot "apply", so
     // they never show the Apply button on their own -- only missing / changed / extra items do (each has a checkbox).
-    const applicable = items.filter(it => it && it.type !== 'warning');
+    const carriedScopes = new Set(scopes.filter(s => s && s.carried).map(s => s.scope));   // TRUST-1: never applicable
+    const applicable = items.filter(it => it && it.type !== 'warning' && !carriedScopes.has(it.scope));
     if (canApply && !applicable.length && items.length) {
       h.push('<div style="color:#57606a;font-size:11.5px;margin-top:6px;">Only <b>warnings</b> to review &mdash; nothing here can be applied. ' +
         'Fix them at the source: give the group its workload role (or clear its Workload), define the group that holds a hand-made role, or correct the role&rsquo;s permissions in its binding row.</div>');
@@ -13153,10 +13158,11 @@
     }
     let added = 0, had = 0;
     const plan = stage.map(s => {
-      if (s.keep.kind !== 'group') return { base: s.keep.base, row: Object.assign({}, s.keep.row) };
+      const src = (s.scope && s.key) ? ('drift:' + s.scope + '|' + s.key) : '';
+      if (s.keep.kind !== 'group') return { base: s.keep.base, row: Object.assign({}, s.keep.row), src };
       const row = Object.assign({}, s.keep.row);
       row.GroupTag = row.GroupTag || driftTagFromGroupName(row.GroupName);
-      return { base: groupBase, row, group: true };
+      return { base: groupBase, row, group: true, src };
     });
     for (const base of Array.from(new Set(plan.map(s => s.base)))) {
       const data = await loadCsv(base);
@@ -13184,6 +13190,7 @@
         if (have.has(keyOf(row))) { had++; continue; }
         pc.rows.push(row); have.add(keyOf(row)); added++;
         driftStagedMark(base, row, 'import');
+        if (s.src) trustSourceAdd(base, s.src, row);   // TRUST-1 round 5 G4 / round 6 F2: stored with the staged change, checked at commit
       }
     }
     markBadges();   // persists the draft and shares it (Review & commit)
@@ -13392,7 +13399,8 @@
   function covUnitPrereqSpecs(u) { return Array.from(new Set(asList(u && u.rows).map(x => pimBindingPrereqSpec(x && x.entity, x && x.row)).filter(Boolean))); }
   function covSelectedVisibleUnits(d) {
     const out = [];
-    covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => { if (COV_SEL.has(u.id) && !covUnitStaged(u)) out.push(u); }));
+    // TRUST-1 round 5 G4: each unit knows the coverage row it came from (_srcKey), so its staged rows carry it to the commit
+    covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => { if (COV_SEL.has(u.id) && !covUnitStaged(u)) { u._srcKey = 'coverage:' + String(r.key || ''); out.push(u); } }));
     return out;
   }
 
@@ -13532,13 +13540,15 @@
       const color = COV_STATUS_STYLE[r.status] || '#57606a';
       // Ignore (a gap) / Bring back (an ignored gap): a decision about this list only -- nothing changes in the tenant.
       let act = '';
-      if (canIgnore && r.ignoreKey) {
+      // TRUST-1 point 2: a row carried from the last complete read of its workload is SHOWN with its date, never actionable
+      const covCarried = !!r.carried;
+      if (canIgnore && r.ignoreKey && !covCarried) {
         if (r.status === 'Gap') act = '<button class="covIgnore" type="button" data-ikey="' + esc(r.ignoreKey) + '" title="Take this gap off the list and out of the gap count. Nothing changes in the tenant; Status = Ignored shows it, with Bring back." style="font-size:11px;padding:1px 8px;">Ignore</button>';
         else if (r.status === 'Ignored') act = '<button class="covBringBack" type="button" data-ikey="' + esc(r.ignoreKey) + '" title="List it as a gap again." style="font-size:11px;padding:1px 8px;">Bring back</button>';
       }
       const ignNote = r.status === 'Ignored' ? ('ignored' + (r.ignoredBy ? ' by ' + r.ignoredBy : '') + (r.ignoredUtc ? ' ' + fmtTime(r.ignoredUtc) : '') + ' -- ') : '';
       let tick = '';
-      if (canStage) {
+      if (canStage && !covCarried) {
         if (units.length && !pend.length) tick = '<span title="already in Pending changes" style="color:#1a7f37;">&#10003;</span>';
         else if (pend.length) tick = '<input type="checkbox" class="covRowSel" data-key="' + esc(r.key) + '"' + (selN === pend.length ? ' checked' : '') + ' title="stage this proposal (' + pend.length + ' unit(s))">';
       }
@@ -13546,7 +13556,7 @@
         '<td class="covCaret">' + (open ? '&#9662;' : '&#9656;') + '</td>' +
         (canStage ? '<td class="covTick">' + tick + '</td>' : '') +
         '<td>' + esc(r.workload || '') + '</td>' +
-        '<td><b>' + esc(r.item || '') + '</b></td>' +
+        '<td><b>' + esc(r.item || '') + '</b>' + (covCarried ? '<div class="covCarried" style="color:#9a6700;font-size:11px;">' + (r.stale ? 'UNKNOWN (COVERAGE-SOURCE-STALE) &mdash; ' : '') + 'not checked since ' + esc(fmtTime(r.carriedFromUtc)) + ' &mdash; shown from the last complete read</div>' : '') + '</td>' +
         '<td><span class="covStatus" style="color:' + color + ';font-weight:600;">' + esc(covStatusLabel(r.status)) + '</span>' + (units.length ? ' <span style="color:#57606a;font-size:11px;">' + (pend.length ? (selN + '/' + pend.length + ' selected') : 'staged') + '</span>' : '') +
           // REQ-W: an amber one-liner when the proposal's workload role assignment would be held (filled below).
           (units.length ? ' <span class="cov-held-row" data-spec="' + esc(JSON.stringify(Array.from(new Set([].concat.apply([], units.map(covUnitPrereqSpecs)))))) + '"></span>' : '') + '</td>' +
@@ -13734,6 +13744,7 @@
         const full = await wuxStage(x.entity, x.row);
         done.push({ base: x.entity, full });
       }
+      if (u && u._srcKey) done.forEach(dn => trustSourceAdd(dn.base, u._srcKey, dn.full));
       return done.length;
     } catch (e) {
       for (const dn of done.reverse()) {
@@ -14407,12 +14418,15 @@
   // SETTINGS-CLARITY (owner 2026-11-10): the published two-line command that sets up the emergency passphrase -- download from
   // invardia.com/support/pim, then run with what this installation knows (sv = the server's passphrase.setupValues); a part it
   // could not read is a <placeholder>. -ManagerApp only when the web app has another name than the default.
-  function pimEmergencySetupCmd(sv) {
+  // SECURE-WEB-1 (3.1.26): the passphrase check lives in this installation's database -- no key vault in the command.
+  // migrate = an earlier version kept the passphrase in a key vault: -VaultName <it> -MigrateFromKeyVault moves it once.
+  function pimEmergencySetupCmd(sv, migrate) {
     sv = sv || {};
     const v = (x, ph) => (String(x || '').trim() ? mailPsArg(x) : ph);
     let run = '.\\Set-PimEmergencyPassphrase.ps1 -TenantId ' + v(sv.tenantId, '<tenant id>') + ' -SubscriptionId ' + v(sv.subscriptionId, '<subscription id>') +
-      ' -ResourceGroup ' + v(sv.resourceGroup, '<resource group>') + ' -VaultName ' + v(sv.vaultName, '<key vault name>');
+      ' -ResourceGroup ' + v(sv.resourceGroup, '<resource group>');
     if (String(sv.managerApp || '').trim() && String(sv.managerApp).trim() !== 'ca-pim-manager') run += ' -ManagerApp ' + mailPsArg(sv.managerApp);
+    if (migrate) run += ' -VaultName ' + v(sv.vaultName, '<key vault name>') + ' -MigrateFromKeyVault';
     return pimSupportCmd('Set-PimEmergencyPassphrase', [run + ' -UseSignedInAccount']);
   }
   var _emLastNote = '';   // the last activate/restore outcome, in the server's words (kept across the re-render)
@@ -14439,16 +14453,22 @@
     const ppWhy = 'Set up the emergency passphrase first (see above) -- until then an activation would be refused.';
     if (pp) {
       if (ppMissing) {
+        // SECURE-WEB-1 (3.1.26): legacyVault = an earlier version kept the passphrase in a key vault; it moves once
+        const ppMove = !!pp.legacyVault;
         h.push(settingInfoExtra('EmergencyOverride', pp.reason ? 'Why it is not set up: ' + String(pp.reason) : ''));
         h.push('<div id="govEmPassphraseStatus" class="govEmPpMissing" style="margin-top:6px;font-size:12px;padding:8px 10px;border-radius:6px;border:1px solid #d4a72c;background:#fff8c5;">' +
-          '<b>Not set up yet</b> &mdash; set an emergency passphrase first (once).' +
-          '<div id="govEmSetupWho" style="margin-top:4px;color:#57606a;">Who and where: an Azure administrator with <b>Owner</b> on this PIM Manager&rsquo;s resource group and <b>Key Vault Secrets Officer</b> on its key vault, ' +
-          'in a PowerShell 7 window on a computer with a browser (you sign in in the browser). The script asks for the passphrase twice; only its hash is stored.</div>' +
-          '<div class="act-code" style="margin-top:4px;"><pre id="govEmSetupCmd" style="white-space:pre-wrap;overflow-wrap:anywhere;">' + esc(pimEmergencySetupCmd(pp.setupValues)) + '</pre>' +
+          (ppMove
+            ? '<b>Not set up yet</b> &mdash; your passphrase moves into this installation&rsquo;s database once. The next update does it; or run the command below (it does not ask for the passphrase).'
+            : '<b>Not set up yet</b> &mdash; set an emergency passphrase first (once).') +
+          '<div id="govEmSetupWho" style="margin-top:4px;color:#57606a;">Who and where: an administrator who is a member of this PIM Manager&rsquo;s <b>SQL admin group</b> and has <b>Reader</b> on its resource group' +
+          (ppMove ? ' and <b>Key Vault Secrets User</b> on the key vault the passphrase was kept in' : '') +
+          ', in a PowerShell 7 window on a computer with a browser (you sign in in the browser).' +
+          (ppMove ? '' : ' The script asks for the passphrase twice; only a salted, slow hash of it is stored.') + '</div>' +
+          '<div class="act-code" style="margin-top:4px;"><pre id="govEmSetupCmd" style="white-space:pre-wrap;overflow-wrap:anywhere;">' + esc(pimEmergencySetupCmd(pp.setupValues, ppMove)) + '</pre>' +
           '<button type="button" class="btn-sec" id="govEmSetupCopy">Copy</button></div>' + pimScriptDocLinksFor('Set-PimEmergencyPassphrase.ps1') + '</div>');
       } else {
         h.push('<div id="govEmPassphraseStatus" class="govEmPpOk" style="margin-top:6px;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #d0d7de;background:#f6f8fa;">' +
-          '<b style="color:#1a7f37;">Passphrase: configured</b> ' + (pp.source === 'keyvault' ? '(kept in key vault <code>' + esc(String(pp.vault || '')) + '</code>).' : '(' + esc(String(pp.reason || pp.source || '')) + ').') +
+          '<b style="color:#1a7f37;">Passphrase: configured</b> ' + (pp.source === 'database' ? '(kept as a salted hash in this installation&rsquo;s database).' : '(' + esc(String(pp.reason || pp.source || '')) + ').') +
           '</div>');
       }
     }
@@ -14859,6 +14879,170 @@
       btn.disabled = false;
     };
   }
+
+  // ===== MANAGER-CHAT-1 begin =====
+  // Owner 2026-11-15: "so i can chat and ask for actions" -> "Build chat in Manager". Pro 'ai.chat', off by default.
+  // Settings > Features & edition > AI chat: on / endpoint / deployment (SuperAdmin; everyone else read-only). The endpoint is
+  // checked here AND on the server by the same allow-list (https://<name>.openai.azure.com or .cognitiveservices.azure.com,
+  // nothing after the name). There is no key field: PIM Manager signs in with its own managed identity.
+  function pimAiChatEndpointProblem(v) {
+    const s = String(v || '').trim();
+    if (!s) return '';
+    if (!/^https:\/\//i.test(s)) return 'The address must start with https://';
+    const rest = s.substring(8);
+    if (rest.indexOf('@') >= 0) return 'The address must not carry a user name or password.';
+    const cut = rest.search(/[\/?#]/);
+    const hostPart = cut >= 0 ? rest.substring(0, cut) : rest;
+    const tail = cut >= 0 ? rest.substring(cut) : '';
+    if (hostPart.indexOf(':') >= 0) return 'The address must not name a port.';
+    if (tail && tail !== '/') return 'Only the resource address, nothing after the name.';
+    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:openai\.azure\.com|cognitiveservices\.azure\.com)$/i.test(hostPart)) return 'The address must be https://<name>.openai.azure.com or https://<name>.cognitiveservices.azure.com';
+    return '';
+  }
+  async function renderAiChatSettingsSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null;
+    try { d = await api('GET', '/api/settings/ai-chat'); } catch (e) { d = null; }
+    // a Community installation (no Pro code here) or an older server: the card is not shown at all
+    if (!d || !d.ok) { host.innerHTML = ''; return; }
+    const ro = d.canWrite ? '' : ' disabled';
+    let h = '<div class="set-card" id="setAiChat"><h3 style="margin:0 0 4px;font-size:14px;">AI chat <span style="font-size:10px;color:#8250df;border:1px solid #d8b9ff;border-radius:8px;padding:0 6px;">PRO</span></h3>' +
+            '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">A chat panel in PIM Manager that answers through your own Azure OpenAI deployment. It uses only what the asking person\'s own role allows, and a change is only prepared &mdash; the person saves it in the page. PIM Manager signs in with its own managed identity, so there is no key.</div>';
+    h += '<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">' +
+         '<label style="display:flex;gap:6px;align-items:center;font-size:12px;"><input type="checkbox" id="setAiChatOn"' + (d.enabled ? ' checked' : '') + ro + '> AI chat on</label>' + settingInfoBtn('AiChat') +
+         '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;">Azure OpenAI endpoint<input type="url" id="setAiChatEndpoint" maxlength="200" style="min-width:300px" placeholder="https://contoso-ai.openai.azure.com" value="' + esc(d.endpoint || '') + '"' + ro + '></label>' +
+         '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;">Deployment<input type="text" id="setAiChatDeployment" maxlength="64" style="min-width:160px" placeholder="e.g. chat" value="' + esc(d.deployment || '') + '"' + ro + '></label>' +
+         (d.canWrite ? '<button id="setAiChatSave">Save</button>' : '<span style="font-size:11px;color:#57606a;">(SuperAdmin required to change)</span>') +
+         ((PIM_ROLE === 'Admin' || PIM_ROLE === 'SuperAdmin') ? '<button id="setAiChatCheck" class="btn-sec" title="Gets a token with PIM Manager\'s managed identity and asks for one tiny test answer">Check</button>' : '') +
+         '<span id="setAiChatMsg" style="font-size:12px;"></span></div>';
+    h += '<div style="font-size:11.5px;color:#57606a;margin-top:6px;">' +
+         (d.featureOn ? 'The feature switches AI chat in the Manager and MCP server are on.' : 'The chat also needs the switches <b>AI chat in the Manager</b> and <b>MCP server</b> on under Feature customization.') +
+         (d.configured || !d.reason ? '' : ' Not set up yet: ' + esc(d.reason) + '.') + '</div>';
+    host.innerHTML = h + '</div>';
+    const msgEl = () => document.getElementById('setAiChatMsg');
+    const say = (ok, line, more) => {
+      const m = msgEl(); if (!m) return;
+      m.style.color = ok ? '#1a7f37' : '#cf222e';
+      m.innerHTML = esc(line) + (more ? ' <details style="display:inline-block;"><summary style="cursor:pointer;color:#0969da;">More info</summary><div style="color:#57606a;max-width:640px;">' + esc(more) + '</div></details>' : '');
+    };
+    const btn = document.getElementById('setAiChatSave');
+    if (btn) btn.onclick = async () => {
+      const ep = document.getElementById('setAiChatEndpoint').value;
+      const bad = pimAiChatEndpointProblem(ep);
+      if (bad) { say(false, bad); return; }
+      btn.disabled = true;
+      try {
+        const r = await api('PUT', '/api/settings/ai-chat', { enabled: !!document.getElementById('setAiChatOn').checked, endpoint: ep, deployment: document.getElementById('setAiChatDeployment').value });
+        say(true, (r && r.note) || 'Saved.');
+        pimAiChatInit();
+      } catch (e) { say(false, 'Not saved.', String((e && e.body && e.body.error) || (e && e.message) || e)); }
+      btn.disabled = false;
+    };
+    const chk = document.getElementById('setAiChatCheck');
+    if (chk) chk.onclick = async () => {
+      chk.disabled = true; say(true, 'Checking…');
+      try {
+        const s = await api('GET', '/api/chat/status?check=1', undefined, { timeoutMs: 120000 });
+        const rd = (s && s.readiness) || null;
+        if (rd && rd.completionOk) say(true, rd.line || 'Ready.', rd.detail || '');
+        else say(false, (rd && rd.line) || 'Not ready.', (rd && rd.detail) || '');
+      } catch (e) { say(false, 'The check could not run.', String((e && e.body && e.body.error) || (e && e.message) || e)); }
+      chk.disabled = false;
+    };
+  }
+
+  // The chat panel: a button at the bottom right opens it. Shown only when GET /api/chat/status says the chat is on for this
+  // person (Pro + both feature switches + set up). The conversation lives in THIS browser tab only (never stored on the
+  // server); Clear empties it. Every call goes through api() (the page token, like every other call).
+  let PIM_AICHAT = { msgs: [], actions: [], busy: false, on: false };
+  async function pimAiChatInit() {
+    if (!isServer) return;
+    let st = null;
+    try { st = await api('GET', '/api/chat/status'); } catch (e) { st = null; }
+    PIM_AICHAT.on = !!(st && st.enabled);
+    let fab = document.getElementById('pimAiChatFab');
+    if (!PIM_AICHAT.on) { if (fab) fab.remove(); const p = document.getElementById('pimAiChatPanel'); if (p) p.remove(); return; }
+    if (fab) return;
+    fab = document.createElement('button');
+    fab.id = 'pimAiChatFab'; fab.type = 'button'; fab.title = 'Ask PIM Manager (AI chat)';
+    fab.textContent = 'Ask';
+    fab.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:9000;border-radius:20px;padding:8px 16px;font-size:13px;font-weight:600;background:#0969da;color:#fff;border:0;box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer;';
+    fab.onclick = () => pimAiChatToggle();
+    document.body.appendChild(fab);
+  }
+  function pimAiChatToggle() {
+    let p = document.getElementById('pimAiChatPanel');
+    if (p) { p.style.display = (p.style.display === 'none') ? 'flex' : 'none'; return; }
+    p = document.createElement('div');
+    p.id = 'pimAiChatPanel';
+    p.setAttribute('role', 'dialog'); p.setAttribute('aria-label', 'AI chat');
+    p.style.cssText = 'position:fixed;right:18px;bottom:64px;z-index:9001;width:min(440px,calc(100vw - 36px));height:min(560px,calc(100vh - 100px));display:flex;flex-direction:column;background:var(--bg,#fff);border:1px solid #d0d7de;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.2);font-size:13px;';
+    p.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #d0d7de;">' +
+        '<b>Ask PIM Manager</b><span><button type="button" id="pimAiChatClear" class="btn-sec" style="font-size:11.5px;">Clear chat</button> ' +
+        '<button type="button" id="pimAiChatClose" class="btn-sec" style="font-size:11.5px;" aria-label="Close">&times;</button></span></div>' +
+      '<div id="pimAiChatNote" style="padding:6px 12px;font-size:11.5px;color:#57606a;background:#f6f8fa;border-bottom:1px solid #d0d7de;">Answers are written by AI and can be wrong; changes are only prepared - you save them.</div>' +
+      '<div id="pimAiChatList" style="flex:1 1 auto;overflow:auto;padding:8px 12px;"></div>' +
+      '<div id="pimAiChatActions" style="max-height:110px;overflow:auto;padding:0 12px;font-size:11.5px;color:#57606a;"></div>' +
+      '<form id="pimAiChatForm" style="display:flex;gap:6px;padding:8px 12px;border-top:1px solid #d0d7de;">' +
+        '<textarea id="pimAiChatInput" rows="2" maxlength="8000" placeholder="Ask about access, pending changes, jobs or problems…" style="flex:1 1 auto;resize:vertical;font:inherit;"></textarea>' +
+        '<button type="submit" id="pimAiChatSend">Send</button></form>';
+    document.body.appendChild(p);
+    document.getElementById('pimAiChatClose').onclick = () => { p.style.display = 'none'; };
+    document.getElementById('pimAiChatClear').onclick = () => { PIM_AICHAT.msgs = []; PIM_AICHAT.actions = []; pimAiChatPaint(); };
+    const input = document.getElementById('pimAiChatInput');
+    input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); pimAiChatSend(); } });
+    document.getElementById('pimAiChatForm').onsubmit = (ev) => { ev.preventDefault(); pimAiChatSend(); };
+    pimAiChatPaint();
+    try { input.focus(); } catch (_) { }
+  }
+  function pimAiChatPaint() {
+    const esc = escapeHtml;
+    const list = document.getElementById('pimAiChatList');
+    if (!list) return;
+    const bubble = (m) => {
+      const mine = m.role === 'user';
+      const style = 'margin:6px 0;padding:6px 9px;border-radius:8px;white-space:pre-wrap;word-wrap:break-word;max-width:92%;' +
+        (mine ? 'margin-left:auto;background:#ddf4ff;' : (m.error ? 'background:#fff8f8;border:1px solid #ffcecb;' : 'background:#f6f8fa;'));
+      let h = '<div style="' + style + '">' + esc(m.content || '');
+      if (m.more) h += ' <details><summary style="cursor:pointer;color:#0969da;font-size:11.5px;">More info</summary><div style="font-size:11.5px;color:#57606a;">' + esc(m.more) + '</div></details>';
+      return h + '</div>';
+    };
+    list.innerHTML = PIM_AICHAT.msgs.length
+      ? PIM_AICHAT.msgs.map(bubble).join('') + (PIM_AICHAT.busy ? '<div style="color:#57606a;font-size:12px;margin:6px 0;">Thinking…</div>' : '')
+      : '<div style="color:#57606a;font-size:12px;">Ask in plain words, for example: <i>Who can activate Global Administrator?</i> or <i>Which jobs failed today?</i> The chat sees only what your role may see.</div>';
+    list.scrollTop = list.scrollHeight;
+    const act = document.getElementById('pimAiChatActions');
+    if (act) act.innerHTML = PIM_AICHAT.actions.length
+      ? '<div style="margin:4px 0 2px;font-weight:600;">What it ran (' + PIM_AICHAT.actions.length + ')</div>' + PIM_AICHAT.actions.map(a =>
+          '<div>' + (a.ok ? '&#10003;' : '&#10007;') + ' <code>' + esc(a.tool || '') + '</code> <span>' + esc(a.kind || '') + '</span>' + (a.args ? ' <span style="color:#8c959f;">' + esc(a.args) + '</span>' : '') + (a.detail ? ' &mdash; ' + esc(a.detail) : '') + '</div>').join('')
+      : '';
+    const sendBtn = document.getElementById('pimAiChatSend'); if (sendBtn) sendBtn.disabled = !!PIM_AICHAT.busy;
+  }
+  async function pimAiChatSend() {
+    const input = document.getElementById('pimAiChatInput');
+    if (!input || PIM_AICHAT.busy) return;
+    const q = String(input.value || '').trim();
+    if (!q) return;
+    input.value = '';
+    PIM_AICHAT.msgs.push({ role: 'user', content: q });
+    PIM_AICHAT.busy = true; pimAiChatPaint();
+    // only the turns themselves go to the server (never an error line, never a "More info" text); at most the last 40
+    const send = PIM_AICHAT.msgs.filter(m => !m.error && (m.role === 'user' || m.role === 'assistant')).slice(-40).map(m => ({ role: m.role, content: m.content }));
+    try {
+      const r = await api('POST', '/api/chat', { messages: send }, { timeoutMs: 300000 });
+      if (r && r.ok) PIM_AICHAT.msgs.push({ role: 'assistant', content: String(r.reply || '') });
+      else PIM_AICHAT.msgs.push({ role: 'assistant', error: true, content: String((r && r.error) || 'The chat could not answer.'), more: String((r && r.detail) || '') });
+      (r && r.actions || []).forEach(a => PIM_AICHAT.actions.push(a));
+    } catch (e) {
+      const b = (e && e.body) || {};
+      PIM_AICHAT.msgs.push({ role: 'assistant', error: true, content: String(b.error || 'The chat could not answer.'), more: String(b.detail || (e && e.message) || '') });
+      (b.actions || []).forEach(a => PIM_AICHAT.actions.push(a));
+    }
+    PIM_AICHAT.busy = false; pimAiChatPaint();
+  }
+  // ===== MANAGER-CHAT-1 end =====
 
   // Operator 2026-10-05: what the RFA portal shows -- the company name (so people know where they sign in, "like
   // environment name") and a support e-mail ("an option to send email for support"). The broker reads both.
@@ -15337,7 +15521,7 @@
     if (exAll) exAll.onclick = async () => {
       exAll.disabled = true; const prev = exAll.textContent; exAll.textContent = 'Preparing…';
       try {
-        const resp = await fetch('/api/audit/export?' + filterQs(), { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
+        const resp = await pimAuthRetry(() => fetch('/api/audit/export?' + filterQs(), { headers: { 'Accept': 'text/csv', 'X-PIM-Token': PIM_TOKEN } }));
         if (!resp.ok) {
           let b401 = null; if (resp.status === 401) { try { b401 = await resp.json(); } catch (_) { b401 = null; } }
           throw new Error(resp.status === 401 ? http401Message(b401) : ('HTTP ' + resp.status));
@@ -15358,7 +15542,7 @@
     if (pr) pr.onclick = async () => {
       pr.disabled = true; const prev = pr.textContent; pr.textContent = 'Preparing…';
       try {
-        const resp = await fetch('/api/audit/export?' + filterQs() + '&purpose=print', { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
+        const resp = await pimAuthRetry(() => fetch('/api/audit/export?' + filterQs() + '&purpose=print', { headers: { 'Accept': 'text/csv', 'X-PIM-Token': PIM_TOKEN } }));
         if (!resp.ok) {
           let b401 = null; if (resp.status === 401) { try { b401 = await resp.json(); } catch (_) { b401 = null; } }
           throw new Error(resp.status === 401 ? http401Message(b401) : ('HTTP ' + resp.status));
@@ -16719,10 +16903,9 @@
         '<label class="gs-l" for="' + p + 'Sec">Encryption' + settingInfoBtn('Mail.SmtpSecurity') + '</label><select id="' + p + 'Sec" name="smtpSecurity"><option value="starttls"' + (s.security !== 'none' ? ' selected' : '') + '>STARTTLS (recommended)</option><option value="none"' + (s.security === 'none' ? ' selected' : '') + '>None (an internal relay only)</option></select>' + gsErr('smtpSecurity') +
         '<label class="gs-l" for="' + p + 'From">From address' + settingInfoBtn('Mail.SmtpFrom') + '</label><input type="text" id="' + p + 'From" name="smtpFrom" value="' + val(s.from) + '" placeholder="pim@yourdomain.com">' + gsErr('smtpFrom') +
         '<label class="gs-l" for="' + p + 'User">User name (leave empty when the relay needs no sign-in)' + settingInfoBtn('Mail.SmtpCredentials') + '</label><input type="text" id="' + p + 'User" name="smtpUser" value="' + val(s.username) + '">' + gsErr('smtpUser') +
-        '<label class="gs-l" for="' + p + 'Pw">Password</label><input type="password" id="' + p + 'Pw" name="smtpPassword" value="" autocomplete="new-password" placeholder="' + (s.username ? 'unchanged -- type to replace it' : '') + '">' + gsErr('smtpPassword') +
         '<label class="gs-l" for="' + p + 'Vault">Key Vault that keeps the password</label><input type="text" id="' + p + 'Vault" name="smtpVault" value="' + val(s.vaultName || ((m.setup || {}).vaultHint) || '') + '" placeholder="the environment\'s key vault">' + gsErr('smtpVault') +
         '<label class="gs-l" for="' + p + 'Secret">Secret name</label><input type="text" id="' + p + 'Secret" name="smtpSecret" value="' + val(s.secretName || 'PIM-SmtpRelayPassword') + '">' + gsErr('smtpSecret') +
-        '<div class="gs-hint">The password is written to that Key Vault (never to the settings, never shown again) and read when a mail is sent. If PIM Manager may not write the vault, a person who may runs this once (browser sign-in, it asks for the password):</div>' +
+        '<div class="gs-hint">The password is kept only in that Key Vault (never in the settings, never shown) and the PIM engine reads it when it sends a mail. PIM Manager itself never reads or writes it: a person with rights on the vault runs this once (browser sign-in, it asks for the password), then presses Send a test mail -- the engine checks that it can read it:</div>' +
         gsCode(p + 'PwCmd', mailSetupCmdPassword(m, s)) +
         '<label class="gs-l" for="' + p + 'TestTo">Send the test mail to</label><input type="text" id="' + p + 'TestTo" name="mailTestTo" value="" placeholder="your own address (empty = you)">' + gsErr('to') +
         '<div class="gs-actions"><button type="button" class="gsAction mailTestBtn btn-sec" data-act="test">Save and send a test mail</button></div>' +
@@ -16936,8 +17119,9 @@
   // also queues an ENGINE test send (the engine job sends as its own identity). The message names both; the engine row says
   // "test queued" at once and the page re-reads the mail check (bounded: 8 x 15 s) until the engine's proof lands.
   function mailTestMessage(r) {
-    const a = (r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.');
-    const e = r && r.engineTest && r.engineTest.note ? ' ' + r.engineTest.note : '';
+    // SECURE-WEB-1 (3.1.26): PIM Manager sends no mail itself -- the test mail IS the engine's, queued (the note says so)
+    const a = (r && r.note) || ((r && r.ok) ? 'Queued; the engine sends it at its next run (within about 5 minutes).' : 'Not queued.');
+    const e = r && !r.queued && r.engineTest && r.engineTest.note ? ' ' + r.engineTest.note : '';
     return a + e;
   }
   let MAIL_ENGINE_WATCH = 0;
@@ -18319,7 +18503,7 @@
         test: async (x) => {
           if (!(await x.saveFirst())) return;
           x.say('Sending a test alert...');
-          try { const r = await api('POST', '/api/alerting/test'); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); }
+          try { const r = await api('POST', '/api/alerting/test'); x.say((r && r.note) || ((r && r.ok) ? 'Queued; the engine sends it at its next run (within about 5 minutes).' : 'Not queued.'), !(r && r.ok)); }
           catch (e) { x.say('Not sent: ' + gsErrText(e), true); }
         }
       }
@@ -21751,7 +21935,7 @@
     if (xb) xb.onclick = async () => {
       const msg = container.querySelector('.azresApproveMsg');
       try {
-        const resp = await fetch('/api/engine/policy-hold/xlsx?provider=' + encodeURIComponent(xb.dataset.provider), { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN } });
+        const resp = await pimAuthRetry(() => fetch('/api/engine/policy-hold/xlsx?provider=' + encodeURIComponent(xb.dataset.provider), { headers: { 'X-PIM-Token': PIM_TOKEN } }));
         if (resp.status === 204) { if (msg) msg.textContent = 'Nothing is held any more -- there is no change set to export.'; return; }
         if (!resp.ok) { const t = await resp.text(); throw new Error(t || ('HTTP ' + resp.status)); }
         const cd = resp.headers.get('Content-Disposition') || '';
@@ -22017,6 +22201,51 @@
   // ===================================================================
   // Server API helpers
   // ===================================================================
+  // AUTH-MODERN-1 / SIGNIN-TOKEN-LIFETIME-1 (owner 2026-11-15 "use only modern and secure method"). Behind Microsoft's
+  // built-in sign-in the platform keeps the session (8 h) and the ACCESS token (about 1 h), and the Manager accepts only a
+  // valid one. The page renews it BEFORE it ends: every 4 minutes /.auth/me says when the token ends, and under 6 minutes
+  // left it asks /.auth/refresh (offline_access at sign-in). A 401 from the sign-in check is renewed ONCE (/.auth/refresh,
+  // then the call is sent again, never a loop); a refresh that fails shows the sign-in bar ("Sign in again" / "Sign in with
+  // another account"). Built-in mode only (/.auth/me answers); behind the opt-in sign-in front nothing changes.
+  // The page token travels in X-PIM-Token only -- 'Authorization' is never set by this page.
+  let pimAuthMode = '';   // '' not known yet | 'builtin' (/.auth/me answered) | 'other' (it did not: the front, or local)
+  let _pimRefreshing = null;
+  function pimRefreshToken() {
+    if (pimAuthMode !== 'builtin') return Promise.resolve(false);
+    if (_pimRefreshing) return _pimRefreshing;   // one renewal at a time, whatever number of panels asked for it
+    _pimRefreshing = fetch('/.auth/refresh', { method: 'GET', credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+      .then(r => r.ok, () => false)
+      .then(ok => { _pimRefreshing = null; return ok; });
+    return _pimRefreshing;
+  }
+  function pimSignInUrl() { return '/.auth/login/aad?post_login_redirect_uri=' + encodeURIComponent(location.pathname + location.search + location.hash); }
+  function pimOtherAccountUrl() { return '/.auth/logout?post_logout_redirect_uri=' + encodeURIComponent(pimSignInUrl()); }
+  // only on an https address (the built-in sign-in is always https; a local Manager or a test page never is), after the page's
+  // own start-up has run, and never able to break that start-up
+  if (isServer && String((typeof location !== 'undefined' && location.protocol) || '') === 'https:') setTimeout(() => { try {
+    fetch('/.auth/me', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(r => {
+      if (!r.ok) { pimAuthMode = 'other'; return; }
+      return r.json().then(j => {
+        if (!Array.isArray(j)) { pimAuthMode = 'other'; return; }
+        pimAuthMode = 'builtin';
+        setInterval(() => {
+          fetch('/.auth/me', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+            .then(m => (m.ok ? m.json() : null)).then(me => {
+              const e = me && me[0] && me[0].expires_on ? Date.parse(me[0].expires_on) : NaN;
+              if (!isNaN(e) && e - Date.now() < 6 * 60 * 1000) pimRefreshToken();
+            }, () => { });
+        }, 4 * 60 * 1000);
+      }, () => { pimAuthMode = 'other'; });
+    }, () => { pimAuthMode = 'other'; });
+  } catch (_) { pimAuthMode = 'other'; } }, 0);
+  // The few calls that do not go through api() (downloads) wrap their literal fetch in this: the same ONE renewal on a 401,
+  // then the same request once more -- never a loop.
+  async function pimAuthRetry(send) {
+    const r = await send();
+    if (r.status === 401 && pimAuthMode === 'builtin' && await pimRefreshToken()) return send();
+    return r;
+  }
+
   // One persistent, unmissable banner for a stale session. Idempotent: many panels fail at once
   // when the token dies, and N stacked banners would be its own mess.
   let _staleShown = false;
@@ -22056,10 +22285,12 @@
                         'longer accept requests from it. Committed data is safe on the server. ') +
                     (staged ? 'Your <b>uncommitted pending changes</b> are kept in this browser and are put back after the reload &mdash; commit them afterwards. ' : '') +
                     '<button id="pimStaleReload" style="margin-left:12px;padding:4px 12px;border:0;border-radius:4px;' +
-                    'background:#fff;color:' + (updated ? '#0969da' : '#bc4c00') + ';font-weight:600;cursor:pointer;">' + (updated ? 'Reload' : 'Reload now') + '</button>';
+                    'background:#fff;color:' + (updated ? '#0969da' : '#bc4c00') + ';font-weight:600;cursor:pointer;">' + (updated ? 'Reload' : (signin && pimAuthMode === 'builtin') ? 'Sign in again' : 'Reload now') + '</button>' +
+                    // AUTH-MODERN-1: behind the built-in sign-in, the person may pick another (admin) account
+                    ((signin && pimAuthMode === 'builtin') ? ' <a id="pimStaleOtherAccount" href="' + escapeHtml(pimOtherAccountUrl()) + '" style="margin-left:12px;color:#fff;text-decoration:underline;">Sign in with another account</a>' : '');
       document.body.appendChild(d);
       const b = document.getElementById('pimStaleReload');
-      if (b) b.addEventListener('click', () => location.reload());
+      if (b) b.addEventListener('click', () => { if (signin && pimAuthMode === 'builtin') { location.href = pimSignInUrl(); return; } location.reload(); });
     } catch (_) { /* a banner must never be the thing that breaks the page */ }
   }
 
@@ -22073,7 +22304,7 @@
     const timeoutMs = (opts2 && opts2.timeoutMs) || 120000;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }, signal: ctrl.signal };
+    const opts = { method, headers: { 'X-PIM-Token': PIM_TOKEN }, signal: ctrl.signal };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -22107,6 +22338,11 @@
         // principal (the sign-in session at the authentication edge is missing or expired) -- that is a
         // sign-in problem, not a server restart, and it is said as one. Any other 401 is the stale page token.
         const noPrincipal = /no authenticated principal/i.test(String((data && data.detail) || ''));
+        // AUTH-MODERN-1: the access token ended -- renew it ONCE through the platform and send the call again (no loop:
+        // the retried call carries _authRetried and never renews a second time)
+        if (noPrincipal && pimAuthMode === 'builtin' && !(opts2 && opts2._authRetried) && await pimRefreshToken()) {
+          return api(method, path, body, Object.assign({}, opts2 || {}, { _authRetried: true }));
+        }
         showStaleSessionBanner(noPrincipal ? 'signin' : 'restart', String((data && data.version) || ''));
         const e401 = new Error(noPrincipal
           ? 'Your sign-in session is missing or expired -- reload the page to sign in again. Nothing is wrong with the data.'
@@ -23347,7 +23583,7 @@
     const btn = document.getElementById('pimExportBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Exporting...'; }
     try {
-      const resp = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }, body: JSON.stringify(payload) });
+      const resp = await pimAuthRetry(() => fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-PIM-Token': PIM_TOKEN }, body: JSON.stringify(payload) }));
       if (!resp.ok) {
         let b = null; try { b = await resp.json(); } catch (_) { b = null; }
         throw new Error(resp.status === 401 ? http401Message(b) : ((b && b.error) || ('HTTP ' + resp.status)));
@@ -23811,7 +24047,7 @@
   // GET /api/reports/management/latest. On Community the panel says Pro, Generate is disabled and the server refuses.
   // ===================================================================
   // The calls are literal fetch('/api/...') so the GUI <-> engine alignment scan sees the page reach both routes.
-  function pimReportAuthHeaders() { return { 'Authorization': 'Bearer ' + PIM_TOKEN, 'X-PIM-Token': PIM_TOKEN }; }
+  function pimReportAuthHeaders() { return { 'X-PIM-Token': PIM_TOKEN }; }
   async function pimSaveReportResponse(resp, fallbackName) {
     if (!resp.ok) {
       let t = ''; try { const j = await resp.json(); t = j && j.error; } catch (_) { }
@@ -23898,7 +24134,7 @@
       if (!q.secs.length) { msg.textContent = 'Tick at least one section.'; msg.style.color = '#9a6700'; return; }
       msg.textContent = 'Building the PowerPoint…'; msg.style.color = '#57606a'; gen.disabled = true;
       try {
-        const name = await pimSaveReportResponse(await fetch('/api/reports/management?' + q.qs, { headers: pimReportAuthHeaders() }), 'PIM-Manager-management-report.pptx');
+        const name = await pimSaveReportResponse(await pimAuthRetry(() => fetch('/api/reports/management?' + q.qs, { headers: pimReportAuthHeaders() })), 'PIM-Manager-management-report.pptx');
         msg.textContent = 'Downloaded ' + name; msg.style.color = '#116329';
       } catch (e) { msg.textContent = 'The report could not be made: ' + e.message; msg.style.color = '#cf222e'; }
       finally { gen.disabled = locked; }
@@ -23907,7 +24143,7 @@
     if (dl) dl.onclick = async () => {
       const msg = document.getElementById('mgmtLatestMsg');
       msg.textContent = 'Downloading…'; msg.style.color = '#57606a';
-      try { const name = await pimSaveReportResponse(await fetch('/api/reports/management/latest', { headers: pimReportAuthHeaders() }), (latest && latest.fileName) || 'PIM-Manager-management-report.pptx'); msg.textContent = 'Downloaded ' + name; msg.style.color = '#116329'; }
+      try { const name = await pimSaveReportResponse(await pimAuthRetry(() => fetch('/api/reports/management/latest', { headers: pimReportAuthHeaders() })), (latest && latest.fileName) || 'PIM-Manager-management-report.pptx'); msg.textContent = 'Downloaded ' + name; msg.style.color = '#116329'; }
       catch (e) { msg.textContent = 'Not downloaded: ' + e.message; msg.style.color = '#cf222e'; }
     };
     const sv = document.getElementById('mgmtSave');
@@ -24447,8 +24683,10 @@
     const out = [];
     for (const r of left) {
       const k = sharedChangeKey(base, r, header);
-      if (baseByKey.has(k)) { out.push({ key: k, op: 'modify', row: { ...r }, before: { ...baseByKey.get(k) } }); baseByKey.delete(k); }
-      else out.push({ key: k, op: 'add', row: { ...r } });
+      // TRUST-1 round 6 F2: a row staged from a finding carries its source key into the shared (server-side) change
+      const sk = (typeof trustRowSource === 'function') ? trustRowSource(base, k) : '';
+      if (baseByKey.has(k)) { const c0 = { key: k, op: 'modify', row: { ...r }, before: { ...baseByKey.get(k) } }; if (sk) c0.sourceKey = sk; out.push(c0); baseByKey.delete(k); }
+      else { const c1 = { key: k, op: 'add', row: { ...r } }; if (sk) c1.sourceKey = sk; out.push(c1); }
     }
     for (const [k, b] of baseByKey) out.push({ key: k, op: 'remove', before: { ...b } });
     return out;
@@ -26771,8 +27009,30 @@
   // 🔴 BUG-200 -- OPTIMISTIC CONCURRENCY. The commit PUT is a full-set replace; without a baseline the
   // last writer silently removed rows another administrator committed meanwhile. baseRowsHash is the
   // version these edits were made against; the server answers 409 { conflict } if the stored rows moved.
+  // TRUST-1 round 5 G4: which findings the staged rows of each base came from ('coverage:<row key>' / 'drift:<scope>|<key>') --
+  // sent with the commit (sourceKeys) so the server checks them AGAIN; a source no longer from today refuses the commit (409).
+  // Per viewer (browser storage, like DRIFT_STAGED_KEY); cleared when that base is committed.
+  const TRUST_SOURCES_KEY = 'pim.trustSources.v1';
+  function trustSourceMap() { try { const v = JSON.parse(localStorage.getItem(TRUST_SOURCES_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch (_) { return {}; } }
+  // round 6 F2: also per staged ROW (its shared change key -> the finding), so pendingDelta sends it WITH that change and the
+  // server stores it in the shared pending store -- the commit checks the server's record, not this browser's
+  const TRUST_ROWSRC_KEY = 'pim.trustRowSources.v1';
+  function trustRowSourceMap() { try { const v = JSON.parse(localStorage.getItem(TRUST_ROWSRC_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch (_) { return {}; } }
+  function trustRowSource(base, changeKey) { const m = trustRowSourceMap(); return (m[base] && m[base][changeKey]) ? String(m[base][changeKey]) : ''; }
+  function trustSourceAdd(base, key, row) {
+    try { if (!key) return; const m = trustSourceMap(); const l = Array.isArray(m[base]) ? m[base] : []; if (l.indexOf(key) < 0) l.push(key); m[base] = l; localStorage.setItem(TRUST_SOURCES_KEY, JSON.stringify(m)); } catch (_) { }
+    try {
+      if (!key || !row) return;
+      const hdr = (pendingChanges[base] && pendingChanges[base].header) || Object.keys(row);
+      const ck = sharedChangeKey(base, row, hdr); if (!ck) return;
+      const rm = trustRowSourceMap(); rm[base] = rm[base] || {}; rm[base][ck] = key; localStorage.setItem(TRUST_ROWSRC_KEY, JSON.stringify(rm));
+    } catch (_) { }
+  }
+  function trustSourcesOf(base) { const m = trustSourceMap(); return Array.isArray(m[base]) ? m[base].filter(Boolean) : []; }
+  function trustSourceClear(base) { try { const m = trustSourceMap(); delete m[base]; localStorage.setItem(TRUST_SOURCES_KEY, JSON.stringify(m)); const rm = trustRowSourceMap(); delete rm[base]; localStorage.setItem(TRUST_ROWSRC_KEY, JSON.stringify(rm)); } catch (_) { } }
   function commitPutBody(base, finalRows) {
     const b = { rows: finalRows };
+    const srcK = trustSourcesOf(base); if (srcK.length) b.sourceKeys = srcK;
     if (pendingChanges[base] && pendingChanges[base].baseRowsHash) b.baseRowsHash = pendingChanges[base].baseRowsHash;
     // CONFIG-1.2 / §96.2: a staged undo labels this base's commit with the commit it reverses (journal UndoOf, Source undo).
     if (pendingChanges[base] && PENDING_UNDO_OF[base]) b.undoOf = PENDING_UNDO_OF[base];
@@ -26884,7 +27144,9 @@
     const body = commitPutBody(base, finalRows);
     if (approval) body.guardApproval = approval;   // PIM 100.119: a SuperAdmin's approval of exactly the list shown
     try {
-      return await api('PUT', '/api/csv/' + encodeURIComponent(base), body, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
+      const ok0 = await api('PUT', '/api/csv/' + encodeURIComponent(base), body, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
+      trustSourceClear(base);   // TRUST-1 round 5 G4: committed -- its staged sources are done
+      return ok0;
     } catch (e) {
       // CODE REVIEW 1 FIXES 2026-10-13 (decision 52): a commit that DELETES admin accounts (a grid edit, an import, an undo to
       // AccountStatus = Deleted) needs the same typed DELETE as Delete account. The server says so (gate delete-confirm); the
@@ -36159,12 +36421,13 @@
       // §70.1b option 2: a row whose revoke was queued from this page stays in the snapshot until the next read.
       const queuedAt = REV.revokeQueued.get(r.id);
       out.push('<tr class="rev-row' + (sel ? ' rev-row-sel' : '') + (queuedAt ? ' rev-row-queued' : '') + '" data-id="' + escapeHtml(r.id) + '">');
-      out.push('<td class="rev-sel-col"><input type="checkbox" class="rev-row-check"' + (sel ? ' checked' : '') + (queuedAt ? ' disabled title="Revoke already queued"' : revIsApiPermission(r) ? ' disabled title="' + escapeHtml(REV_API_PERM_HINT) + '"' : (revCentralOf(r).readOnly ? ' disabled title="From the managing tenant (central): read-only here. It is changed on the managing tenant."' : '')) + '></td>');
+      out.push('<td class="rev-sel-col"><input type="checkbox" class="rev-row-check"' + (sel ? ' checked' : '') + (queuedAt ? ' disabled title="Revoke already queued"' : (r.carried ? ' disabled title="Not from today: this row could not be read this time and is shown from the last complete read. Revoke is offered once it is read again."' : '') + (queuedAt || r.carried ? '' : revIsApiPermission(r) ? ' disabled title="' + escapeHtml(REV_API_PERM_HINT) + '"' : (revCentralOf(r).readOnly ? ' disabled title="From the managing tenant (central): read-only here. It is changed on the managing tenant."' : ''))) + '></td>');
       // BUG-98: identity first, technical key second -- the same rule as the findings list and
       // IMP-15. A reviewer cannot approve or revoke what they cannot identify, and this column
       // was 689 rows of bare objectIds.
       // §100.47 (d): Principal / Role capped (ellipsis + tooltip), Scope floored at 22ch and broken only after '/'.
       out.push('<td class="rev-principal-cell" title="' + escapeHtml(String(r.principal || r.principalId || '')) + '"><div class="rev-p-wrap">' + revPrincipalCell(r) + revCentralChip(r) +
+        (r.carried ? '<span class="rev-carried-chip" style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;color:#9a6700;border:1px solid #d4a72c;" title="' + escapeHtml(r.stale ? 'Not read for more than a week -- a fix request is open' : 'This part could not be read this time') + '">' + (r.stale ? 'UNKNOWN (AA-SOURCE-STALE) -- ' : '') + 'not from today: last read ' + escapeHtml(formatRevWhen(r.carriedFromUtc)) + '</span>' : '') +
         (queuedAt ? '<span class="rev-queued-chip" title="Queued at ' + escapeHtml(formatRevWhen(queuedAt)) + '. The table is a snapshot, so this row stays until the engine applies the revoke and the next snapshot is read.">revoke queued</span>' : '') + '</div></td>');
       out.push('<td class="rev-role-cell" title="' + escapeHtml(r.role || '') + '"><span class="rev-ell">' + escapeHtml(r.role || '') + '</span>' +
         (revIsApiPermission(r) ? '<span class="rev-app-hint">' + escapeHtml(REV_API_PERM_HINT) + '</span>' : '') + '</td>');
@@ -36314,7 +36577,8 @@
     return { admin: true, central: type !== null, readOnly: type === 'active', type: type };
   }
   // DELEGATION-SCOPE-1: an app's API permission is read-only on this page (never selectable)
-  function revSelectable(r) { return !REV.revokeQueued.has(r.id) && !revCentralOf(r).readOnly && String((r && r.type) || '') !== 'app-permission'; }
+  // TRUST-1: a carried row (not read today, shown from the last complete read) is never selectable for a revoke
+  function revSelectable(r) { return !REV.revokeQueued.has(r.id) && !revCentralOf(r).readOnly && String((r && r.type) || '') !== 'app-permission' && !(r && r.carried); }
   function revCentralChip(r) {
     const c = revCentralOf(r);
     if (!c.admin) return '';
@@ -40255,6 +40519,7 @@
   // Free edition: once the licence is read, the Pro pages are listed as PRO (and open the Free vs Pro page).
   if (isServer) { try { fetchLicence().then(applyProMenuMarks).catch(() => { }); } catch (e) { } }
   if (isServer) { try { loadAdminDomain(); } catch (e) { } }         // REQ-T: this tenant's Admin account domain + verified domains
+  if (isServer) { try { pimAiChatInit(); } catch (e) { } }           // MANAGER-CHAT-1: the AI chat panel (Pro; shown only when it is on)
   // §97.3 / framework §12.5 PENDING-1: the blocking counts in the menu + submenu, read now and every 30 s (and on a page change).
   if (isServer) { try { refreshAttention(true); setInterval(() => { refreshAttention(true); }, 30000); } catch (e) { } }
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).

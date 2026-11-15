@@ -75,8 +75,8 @@
                                           every hash before it starts and, with -Apply, runs them from a private temp folder.
                                           A child it calls but does not carry FAILS the build.
       Set-PimEmergencyPassphrase.ps1   -- SETTINGS-CLARITY (owner 2026-11-10: "what to do where?"): set up the emergency override
-                                          passphrase once (its hash into the installation's key vault, read access on that one
-                                          secret for the web app, the web app pointed at the vault). The two lines Settings >
+                                          passphrase once (a salted PBKDF2 check of it into the installation's PIM database --
+                                          SECURE-WEB-1 3.1.26: no Key Vault, no role grant). The two lines Settings >
                                           Emergency access shows while no passphrase is set up. Built with NO dot-source left
                                           (BUILD-NO-OPTIONAL-LOADS); published for PowerShell 7 (BUILD-PUBLISH-REQUIRES-7).
 

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.26 -- 2026-11-15
+
+- Security release: every sign-in token is checked with Microsoft's own token library (Microsoft.IdentityModel 8.23.0), which PIM Manager tests at every start before it serves a request; the access request API accepts only Microsoft Entra application tokens with an app role, and API keys are removed (allow-listed applications get the role automatically); the page renews your sign-in before it ends, with Sign in again or Sign in with another account when needed; Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job; the web app holds no Key Vault role, and the break-glass passphrase is checked against a protected verifier in the PIM database; discovery mails are marked as information, not as warnings; Pro: chat in the Manager, answered by your own Azure OpenAI deployment without any key, under your own role (changes are only prepared, off by default).
+
 ## 3.1.25 -- 2026-11-14
 
 - Security: the PIM Manager web app holds only its own data; it no longer holds any right to start or change the engine job. Commit and Run now are picked up at the engine's next scheduled start (within about five minutes). Each update reports any such right it finds as a security finding.

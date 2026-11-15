@@ -2820,6 +2820,21 @@ function Invoke-DefaultStepRunner {
                     catch { $abDetail = "; as-built job NOT installed: $($_.Exception.Message) (re-run tools/setup/Deploy-PimAsBuiltJob.ps1)" }
                     $global:LASTEXITCODE = 0
                 }
+                # WAKE-1 (3.1.26, framework SECURE-WEB-1 point 1): the wake queue in the same storage account + the event-triggered
+                # wake job + the rights on that queue only (web: send; engine: read / delete) -- Commit / Run now start the engine
+                # within a minute, the web holds no job right. Best effort like the as-built job: REPORTED, never fails the deploy.
+                $wkj = Join-Path $here 'Deploy-PimWakeJob.ps1'
+                if ($ok -and (Test-Path -LiteralPath $wkj)) {
+                    $wkArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; TickJobName = $TickJobName; ManagerApp = $ManagerApp }
+                    if ("$SqlServerFqdn".Trim() -and "$TenantId".Trim() -and -not $SqlPrivateEndpoint) {
+                        $wkArgs['SqlServerFqdn'] = "$SqlServerFqdn".Trim(); $wkArgs['SqlDatabase'] = $SqlDatabase; $wkArgs['TenantId'] = $TenantId
+                        if ($UseSignedInAccount) { $wkArgs['UseSignedInAccount'] = $true }
+                    }
+                    $global:LASTEXITCODE = 0
+                    try { & $wkj @wkArgs | Out-Host; $abDetail += '; wake queue + wake job caj-pim-wake installed (Commit / Run now start the engine within a minute)' }
+                    catch { $abDetail += "; wake job NOT installed: $($_.Exception.Message) (Commit / Run now wait for the next scheduled start; re-run tools/setup/Deploy-PimWakeJob.ps1)" }
+                    $global:LASTEXITCODE = 0
+                }
                 return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt$abDetail" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }

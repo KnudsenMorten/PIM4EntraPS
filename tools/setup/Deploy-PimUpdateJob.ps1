@@ -625,8 +625,8 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
 }
 
 # ---- 2-bis. DBINIT-MEMBERSHIP (framework 4.5 point 5; owner 2026-11-05 "Grant updater the right") -- the updater's ----
-# Graph application permissions, so its membership step puts the database job's identity into the (role-assignable, SEC-32)
-# SQL admin group and renews it by itself. THE ONE LIST: Get-PimUpdaterGraphAppRoles (engine/_shared/PIM-UpdaterGraphRoles.ps1),
+# Graph application permissions (READ rights for its membership REPORT -- SECURE-WEB-1, 3.1.26: no PIM-for-Groups write right;
+# setup sets the database job identity's permanent direct membership once). THE ONE LIST: Get-PimUpdaterGraphAppRoles (engine/_shared/PIM-UpdaterGraphRoles.ps1),
 # granted through the same idempotent, tenant-pinned grant as the engine set (Grant-PimMiGraph -RoleSet Updater). A refusal
 # is said with what is missing -- the updater then reports it on every run (it never grants itself).
 if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
@@ -639,7 +639,7 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
             Grant-PimMiGraph -MiObjectId $updGraphOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Updater
             Note 'updater Graph permissions granted + read back'
         } catch {
-            Warn "the updater's Graph permissions were NOT granted ($($_.Exception.Message)) -- the database job identity's SQL admin group membership is then not kept by the updater (it names what is missing on every run); a Privileged Role Administrator grants: $(try { @((Get-PimUpdaterGraphAppRoles).Keys) -join ', ' } catch { 'the list in engine/_shared/PIM-UpdaterGraphRoles.ps1' })"
+            Warn "the updater's Graph permissions were NOT granted ($($_.Exception.Message)) -- the updater then cannot read some of what it reports (it names what is missing on every run); a Privileged Role Administrator grants: $(try { @((Get-PimUpdaterGraphAppRoles).Keys) -join ', ' } catch { 'the list in engine/_shared/PIM-UpdaterGraphRoles.ps1' })"
         }
     }
 }

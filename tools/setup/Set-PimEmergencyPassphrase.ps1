@@ -2,57 +2,63 @@
 
 <#
 .SYNOPSIS
-  Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores its SHA-256 hash as a
-  secret in the environment's key vault, gives the Manager's managed identity read access to that one secret, and
-  points the Manager at the vault.
+  Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores a check of it (a salted, slow PBKDF2-SHA256 hash, never the passphrase) in the environment's PIM database, where the Manager reads it at once; the Manager needs no Key Vault access.
 
 .DESCRIPTION
   REQ-F -- provision the EMERGENCY OVERRIDE passphrase for one environment, so break-glass can actually be activated.
+  SECURE-WEB-1 (3.1.26, owner: "the internet-facing identity has NO Key Vault edge"): the Manager is the internet-facing app,
+  so its identity holds NO Key Vault role. The passphrase check therefore lives in the PIM database the Manager already reads
+  (pim.Settings 'EmergencyPassphraseVerifier'):
+    * the passphrase is turned into its SHA-256 hex HERE (the clear text never leaves this window), then into a verifier:
+      PBKDF2-HMAC-SHA256 over that hex, 600000 iterations, 16 random bytes of salt of its own (engine\_shared\
+      PIM-EmergencyVerifier.ps1). Only the verifier is written -- never the passphrase, never its plain hash;
+    * it is READ BACK and checked against the same hash before the script says OK;
+    * the change is audited (emergency.passphrase.set);
+    * the Manager reads it on every activation -- it works the moment this script finishes, no restart, no engine run.
+  Nothing is written in Key Vault, no role is granted, the Manager app is not changed.
 
-  The Manager's Settings -> Emergency override (break-glass) checks the operator's passphrase against the key vault
-  secret PIM-EmergencyPasscode in the vault named by the Manager's PIM_EmergencyVault. Measured 2026-09-19: NO
-  Manager had PIM_EmergencyVault and no setup script provisioned the passphrase, so every activation was refused
-  ("no emergency passcode configured") -- the feature was unusable everywhere, and nothing said so until an incident.
+  -MigrateFromKeyVault (with -VaultName): an installation set up BEFORE 3.1.26 kept the SHA-256 hex in the key vault secret
+  PIM-EmergencyPasscode. This reads that secret ONCE (as you) and stores the verifier derived from it -- it does not ask for
+  the passphrase, which stays the same. The update does this by itself where its identity may read the secret.
+  The old secret and the Manager identity's old grant on it are NOT removed by this script: the update reports a leftover
+  grant (SECURE-WEB-1); remove it, and the secret when you no longer need it.
 
-  This script does the three things that make it work, and reads each one back:
-    1. stores the passphrase in the environment's key vault as secret PIM-EmergencyPasscode -- as its SHA-256 HEX,
-       which the verifier accepts as-is (Resolve-PimEmergencyExpectedHash), so the CLEAR passphrase is never in the
-       vault, never in a command line, never in a log;
-    2. grants the Manager's managed identity 'Key Vault Secrets User' on THAT SECRET only (not the whole vault);
-    3. sets PIM_EmergencyVault=<vault> on the Manager container app (ARM read-modify-write; a new revision).
-
-  The passphrase comes from -Passphrase (a SecureString) or an interactive prompt (typed twice). It is never
-  accepted as plain text on the command line.
-  Everything goes through ARM / Key Vault REST: no command-line tool, no PowerShell module. Authentication is the
-  signed-in person (-UseSignedInAccount: the browser sign-in, or the Invardia Support session open in this window;
-  asserted to be a user in the named tenant + subscription) or, for automation, an admin app's certificate
-  (-TenantId -AdminAppId -AdminCertThumbprint). -WhatIf reads and plans, and writes nothing. Run it once per
-  environment. The key vault must use Azure RBAC authorization.
+  The passphrase comes from -Passphrase (a SecureString) or an interactive prompt (typed twice). It is never accepted as
+  plain text on the command line. Everything goes through ARM / SQL / Key Vault REST: no command-line tool, no PowerShell
+  module. Authentication is the signed-in person (-UseSignedInAccount: the browser sign-in, or the Invardia Support session
+  open in this window) or, for automation, an admin app's certificate (-TenantId -AdminAppId -AdminCertThumbprint). The
+  identity must be a member of the installation's SQL admin group. -WhatIf reads and plans, and writes nothing.
   SETTINGS-CLARITY (owner 2026-11-10): published standalone at https://invardia.com/support/pim/Set-PimEmergencyPassphrase.ps1
   (Build-PimSupportScripts.ps1); Settings > Emergency access prints the two-line command with the installation's values.
 
 .PARAMETER SubscriptionId      The environment's subscription (explicit, always).
 .PARAMETER ResourceGroup       The resource group of the Manager container app.
-.PARAMETER ManagerApp          The Manager container app (default ca-pim-manager).
+.PARAMETER ManagerApp          The Manager container app (default ca-pim-manager): its PIM_SqlServer / PIM_SqlDatabase name the database.
 .PARAMETER ContainerName       The Manager's container, when the app has more than one.
-.PARAMETER VaultName           The environment's own key vault.
-.PARAMETER VaultResourceGroup  The vault's resource group (default: -ResourceGroup).
+.PARAMETER SqlServerFqdn       The database server (default: the Manager app's PIM_SqlServer).
+.PARAMETER SqlDatabase         The database (default: the Manager app's PIM_SqlDatabase, else PimPlatform).
+.PARAMETER VaultName           Only with -MigrateFromKeyVault: the key vault an earlier version kept the passphrase in.
+.PARAMETER SecretName          Only with -MigrateFromKeyVault: the secret (default PIM-EmergencyPasscode).
+.PARAMETER MigrateFromKeyVault Move the passphrase an earlier version kept in -VaultName into the database (no passphrase asked).
 .PARAMETER Passphrase          The passphrase, as a SecureString. Omit it to be prompted.
 
-  -WhatIf asks for no passphrase: it signs in, reads the Manager app, the vault and its role assignments, prints every
-  change it would make (the secret, the grant, the app setting) and writes nothing.
+  -WhatIf asks for no passphrase: it signs in, reads the Manager app and whether a check is already stored, prints the change
+  it would make and writes nothing.
 
 .EXAMPLE
-  .\Set-PimEmergencyPassphrase.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup <resource group> `
-       -VaultName <key vault name> -UseSignedInAccount -WhatIf
+  .\Set-PimEmergencyPassphrase.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup <resource group> -UseSignedInAccount -WhatIf
   Preview; then the same command without -WhatIf (it asks for the passphrase twice).
+
+.EXAMPLE
+  .\Set-PimEmergencyPassphrase.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -ResourceGroup <resource group> -VaultName <key vault name> -MigrateFromKeyVault -UseSignedInAccount
+  Move the passphrase of an installation set up before 3.1.26 into the database once (it is not asked for).
 
 .NOTES
   Requirements:
     PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
-    Role: Owner (or Contributor and User Access Administrator) on the PIM Manager's resource group and Key Vault Secrets
-          Officer on its key vault (Azure).
-    Hosts: login.microsoftonline.com, management.azure.com, *.vault.azure.net
+    Role: Reader on the PIM Manager's resource group (Azure) and a member of the installation's SQL admin group (database);
+          with -MigrateFromKeyVault also Key Vault Secrets User on the old key vault (Azure).
+    Hosts: login.microsoftonline.com, management.azure.com, *.database.windows.net, *.vault.azure.net
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimEmergencyPassphrase/
@@ -63,9 +69,11 @@ param(
     [string]$ResourceGroup,
     [string]$ManagerApp = 'ca-pim-manager',
     [string]$ContainerName,
+    [string]$SqlServerFqdn,
+    [string]$SqlDatabase,
     [string]$VaultName,
-    [string]$VaultResourceGroup,
     [string]$SecretName = 'PIM-EmergencyPasscode',
+    [switch]$MigrateFromKeyVault,
     [System.Security.SecureString]$Passphrase,
     [string]$TenantId,
     [string]$AdminAppId,
@@ -82,18 +90,17 @@ $ErrorActionPreference = 'Stop'
 # BUILD-PUBLISH-REQUIRES-7
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-ArmContainerApps.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-EmergencyVerifier.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                # -UseSignedInAccount: the Support session, else the browser
 
-# Key Vault Secrets User (built-in role, read secret values).
-$script:PimKvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
-
 function ConvertTo-PimEmergencyPassphraseHash {
     <#
-      SecureString -> the lower-case SHA-256 hex of its UTF-8 bytes (exactly what the Manager's verifier computes from
-      the typed passphrase). The clear text lives only in this function, in a BSTR that is zeroed before returning.
-      Refuses a passphrase shorter than 12 characters, or with leading/trailing whitespace (the GUI sends exactly what
-      is typed, so a stray space would make the right passphrase fail in an incident).
+      SecureString -> the lower-case SHA-256 hex of its UTF-8 bytes (the pre-hash the verifier is derived from; exactly what
+      the Manager's verifier computes from the typed passphrase). The clear text lives only in this function, in a BSTR that
+      is zeroed before returning. Refuses a passphrase shorter than 12 characters, or with leading/trailing whitespace (the
+      GUI sends exactly what is typed, so a stray space would make the right passphrase fail in an incident).
     #>
     param([Parameter(Mandatory)][System.Security.SecureString]$Passphrase)
     if ($Passphrase.Length -lt 12) { throw 'the passphrase must be at least 12 characters' }
@@ -101,124 +108,70 @@ function ConvertTo-PimEmergencyPassphraseHash {
     try {
         $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         if ($plain -ne $plain.Trim()) { throw 'the passphrase must not start or end with whitespace' }
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try { $hex = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($plain))) -replace '-', '').ToLowerInvariant() }
-        finally { $sha.Dispose() }
+        $hex = Get-PimEmergencyPreHash -Text $plain
         $plain = $null
         return $hex
     } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 
 function Invoke-PimEmergencyKvSecret {
-    # Key Vault data plane over REST (token from PIM-Rest: the certificate SPN, or the signed-in user). The test seam.
-    param([Parameter(Mandatory)][ValidateSet('GET','PUT')][string]$Method, [Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [object]$Body)
+    # Key Vault data plane over REST (token from PIM-Rest: the certificate SPN, or the signed-in user) -- READ ONLY, used by
+    # -MigrateFromKeyVault to read the secret an earlier version wrote. The test seam.
+    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName)
     $url = 'https://{0}.vault.azure.net/secrets/{1}?api-version=7.4' -f $VaultName, $SecretName
-    if ($Method -eq 'PUT') { return (Invoke-PimRest -Method PUT -Url $url -Body $Body -Resource 'https://vault.azure.net') }
     return (Invoke-PimRest -Method GET -Url $url -Resource 'https://vault.azure.net')
 }
 
-function Get-PimManagerAppPrincipalIds {
-    # The Manager app's managed identity principal ids (system-assigned and/or user-assigned). PURE over the ARM object.
-    param([Parameter(Mandatory)][object]$App)
-    $ids = New-Object System.Collections.Generic.List[string]
-    $idn = $App.identity
-    if ($idn) {
-        if ("$($idn.principalId)".Trim()) { $ids.Add("$($idn.principalId)".Trim()) }
-        $ua = $idn.userAssignedIdentities
-        if ($ua) { foreach ($p in $ua.PSObject.Properties) { if ("$($p.Value.principalId)".Trim() -and -not $ids.Contains("$($p.Value.principalId)".Trim())) { $ids.Add("$($p.Value.principalId)".Trim()) } } }
+function Get-PimManagerAppSqlTarget {
+    # The Manager app's PIM_SqlServer / PIM_SqlDatabase (the database it reads). PURE over the ARM object.
+    param([Parameter(Mandatory)][object]$App, [string]$ContainerName)
+    $srv = ''; $db = ''
+    foreach ($c in @($App.properties.template.containers)) {
+        if ("$ContainerName".Trim() -and "$($c.name)" -ne "$ContainerName".Trim()) { continue }
+        foreach ($e in @($c.env)) {
+            if ("$($e.name)" -eq 'PIM_SqlServer' -and "$($e.value)".Trim()) { $srv = "$($e.value)".Trim() }
+            if ("$($e.name)" -eq 'PIM_SqlDatabase' -and "$($e.value)".Trim()) { $db = "$($e.value)".Trim() }
+        }
     }
-    return [string[]]$ids.ToArray()
+    if ($srv -and $srv -notmatch '\.') { $srv = "$srv.database.windows.net" }
+    return [pscustomobject]@{ server = $srv; database = $db }
 }
 
 function Invoke-PimEmergencyPassphraseSetup {
     <#
-      Plan / apply / read back. Returns the outcome; THROWS on any failure. -WhatIfOnly performs only reads.
+      Plan / apply / read back. -Store { param($op = get|set|audit, $name, $value) } is the PIM database (pim.Settings).
+      Returns the outcome; THROWS on any failure. -WhatIfOnly performs only reads. Writes ONE setting -- nothing in Key
+      Vault, no role assignment, no change to the Manager app.
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$SubscriptionId,
-        [Parameter(Mandatory)][string]$ResourceGroup,
-        [Parameter(Mandatory)][string]$ManagerApp,
-        [string]$ContainerName,
-        [Parameter(Mandatory)][string]$VaultName,
-        [string]$VaultResourceGroup,
-        [string]$SecretName = 'PIM-EmergencyPasscode',
         [Parameter(Mandatory)][string]$PassphraseHash,
+        [Parameter(Mandatory)][scriptblock]$Store,
+        [string]$Source = 'Set-PimEmergencyPassphrase',
+        [int]$Iterations = 0,
         [switch]$WhatIfOnly
     )
     if ("$PassphraseHash" -notmatch '^[0-9a-f]{64}$') { throw 'internal: the passphrase hash is not a lower-case SHA-256 hex' }
-    if (-not "$VaultResourceGroup".Trim()) { $VaultResourceGroup = $ResourceGroup }
-    $out = [ordered]@{ ok = $false; whatIf = [bool]$WhatIfOnly; vault = $VaultName; secretName = $SecretName; managerApp = $ManagerApp
-                       principalIds = @(); secretWritten = $false; secretVerified = $false; grantsAdded = @(); grantsPresent = @(); envChanged = $false; envVerified = $false; plan = @() }
-
-    # 1. The Manager app and its identity.
-    $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
-    if (-not $app) { throw "container app '$ManagerApp' not found in resource group '$ResourceGroup' (subscription $SubscriptionId)" }
-    $pids = @(Get-PimManagerAppPrincipalIds -App $app)
-    if (-not $pids.Count) { throw "'$ManagerApp' has no managed identity -- the Manager could not read the vault. Give it a system-assigned identity first." }
-    $out.principalIds = $pids
-
-    # 2. The vault: must exist and use Azure RBAC (a per-secret role assignment needs it).
-    $vaultId = "/subscriptions/$SubscriptionId/resourceGroups/$VaultResourceGroup/providers/Microsoft.KeyVault/vaults/$VaultName"
-    $vault = Invoke-PimArm -Method GET -Path $vaultId -ApiVersion '2023-07-01'
-    if (-not $vault) { throw "key vault '$VaultName' not found in resource group '$VaultResourceGroup'" }
-    if (-not [bool]$vault.properties.enableRbacAuthorization) {
-        throw "key vault '$VaultName' uses access policies, not Azure RBAC -- this script grants per-secret RBAC only. Switch the vault to RBAC authorization, or grant the Manager's identity 'get' on secrets by hand."
-    }
-    $secretScope = "$vaultId/secrets/$SecretName"
-
-    # 3. The plan.
+    $name = Get-PimEmergencyVerifierSettingName
+    $out = [ordered]@{ ok = $false; whatIf = [bool]$WhatIfOnly; setting = $name; replaced = $false; written = $false; verified = $false; audited = $false; plan = @() }
     $existing = $null
-    try { $existing = Invoke-PimEmergencyKvSecret -Method GET -VaultName $VaultName -SecretName $SecretName } catch { $existing = $null }
-    $out.plan += $(if ($existing) { "REPLACE secret $SecretName in $VaultName (a new version; the old passphrase stops working)" } else { "CREATE secret $SecretName in $VaultName" })
-    $roleDefId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/$($script:PimKvSecretsUserRoleId)"
-    $assignments = @()
-    try { $assignments = @(Invoke-PimArm -Method GET -Path "$vaultId/providers/Microsoft.Authorization/roleAssignments" -ApiVersion '2022-04-01' -All) } catch { $assignments = @() }
-    $need = @()
-    foreach ($p in $pids) {
-        $has = @($assignments | Where-Object {
-            "$($_.properties.principalId)" -eq $p -and "$($_.properties.roleDefinitionId)" -match ([regex]::Escape($script:PimKvSecretsUserRoleId) + '$') -and
-            ("$($_.properties.scope)" -eq $vaultId -or "$($_.properties.scope)" -eq $secretScope) })
-        if ($has.Count) { $out.grantsPresent += $p } else { $need += $p; $out.plan += "GRANT Key Vault Secrets User on secret $SecretName to the Manager identity $p" }
-    }
-    $curEnv = ''
-    foreach ($c in @($app.properties.template.containers)) {
-        if ("$ContainerName".Trim() -and "$($c.name)" -ne "$ContainerName".Trim()) { continue }
-        foreach ($e in @($c.env)) { if ("$($e.name)" -eq 'PIM_EmergencyVault') { $curEnv = "$($e.value)" } }
-    }
-    if ($curEnv -ne $VaultName) { $out.plan += "SET PIM_EmergencyVault=$VaultName on $ManagerApp (new revision)" }
+    try { $existing = & $Store 'get' $name $null } catch { throw "could not read pim.Settings '$name' -- refusing to write over an unread setting: $($_.Exception.Message)" }
+    $out.replaced = [bool]($null -ne $existing -and (ConvertFrom-PimEmergencyVerifier -Value $existing).ok)
+    $out.plan += $(if ($out.replaced) { "REPLACE the emergency passphrase check in the PIM database (pim.Settings $name; the old passphrase stops working)" } else { "STORE the emergency passphrase check in the PIM database (pim.Settings ${name}: PBKDF2-SHA256, $(Get-PimEmergencyVerifierIterations) iterations, its own salt)" })
     if ($WhatIfOnly) { $out.ok = $true; return [pscustomobject]$out }
 
-    # 4. The secret: the SHA-256 hex, never the passphrase. Read back and compare.
-    [void](Invoke-PimEmergencyKvSecret -Method PUT -VaultName $VaultName -SecretName $SecretName -Body @{
-        value = $PassphraseHash; contentType = 'sha256-hex of the PIM emergency override passphrase'
-        tags = @{ purpose = 'PIM4EntraPS emergency override'; format = 'sha256-hex' } })
-    $out.secretWritten = $true
-    $back = Invoke-PimEmergencyKvSecret -Method GET -VaultName $VaultName -SecretName $SecretName
-    if ("$($back.value)" -ne $PassphraseHash) { throw "read-back mismatch: secret $SecretName in $VaultName does not hold the value that was written" }
-    $out.secretVerified = $true
-
-    # 5. The grant, on the SECRET (least privilege). Idempotent: an existing grant is left alone.
-    foreach ($p in $need) {
-        $name = [guid]::NewGuid().ToString()
-        [void](Invoke-PimArm -Method PUT -Path "$secretScope/providers/Microsoft.Authorization/roleAssignments/$name" -ApiVersion '2022-04-01' -Body @{
-            properties = @{ roleDefinitionId = $roleDefId; principalId = $p; principalType = 'ServicePrincipal' } })
-        $out.grantsAdded += $p
+    $ver = New-PimEmergencyVerifier -PreHashHex $PassphraseHash -Source $Source -Iterations $Iterations
+    [void](& $Store 'set' $name $ver)
+    $out.written = $true
+    $back = & $Store 'get' $name $null
+    if (-not (Test-PimEmergencyVerifier -Verifier $back -PreHashHex $PassphraseHash)) {
+        throw "read-back mismatch: pim.Settings '$name' does not hold the check that was written"
     }
-    if ($need.Count) {
-        $chk = @(Invoke-PimArm -Method GET -Path "$secretScope/providers/Microsoft.Authorization/roleAssignments" -ApiVersion '2022-04-01' -All)
-        foreach ($p in $need) {
-            if (-not @($chk | Where-Object { "$($_.properties.principalId)" -eq $p -and "$($_.properties.roleDefinitionId)" -match ([regex]::Escape($script:PimKvSecretsUserRoleId) + '$') }).Count) {
-                throw "the Key Vault Secrets User grant for $p is not visible on read-back"
-            }
-        }
-    }
-
-    # 6. PIM_EmergencyVault on the Manager (read-modify-write, read back inside Set-PimAcaAppEnvValue).
-    $envRes = Set-PimAcaAppEnvValue -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -VariableName 'PIM_EmergencyVault' -Value $VaultName -ContainerName $ContainerName
-    $out.envChanged = [bool]$envRes.changed
-    $out.envVerified = ("$($envRes.value)" -eq $VaultName)
-    if (-not $out.envVerified) { throw 'PIM_EmergencyVault did not read back as the vault name' }
+    $out.verified = $true
+    try {
+        [void](& $Store 'audit' $name @{ before = $(if ($out.replaced) { 'a previous check' } else { $null }); after = @{ alg = 'pbkdf2-sha256'; iter = $ver.iter; source = $Source }; action = 'emergency.passphrase.set' })
+        $out.audited = $true
+    } catch { Write-Warning "audit not written: $($_.Exception.Message)" }
     $out.ok = $true
     return [pscustomobject]$out
 }
@@ -233,10 +186,12 @@ function Write-ResultFile { if ("$OutFile".Trim()) { try { $result | ConvertTo-J
 function Fail($m) { $result.reason = $m; Write-ResultFile; Write-Host "RESULT: FAILED -- $m" -ForegroundColor Red; exit 1 }
 function Note($m, $c = 'Gray') { Write-Host "  $m" -ForegroundColor $c }
 
-Write-Host "=== PIM emergency override passphrase -> key vault + Manager (REQ-F) ===" -ForegroundColor Cyan
-foreach ($p in @(@{ n = 'SubscriptionId'; v = $SubscriptionId }, @{ n = 'ResourceGroup'; v = $ResourceGroup }, @{ n = 'VaultName'; v = $VaultName }, @{ n = 'TenantId'; v = $TenantId })) {
+Write-Host "=== PIM emergency override passphrase -> the PIM database (REQ-F, SECURE-WEB-1) ===" -ForegroundColor Cyan
+foreach ($p in @(@{ n = 'SubscriptionId'; v = $SubscriptionId }, @{ n = 'ResourceGroup'; v = $ResourceGroup }, @{ n = 'TenantId'; v = $TenantId })) {
     if (-not "$($p.v)".Trim()) { Fail "-$($p.n) is required" }
 }
+if ($MigrateFromKeyVault -and -not "$VaultName".Trim()) { Fail '-MigrateFromKeyVault needs -VaultName (the key vault the passphrase was kept in)' }
+if ($MigrateFromKeyVault -and $Passphrase) { Fail '-MigrateFromKeyVault moves the passphrase that is already set -- do not give -Passphrase with it' }
 
 # --- identity ------------------------------------------------------------------------------
 if ($UseSignedInAccount) {
@@ -250,12 +205,47 @@ if ($UseSignedInAccount) {
     $global:PIM_TenantId       = $TenantId
     $global:PIM_ClientId       = $AdminAppId
     $global:PIM_CertThumbprint = $AdminCertThumbprint
+    $global:PIM_ClientSecret   = $null
     Note "identity: app $AdminAppId (certificate)" 'DarkGray'
 }
 
-# --- the passphrase (SecureString only; typed twice when prompted) ---------------------------
-# 12.7: -WhatIf writes nothing, so it needs no passphrase -- a placeholder hash plans the same steps.
-if ($WhatIfPreference -and -not $Passphrase) {
+# --- the database: named by the Manager app unless given ------------------------------------
+if (-not "$SqlServerFqdn".Trim() -or -not "$SqlDatabase".Trim()) {
+    $app = $null
+    try { $app = Get-PimAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp } catch { Fail "could not read the container app '$ManagerApp': $($_.Exception.Message)" }
+    if (-not $app) { Fail "container app '$ManagerApp' not found in resource group '$ResourceGroup' (subscription $SubscriptionId)" }
+    $tgt = Get-PimManagerAppSqlTarget -App $app -ContainerName $ContainerName
+    if (-not "$SqlServerFqdn".Trim()) { $SqlServerFqdn = $tgt.server }
+    if (-not "$SqlDatabase".Trim()) { $SqlDatabase = $(if ($tgt.database) { $tgt.database } else { 'PimPlatform' }) }
+}
+if (-not "$SqlServerFqdn".Trim()) { Fail "the Manager app '$ManagerApp' names no database server (PIM_SqlServer) -- give -SqlServerFqdn" }
+$global:PIM_SqlServer = "$SqlServerFqdn".Trim(); $global:PIM_SqlDatabase = "$SqlDatabase".Trim()
+if ($UseSignedInAccount) {
+    try { $sqlWho = Connect-PimSignedInSql -TenantId $TenantId; Note "database identity: signed-in user $($sqlWho.userName)" 'DarkGray' } catch { Fail "$($_.Exception.Message)" }
+} else { $global:PIM_SqlClientId = $AdminAppId; $global:PIM_SqlCertThumbprint = $AdminCertThumbprint }
+$cs = ''
+try { $cs = Get-PimSqlConnectionString -Server $global:PIM_SqlServer -Database $global:PIM_SqlDatabase } catch { Fail "could not build a connection string: $($_.Exception.Message)" }
+Note "database: $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase)" 'DarkGray'
+$store = {
+    param($op, $name, $value)
+    switch ($op) {
+        'get'   { return (Get-PimSqlSetting -ConnectionString $cs -Name $name) }
+        'set'   { Set-PimSqlSetting -ConnectionString $cs -Name $name -Value $value; return $null }
+        'audit' { Write-PimSqlAuditEvent -ConnectionString $cs -Actor "$(if ($UseSignedInAccount) { $who.userName } else { "app:$AdminAppId" })" -ActorSource 'setup' -Action "$($value.action)" -Target $name -Before $value.before -After $value.after; return $null }
+    }
+}
+
+# --- the pre-hash: the passphrase (SecureString only; typed twice when prompted), or the old Key Vault secret ---------
+$source = 'Set-PimEmergencyPassphrase'
+if ($MigrateFromKeyVault) {
+    $sec = $null
+    try { $sec = Invoke-PimEmergencyKvSecret -VaultName "$VaultName".Trim() -SecretName "$SecretName".Trim() } catch { Fail "could not read secret $SecretName in key vault $VaultName (you need Key Vault Secrets User on it): $($_.Exception.Message)" }
+    $hash = ConvertTo-PimEmergencyPreHashFromSecret -SecretValue $(if ($sec) { $sec.value } else { '' })
+    if (-not $hash) { Fail "secret $SecretName in key vault $VaultName is empty -- nothing to move; run without -MigrateFromKeyVault to set a new passphrase" }
+    $source = "Set-PimEmergencyPassphrase -MigrateFromKeyVault ($VaultName)"
+    Note "the passphrase kept in key vault $VaultName is moved (it is not asked for and does not change)" 'DarkGray'
+} elseif ($WhatIfPreference -and -not $Passphrase) {
+    # 12.7: -WhatIf writes nothing, so it needs no passphrase -- a placeholder hash plans the same steps.
     Note 'What if: no passphrase is asked for -- nothing will be stored' 'Yellow'
     $hash = '0' * 64
 } elseif (-not $Passphrase) {
@@ -269,10 +259,9 @@ if ($WhatIfPreference -and -not $Passphrase) {
     try { $hash = ConvertTo-PimEmergencyPassphraseHash -Passphrase $Passphrase } catch { Fail "$($_.Exception.Message)" }
 }
 
-$whatIfOnly = -not $PSCmdlet.ShouldProcess("key vault $VaultName secret $SecretName + container app $ManagerApp (subscription $SubscriptionId)", "store the emergency passphrase hash, grant the Manager identity 'Key Vault Secrets User' on that secret, set PIM_EmergencyVault")
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("the PIM database $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase) (pim.Settings $(Get-PimEmergencyVerifierSettingName))", "store the emergency passphrase check (PBKDF2-SHA256, its own salt)")
 try {
-    $r = Invoke-PimEmergencyPassphraseSetup -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ContainerName $ContainerName `
-            -VaultName $VaultName -VaultResourceGroup $VaultResourceGroup -SecretName $SecretName -PassphraseHash $hash -WhatIfOnly:$whatIfOnly
+    $r = Invoke-PimEmergencyPassphraseSetup -PassphraseHash $hash -Store $store -Source $source -WhatIfOnly:$whatIfOnly
 } catch { Fail "$($_.Exception.Message)" }
 $hash = $null
 foreach ($k in $r.PSObject.Properties.Name) { $result[$k] = $r.$k }
@@ -282,9 +271,9 @@ if ($r.whatIf) {
     Write-ResultFile; Write-Host 'RESULT: WHAT-IF -- nothing written' -ForegroundColor Yellow; exit 0
 }
 $result.ok = $true
-$result.reason = "passphrase stored (as SHA-256) in $VaultName/$SecretName and read back; Manager identity grant(s): $(@($r.grantsAdded).Count) added, $(@($r.grantsPresent).Count) present; PIM_EmergencyVault $(if ($r.envChanged) { 'set' } else { 'already set' }) on $ManagerApp"
+$result.reason = "emergency passphrase check $(if ($r.replaced) { 'replaced' } else { 'stored' }) in the PIM database and read back$(if ($MigrateFromKeyVault) { " (moved from key vault $VaultName)" }); it works at once"
 Write-ResultFile
 Write-Host "RESULT: OK -- $($result.reason)" -ForegroundColor Green
-Write-Host '  NOTE: a new role assignment can take a few minutes to apply. Settings -> Emergency override shows "Passphrase: configured" once the Manager can read it.' -ForegroundColor DarkGray
+if ($MigrateFromKeyVault) { Write-Host "  NOTE: the secret $SecretName in $VaultName is no longer read by PIM Manager. Remove the Manager identity's role on it (the update reports it until then), and the secret when you no longer need it." -ForegroundColor DarkGray }
 exit 0
 } finally { Stop-PimScriptRun -Script 'Set-PimEmergencyPassphrase' }

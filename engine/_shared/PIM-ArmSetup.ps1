@@ -41,6 +41,9 @@ $script:PimSetupApi = @{
     sql           = '2021-11-01'
     logAnalytics  = '2022-10-01'
     aca           = '2024-03-01'
+    # BUILT-IN-AUTH-1: authConfigs/current only -- the token store's managed identity (login.tokenStore.azureBlobStorage.
+    # managedIdentityResourceId) exists from this version on; a read-modify-write with an older one DROPS it
+    acaAuth       = '2024-10-02-preview'
     storage       = '2023-01-01'
     keyVault      = '2023-07-01'
     # batch 2: a VNet link's resolutionPolicy (NxDomainRedirect) exists from this version on; the data planes' versions.
@@ -1306,7 +1309,7 @@ function Get-PimArmAcaReplicas {
 function Get-PimArmAcaAuthConfig {
     <# az containerapp auth show : the authConfigs/current resource (.properties.platform / identityProviders / globalValidation ...), $null when none. #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name, [switch]$ErrorAsNull)
-    Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'authConfigs/current') -ApiVersion (Get-PimSetupApiVersion aca) -NotFoundOk -ErrorAsNull:$ErrorAsNull
+    Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'authConfigs/current') -ApiVersion (Get-PimSetupApiVersion acaAuth) -NotFoundOk -ErrorAsNull:$ErrorAsNull
 }
 
 function Set-PimArmAcaAuthConfig {
@@ -1318,7 +1321,7 @@ function Set-PimArmAcaAuthConfig {
     $cur = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     $props = if ($cur -and $cur.properties) { $cur.properties } else { [pscustomobject]@{} }
     & $Mutate $props
-    Invoke-PimSetupArm -Method PUT -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'authConfigs/current') -Body @{ properties = $props } -ApiVersion (Get-PimSetupApiVersion aca)
+    Invoke-PimSetupArm -Method PUT -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'authConfigs/current') -Body @{ properties = $props } -ApiVersion (Get-PimSetupApiVersion acaAuth)
 }
 
 function Get-PimArmAcaJob {

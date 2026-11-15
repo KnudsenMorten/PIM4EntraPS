@@ -3,6 +3,7 @@
   { "page": "install", "title": "Install", "summary": "What you need, the rights the installing person holds, the guided install and what it creates." },
   { "page": "identities", "title": "Identities and permissions", "summary": "Every identity the product runs as, what each one may do and why, and what each one can never do." },
   { "page": "sql-access", "title": "Database access (least privilege)", "summary": "One database user and one role per component, the signed grant procedure, an admin group that stays empty, and no passwords anywhere." },
+  { "page": "authenticate", "title": "How to authenticate", "summary": "Signing in from the browser, a script, an AI assistant (MCP) or an application: Microsoft signs you in, Microsoft's library checks the token, PIM Manager decides what you may do. No keys, no secrets." },
   { "page": "security", "title": "Security design", "summary": "Sign-in, the portal's security headers, data and encryption, network options, logging and audit, and where to find the full security review pack." },
   { "page": "guards", "title": "Guards and Strict mode", "summary": "Every safety limit, what happens when one trips, how a held change is approved, and the 24-hour Strict mode after an engine change." },
   { "page": "operations", "title": "Day-to-day operations", "summary": "Staging and committing, approvals, scheduled jobs, mail, backups and undo, and what to watch." },

@@ -1,10 +1,10 @@
-<!-- subject: Discovery found {{ItemCount}} new {{Scope}} item(s) -->
+<!-- subject: Discovery found {{ItemCount}} new {{Scope}} item(s) - for your information -->
 <!-- tokens: Scope, ItemCount, DiscoveredList, TenantName, Instance, WhenUtc -->
-<!-- Sent (opt-in) when a scheduled discovery sweep surfaces fresh items (a new subscription / management group / Power BI workspace / built-in role) so they are never silently staged. Opt in by setting the discovery notification recipient in the Manager. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
+<!-- Sent (opt-in) when a scheduled discovery sweep surfaces fresh items (a new subscription / management group / Power BI workspace / built-in role) so they are never silently staged. An INFORMATION mail (owner 2026-11-14, SUP-2026-00581): no severity word, no action asked. Opt in by setting the discovery notification recipient in the Manager. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
-  <p>A discovery sweep found <b>{{ItemCount}} new item(s)</b> that PIM Manager does not manage yet.</p>
-  <p>These were staged for review (a new resource is never auto-mapped to a principal). Open the PIM Manager to approve or adjust them.</p>
+  <p>For your information: a discovery sweep found <b>{{ItemCount}} new item(s)</b> that PIM Manager does not manage yet.</p>
+  <p>No action is needed. A new item is never given to an admin or a group on its own. If you want PIM Manager to manage one of them, you can add it in Discovery and gaps whenever it suits you.</p>
   <div style="margin:12px 0 14px 0; font-size:14px; line-height:21px;">
     <div style="margin:0 0 6px 0;"><b>Scope:</b> {{Scope}}</div>
     <div style="margin:0 0 6px 0;"><b>New items:</b> {{ItemCount}}</div>

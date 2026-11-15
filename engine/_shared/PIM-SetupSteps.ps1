@@ -77,6 +77,10 @@ function Get-PimSetupStepCatalog {
         [ordered]@{ key = 'keyvault-purge-protection'; title = 'Key Vault purge protection on';                      since = '3.1.1';   how = 'updater' }
         [ordered]@{ key = 'keyvault-secrets-only';    title = 'Secrets only in Key Vault';                          since = '3.1.1';   how = 'updater' }
         [ordered]@{ key = 'identity-names';           title = 'Identity names follow the standard (id-pim-<role>)';  since = '3.0.57';  how = 'support-app' }
+        # BUILT-IN-AUTH-1 (owner 2026-11-14): the Manager on Microsoft's built-in sign-in, the ONE standard (no client secret, token
+        # store, account picker, 8-hour session, no front container, the web identity without a Key Vault role). The updater only
+        # REPORTS it (engine/_shared/PIM-BuiltinAuth.ps1 Invoke-PimBuiltinAuthCheck); setup fixes it (Set-PimManagerEasyAuth.ps1).
+        [ordered]@{ key = 'builtin-signin';           title = 'Microsoft built-in sign-in (the standard)';            since = '3.1.26';  how = 'support-app' }
     )
 }
 function Get-PimSetupStepMax { return 50 }
@@ -332,6 +336,9 @@ function Get-PimSetupSecretPlainCount {
         $p = Get-PimSetupStepField $r 'properties'
         foreach ($s in @(Get-PimSetupStepField (Get-PimSetupStepField $p 'configuration') 'secrets')) {
             if ($null -eq $s) { continue }
+            # BUILT-IN-AUTH-1: 'override-use-mi-fic-assertion-client-id' holds the web identity's CLIENT id (an identifier the platform
+            # reads to find the federated credential's identity) -- NOT a secret, and never counted as one
+            if ("$(Get-PimSetupStepField $s 'name')" -ieq 'override-use-mi-fic-assertion-client-id') { continue }
             if (-not "$(Get-PimSetupStepField $s 'keyVaultUrl')".Trim()) { $values++ }
         }
         $tpl = Get-PimSetupStepField $p 'template'
@@ -550,8 +557,9 @@ function New-PimSetupSteps {
     # ---- S5 signin-front (UpdateState.signIn) ------------------------------------------------------------------------
     $si = Get-PimSetupStepField $us 'signIn'; $layer = "$(Get-PimSetupStepField $si 'layer')".Trim().ToLowerInvariant()
     switch ($layer) {
-        'signin-front' { & $set 'signin-front' 'ok' "the Manager signs in through the sign-in front$(if ("$(Get-PimSetupStepField $si 'version')".Trim() -match '^\d+(\.\d+){1,3}$') { " $("$(Get-PimSetupStepField $si 'version')".Trim())" })" $usAt }
-        'easyauth'     { & $set 'signin-front' 'missing' 'the Manager still signs in through Easy Auth (the front move is not done)' $usAt }
+        'signin-front' { & $set 'signin-front' 'ok' "the Manager signs in through the opt-in sign-in front$(if ("$(Get-PimSetupStepField $si 'version')".Trim() -match '^\d+(\.\d+){1,3}$') { " $("$(Get-PimSetupStepField $si 'version')".Trim())" })" $usAt }
+        # BUILT-IN-AUTH-1 (owner 2026-11-14): Microsoft's built-in sign-in IS the standard -- the front is opt-in, never a gap
+        'easyauth'     { & $set 'signin-front' 'ok' 'the Manager signs in with Microsoft''s built-in sign-in (the standard; the sign-in front is opt-in) -- see builtin-signin' $usAt }
         'none'         { & $set 'signin-front' 'missing' 'the Manager has no sign-in layer in front of it' $usAt }
         default        { & $set 'signin-front' 'unknown' 'not read: the updater has not recorded the Manager''s sign-in layer' $usAt }
     }
@@ -744,11 +752,31 @@ function New-PimSetupSteps {
             # one-time grant is missing, the Support app fixes it (how = support-app) and the updater's reason is appended.
             if (Get-Command Get-PimSkvSetupStepState -ErrorAction SilentlyContinue) {
                 $skv = Get-PimSkvSetupStepState -Facts $up
-                if ($skv.state -eq 'missing' -and $skv.how -eq 'support-app') {
+                # SECURE-WEB-1 F1 a (3.1.26): when the ONLY plain secrets left are the Manager's (they stay app secrets by
+                # design -- the mover's secretsToKeyVaultStay) the step is n/a, never left open
+                $sty = ConvertTo-PimSetupStepCount (& $uf 'secretsToKeyVaultStay')
+                if ($skv.state -in @('ok', 'n/a') -and $null -ne $sty -and $sty -gt 0 -and ($spv + $spe) -le $sty) {
+                    & $set 'keyvault-secrets-only' 'n/a' ("n/a -- SECURE-WEB-1: the Manager's secrets stay app secrets ($($spv + $spe), names not sent); every other secret is a Key Vault reference") $upAt
+                }
+                elseif ($skv.state -eq 'missing' -and $skv.how -eq 'support-app') {
                     $res['keyvault-secrets-only'].how = 'support-app'
                     if ("$($skv.detail)".Trim()) { $res['keyvault-secrets-only'].detail = "$($res['keyvault-secrets-only'].detail); $($skv.detail)" }
                 }
             }
+        }
+    }
+
+    # ---- BUILT-IN-AUTH-1 builtin-signin (updater: Invoke-PimBuiltinAuthCheck, READ ONLY) ------------------------------
+    # ok only when the updater READ the Manager, its sign-in settings, the web identity's roles and the app registration and all
+    # are the standard; any difference = missing (named); the opt-in front = n/a; nothing read / an older updater = unknown.
+    if ($null -eq $up) { & $set 'builtin-signin' 'unknown' $noUp $null }
+    else {
+        $bis = "$(& $uf 'builtinSignin')".Trim().ToLowerInvariant(); $bid = "$(& $uf 'builtinSigninDetail')".Trim()
+        switch ($bis) {
+            'ok'      { & $set 'builtin-signin' 'ok' $(if ($bid) { $bid } else { 'Microsoft built-in sign-in as the standard (no client secret, token store, account picker, 8-hour session)' }) $upAt }
+            'missing' { & $set 'builtin-signin' 'missing' $(if ($bid) { $bid } else { 'the sign-in is not the standard' }) $upAt }
+            'n/a'     { & $set 'builtin-signin' 'n/a' $(if ($bid) { $bid } else { 'the opt-in sign-in front is in use' }) $upAt }
+            default   { & $set 'builtin-signin' 'unknown' $(if ($bid) { "not determined: $bid" } else { 'not checked by this version' }) $upAt }
         }
     }
 
@@ -835,7 +863,9 @@ function Get-PimSetupStepUpdaterFacts {
                      dbJob = 'unknown'; dbJobDetail = ''
                      # SEC-10: $null = not read (unknown), never a guess
                      kvVaultCount = $null; kvNoPurgeCount = $null; kvSoftDelete = $null
-                     secretsScanned = $null; plainSecretValues = $null; plainSecretEnv = $null }
+                     secretsScanned = $null; plainSecretValues = $null; plainSecretEnv = $null
+                     # BUILT-IN-AUTH-1: set by the updater from Invoke-PimBuiltinAuthCheck (ok | missing | n/a | unknown); $null = not checked
+                     builtinSignin = $null; builtinSigninDetail = '' }
     try { $dj = Get-PimSetupStepDbJobFacts -DbInitResult $DbInit; $f.dbJob = $dj.dbJob; $f.dbJobDetail = (ConvertTo-PimSetupStepDetail -Text $dj.dbJobDetail) } catch { }
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $items = { param($a) if ($null -eq $a) { @() } elseif ($a.PSObject.Properties['value']) { @(@($a.value) | Where-Object { $_ }) } else { @($a) } }

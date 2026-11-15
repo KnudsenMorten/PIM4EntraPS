@@ -22,10 +22,19 @@
        name (§39), because this object lives in the customer's own tenant where it is unique,
     3. sets the reply URL, the `api://<appId>` identifier URI and ID-token issuance,
     4. ensures the app registration has a service principal in the tenant,
-    5. mints a client secret ONLY when the app has none this deployment can use, and stores it as
-       an ACA secret so it never appears in the container spec,
-    6. configures the Microsoft identity provider + turns Easy Auth on with RedirectToLoginPage,
-    7. READS IT BACK and fails if the audience is not there,
+    5. BUILT-IN-AUTH-1 (owner 2026-11-14) -- NO CLIENT SECRET: the web identity id-pim-web (made and
+       attached when the Manager has none), a federated credential on the registration that trusts it,
+       the container-app setting 'override-use-mi-fic-assertion-client-id' (its CLIENT id), and the
+       token store (blob container 'pim-auth-tokens' in the install's own storage account with
+       shared-key access off; Storage Blob Data Contributor for id-pim-web on THAT container only),
+    6. puts Microsoft's built-in authentication on with the standard (engine/_shared/PIM-BuiltinAuth.ps1:
+       RedirectToLoginPage, the v2 issuer, both audiences, the account picker, the token store, an
+       8-hour session),
+    7. READS IT BACK and fails if anything differs -- only THEN the Manager container is set to verify
+       the signed token itself (PIM_HOSTED_AUTH_LAYER=easyauth, PIM_HOSTED_REQUIRE_SIGNED_TOKEN=true,
+       PIM_HOSTED_EASYAUTH_AUD, PIM_HOSTED_AUTH_TENANT, PORT), an opt-in sign-in front still in the
+       template is removed in the same write, and the old Easy Auth client secrets ('easyauth*') are
+       removed (read back),
     8. restricts who may sign in (an EXPLICIT choice: -AllowedPrincipals, or -AllowAllTenantUsers =
        every member account and never a guest), and only then
     9. OPENS the Manager: a new Manager is created closed (Setup-PimContainers) and stays closed until
@@ -103,16 +112,15 @@ param(
     # reads it back -- what Setup-PimContainers calls at create, and what Invoke-PimDeployAll calls when
     # the Easy Auth step fails on a Manager that has no Easy Auth in front of it.
     [switch]$CloseIngressOnly,
+    # BUILT-IN-AUTH-1: the NAME of the old Easy Auth client secret on the container app. Nothing is minted any more (the sign-in
+    # is secretless); a container-app secret of this name left by an earlier version is REMOVED once the standard reads back.
     [string]$SecretName     = 'easyauth-client-secret',
-    [int]$SecretYears       = 2,
-    # 🔑 ROTATE THE SIGN-IN SECRET. Without this the script deliberately never re-mints: a secret
-    # that already exists may be in use, and `credential reset` without --append revokes the lot.
-    # With it, a NEW secret is minted (--append, so the old one keeps working), written to the ACA
-    # secret, and the app is re-verified. The OLD credential is left in place on purpose -- see the
-    # note at the rotation block. Deleting it is a separate, deliberate act once the new one is
-    # proven, because revoking the live credential before the new one is confirmed is how a
-    # rotation becomes an outage.
+    [int]$SecretYears       = 2,            # IGNORED since BUILT-IN-AUTH-1 (no client secret): kept so existing command lines bind
+    # IGNORED since BUILT-IN-AUTH-1: there is no client secret to rotate (a federated credential has nothing that expires).
     [switch]$RotateSecret,
+    # the install's storage account for the token store ('' = the one with shared-key access off in the resource group, else
+    # the install's own stpimab<hash> account is created)
+    [string]$TokenStoreAccount = '',
     [string]$OutFile
 )
 $ErrorActionPreference = 'Stop'
@@ -131,6 +139,9 @@ if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { . (Join-P
 . (Join-Path $sharedDir 'PIM-InstallNames.ps1')   # CR5 item 5: the display name's earlier / current form (never renamed back)
 # BUG-169: the sign-in consent scopes + the pure consent plan.
 . (Join-Path $here '_PimDeployGraph.ps1')
+# BUILT-IN-AUTH-1: the ONE definition of the built-in sign-in standard (also what the updater reports against)
+. (Join-Path $sharedDir 'PIM-BuiltinAuth.ps1')
+$script:PimBa = Get-PimBuiltinAuthStandard
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -445,7 +456,7 @@ if (-not $appId) {
         $appId = ''
         try {
             $newApp = New-PimGraphApplication -Body @{ displayName = $AppDisplayName
-                                                       web = @{ redirectUris = @($reply); implicitGrantSettings = @{ enableIdTokenIssuance = $true } } }
+                                                       web = @{ redirectUris = @($reply); implicitGrantSettings = @{ enableIdTokenIssuance = $true; enableAccessTokenIssuance = $false } } }
             $appId = "$($newApp.appId)".Trim()
         } catch { Write-Host "    Graph refused the create: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
         if (-not "$appId".Trim()) {
@@ -490,7 +501,7 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
         if ($wait) { Start-Sleep -Seconds $wait }
         $existingReplies = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).web.redirectUris) | Where-Object { "$_".Trim() })
         $replies = @(@($existingReplies) + @($wantReplies) | Sort-Object -Unique)
-        [void](Update-PimEaApp @{ web = @{ redirectUris = @($replies); implicitGrantSettings = @{ enableIdTokenIssuance = $true } } })
+        [void](Update-PimEaApp @{ web = @{ redirectUris = @($replies); implicitGrantSettings = @{ enableIdTokenIssuance = $true; enableAccessTokenIssuance = $false } } })
         $nowReplies = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).web.redirectUris) | Where-Object { "$_".Trim() })
         if (-not @($wantReplies | Where-Object { $nowReplies -notcontains $_ }).Count) { $replyOk = $true; break }
     }
@@ -532,6 +543,26 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     }
     if ($idOk) { Note "identifiers present: api://$appId + $StableIdentifierUri" }
     else { Warn "could not set both identifier URIs -- the gate may not mint a token, and the next deploy may not FIND this app and could create a duplicate." }
+    # AUTH-MODERN-1 (owner 2026-11-15 "use only modern and secure method"): the registration EXPOSES the delegated scope
+    # api://<id>/user_impersonation that the sign-in asks for (the Manager verifies the ACCESS token: scp, aud, tenant, expiry),
+    # and the Azure CLI is pre-authorised for it so a script can use `az account get-access-token --resource api://<id>` / MSAL.
+    # Idempotent (existing URIs, scopes and pre-authorisations are kept), READ BACK. No secret, no password credential.
+    $scPlan = Get-PimBuiltinAuthApiScopePlan -AppReg (Get-PimGraphApplication -Id $appId -ErrorAsNull) -NewScopeId ([guid]::NewGuid().ToString())
+    if (@($scPlan.steps).Count) {
+        if ($scPlan.patchScopes) { [void](Update-PimEaApp ([hashtable]$scPlan.patchScopes)) }
+        $scOk = $false
+        foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
+            if ($wait) { Start-Sleep -Seconds $wait }
+            $regNow = Get-PimGraphApplication -Id $appId -ErrorAsNull
+            if (-not (Test-PimBuiltinAuthApiScopeExposed -AppReg $regNow)) { continue }
+            # a scope must exist before it is pre-authorised (Graph refuses the pre-authorisation of an unknown scope id)
+            $pp = Get-PimBuiltinAuthApiScopePlan -AppReg $regNow -NewScopeId $scPlan.scopeId
+            if ($pp.patchPreAuth) { [void](Update-PimEaApp ([hashtable]$pp.patchPreAuth)); continue }
+            $scOk = $true; break
+        }
+        if ($scOk) { Note "API scope api://$appId/$($script:PimBa.apiScope) exposed; the Azure CLI is pre-authorised for it (read back)" }
+        else { Warn "could not confirm the API scope api://$appId/$($script:PimBa.apiScope) (or the Azure CLI pre-authorisation) -- the sign-in then falls back to the ID token until this step is run again." }
+    } else { Note "API scope api://$appId/$($script:PimBa.apiScope) already exposed (Azure CLI pre-authorised)" }
     # A registration with no service principal in this tenant cannot be signed in to at all.
     # Same replication story as the create above: a service principal is not visible the instant it
     # is made, and `az ad sp create` on a registration Graph has not caught up with fails outright.
@@ -550,106 +581,117 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     }
 }
 
-# ---- 4. client secret -> ACA secret ------------------------------------------------------------
-# Minted only when the app does not already carry one this deployment can use, because
-# `az ad app credential reset` without --append REVOKES every existing secret -- and on a reused
-# registration those may belong to something else that is working.
-if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
-    # The secret NAMES come with the app itself (a GET carries no secret values) -- the az `secret list` answer.
-    $haveSecret = @(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties.configuration.secrets) |
-                    ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ -eq $SecretName })
-    if ($haveSecret -and $RotateSecret) {
-        # 🔑 ROTATION, IN THE ONLY SAFE ORDER: mint the new credential, put it in place, verify --
-        # and leave the OLD one valid. Both work simultaneously (Entra allows multiple secrets), so
-        # there is no window in which sign-in is broken, and no reliance on this script's own
-        # verification being perfect. Revoking the old one is a separate decision, taken once real
-        # users have signed in on the new one.
-        Step "ROTATE the client secret on $appId (the old one stays valid until you revoke it)"
-        # addPassword ADDS a credential (the old ones stay valid) -- the REST form of `credential reset --append`.
-        $new = ''
-        try { $new = Add-PimGraphAppPassword -Id $appId -Years $SecretYears -DisplayName "easyauth-$(Get-Date -Format yyyyMMdd)" }
-        catch { Write-Host "    Graph refused the new credential: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
-        if (-not "$new".Trim()) {
-            $result.reason = 'could not mint a replacement client secret'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
+# ---- 4. NO CLIENT SECRET: web identity + federated credential + token store (BUILT-IN-AUTH-1) ----------------
+# Owner 2026-11-14 (proven on every install that night): the sign-in app registration trusts the Manager's web identity
+# id-pim-web by a FEDERATED CREDENTIAL, and the platform signs in with it -- there is no client secret to mint, store, rotate
+# or leak. The platform finds the identity through ONE container-app setting, 'override-use-mi-fic-assertion-client-id', which
+# holds the identity's CLIENT id (an identifier, not a secret). The token store (the signed ID token the Manager verifies) is a
+# blob container in the install's own storage account, reached as id-pim-web, with shared-key access off. Each part is
+# idempotent and READ BACK; setup may grant the one role this needs (the updater never does).
+$script:PimEaWeb = $null; $script:PimEaBlobUri = ''
+if ($RotateSecret -or $PSBoundParameters.ContainsKey('SecretYears')) { Note "-RotateSecret / -SecretYears $SecretYears ignored: there is no client secret any more (the sign-in uses a federated credential) -- nothing to mint or rotate" }
+if ($PSCmdlet.ShouldProcess($App, 'secretless sign-in: web identity, federated credential, token store')) {
+    $rgPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+    $appPath = "$rgPath/providers/Microsoft.App/containerApps/$App"
+    # ---- 4a. the web identity id-pim-web on the Manager (made + attached only when it has none)
+    Step "the web identity $($script:PimBa.webIdentityName) on the Manager (the federated credential's subject)"
+    $caNow = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+    $wi = Get-PimBuiltinAuthWebIdentity -App $caNow -Name $script:PimBa.webIdentityName
+    if (-not $wi.ok) {
+        $uamiId = "$rgPath/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$($script:PimBa.webIdentityName)"
+        $u = Invoke-PimSetupArm -Path $uamiId -ApiVersion (Get-PimSetupApiVersion msi) -NotFoundOk -ErrorAsNull
+        if (-not $u) {
+            try { $u = Invoke-PimSetupArm -Method PUT -Path $uamiId -ApiVersion (Get-PimSetupApiVersion msi) -Body @{ location = "$($caNow.location)"; tags = @{ 'pim-component' = 'web' } } }
+            catch { $result.reason = "could not create the web identity $($script:PimBa.webIdentityName): $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+            Note "created $($script:PimBa.webIdentityName)"
         }
-        $stored = $true
-        # SEC-10 rotation (Invardia decision 2026-11-11): where '$SecretName' is a Key Vault reference (the updater's secrets step
-        # moved it), Set-PimArmAcaAppSecret writes the new credential into THAT vault secret (read back by SHA-256) and the app
-        # keeps the reference -- no plain value comes back into the app definition. Writing it needs Key Vault Secrets Officer.
-        $eaRot = $null
-        try { $eaRot = Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$new".Trim() }
-        catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
-        if ($stored -and $eaRot -and "$($eaRot.rotatedIn)" -eq 'keyvault') { Note "the new credential is in the install's Key Vault ($($eaRot.keyVaultUrl)); the app keeps its Key Vault reference" }
-        if (-not $stored) {
-            $result.reason = 'minted a new secret but could not store it on the container app -- the OLD secret is still in place, so sign-in still works'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
+        $idBody = New-PimBuiltinAuthIdentityBody -App $caNow -AddId "$($u.id)"
+        if ($idBody) {
+            try { [void](Invoke-PimEaBusyRetry -Write { Invoke-PimSetupArm -Method PATCH -Path $appPath -ApiVersion (Get-PimSetupApiVersion aca) -Body @{ identity = $idBody } }) }
+            catch { $result.reason = "could not attach $($script:PimBa.webIdentityName) to ${App}: $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+            [void](Wait-PimArmProvisioned -Path $appPath -ApiVersion (Get-PimSetupApiVersion aca) -TimeoutSeconds 600)
         }
-        Note "rotated: ACA secret '$SecretName' now holds a credential valid for $SecretYears year(s)"
-        Warn "the PREVIOUS credential is still valid. Once people have signed in on the new one, revoke it:"
-        Warn "  az ad app credential list --id $appId --query `"[].{name:displayName,id:keyId,expires:endDateTime}`" -o table"
-        Warn "  az ad app credential delete --id $appId --key-id <the OLD keyId>"
-        # 🪤 An ACA secret change does NOT restart the app or create a revision. The auth sidecar
-        # picks the new value up on the next revision, so a rotation that is never rolled looks
-        # applied and is not. Say so, and do it.
-        Step 'restart the active revision so the auth sidecar picks up the new secret'
-        # 🔴 BUG-183 -- THIS QUERY WAS '[?properties.active].name | [0]', AND az IS az.cmd: cmd.exe
-        # read the '|' as a PIPE, the call died, $rev came back EMPTY and the new secret was never
-        # used -- while the rotation above reported success. No pipe in the JMESPath: list the
-        # active names and pick the first in PowerShell (the same fix Invoke-PimDeployAll carries).
-        # And a restart is READ BACK: the replica set must change (or there must be none to change).
-        $rev = "$(@(Get-PimArmAcaRevisions -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull) |
-                   Where-Object { $_.properties.active } | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ } | Select-Object -First 1)".Trim()
-        if (-not $rev) {
-            $result.reason = 'the secret was rotated but the active revision could not be found, so nothing was restarted -- the Manager still signs in with the OLD secret (which is still valid)'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Restart it: Azure portal > Container Apps > $App > Revisions and replicas > Restart, or resume the installation"
+        $caNow = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+        $wi = Get-PimBuiltinAuthWebIdentity -App $caNow -Name $script:PimBa.webIdentityName
+        if (-not $wi.ok -or -not "$($wi.principalId)".Trim() -or -not "$($wi.clientId)".Trim()) {
+            $result.reason = "read-back: $($script:PimBa.webIdentityName) is not attached to $App ($($wi.reason))"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
-        $replicasBefore = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev)
-        $restartExit = 0
-        try { [void](Invoke-PimArmAcaRevisionAction -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev -Action restart) }
-        catch { $restartExit = 1; Write-Host "    the restart was refused: $($_.Exception.Message)" -ForegroundColor DarkYellow }
-        $rs = $null
-        for ($attempt = 1; $attempt -le 8; $attempt++) {
-            $replicasAfter = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev)
-            $rs = Get-PimRevisionRestartVerdict -RestartExitCode $restartExit -ReplicasBefore $replicasBefore -ReplicasAfter $replicasAfter
-            if ($rs.done) { break }
-            Start-Sleep -Seconds 10
+        Note "attached $($script:PimBa.webIdentityName) to $App (read back) -- it is ONLY the sign-in identity here; what the Manager itself signs in as is unchanged"
+    } else { Note "$($script:PimBa.webIdentityName) is attached ($($wi.clientId))" }
+    $script:PimEaWeb = $wi
+
+    # ---- 4b. the federated credential: the registration trusts id-pim-web (issuer = this tenant, v2)
+    Step 'federated credential on the app registration (no client secret)'
+    $regObj = Get-PimGraphApplication -Id $appId -ErrorAsNull
+    $regOid = "$($regObj.id)".Trim()
+    if (-not $regOid) { $result.reason = "the app registration $appId could not be read"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+    $readFics = { @(@((Invoke-PimSetupGraph -Path "https://graph.microsoft.com/v1.0/applications/$regOid/federatedIdentityCredentials" -ErrorAsNull).value) | Where-Object { $_ }) }
+    $ficOk = Test-PimBuiltinAuthFicPresent -Fics @(& $readFics) -PrincipalId $wi.principalId -TenantId $TenantId
+    if (-not $ficOk) {
+        $ficBody = Get-PimBuiltinAuthFicBody -TenantId $TenantId -PrincipalId $wi.principalId -Name $script:PimBa.ficName
+        try { [void](Invoke-PimSetupGraph -Method POST -Path "https://graph.microsoft.com/v1.0/applications/$regOid/federatedIdentityCredentials" -Body $ficBody) }
+        catch { Write-Host "    Graph refused the federated credential: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
+        foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
+            if ($wait) { Start-Sleep -Seconds $wait }
+            if (Test-PimBuiltinAuthFicPresent -Fics @(& $readFics) -PrincipalId $wi.principalId -TenantId $TenantId) { $ficOk = $true; break }
         }
-        if (-not $rs.ok) {
-            $result.reason = "the secret was rotated but the restart of $rev could not be confirmed: $($rs.reason)"
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). The OLD secret is still valid, so sign-in keeps working; restart the revision and re-check."
-        }
-        Note "restarted $rev -- $($rs.reason)"
+        if (-not $ficOk) { $result.reason = 'the federated credential for the web identity did not read back on the app registration'; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+        Note "federated credential '$($script:PimBa.ficName)' added (subject $($wi.principalId), read back)"
+    } else { Note 'the app registration already trusts the web identity (federated credential present)' }
+
+    # ---- 4c. the token store: the blob container + the ONE role, on that container only
+    Step "token store: blob container '$($script:PimBa.tokenContainer)' (managed identity; shared-key access off)"
+    $saList = @(Invoke-PimSetupArm -Path "$rgPath/providers/Microsoft.Storage/storageAccounts" -ApiVersion (Get-PimSetupApiVersion storage) -All -ErrorAsNull | Where-Object { $_ })
+    if ("$TokenStoreAccount".Trim()) { $saList = @($saList | Where-Object { "$($_.name)" -ieq "$TokenStoreAccount".Trim() }) }
+    $saDefault = $(if ("$TokenStoreAccount".Trim()) { "$TokenStoreAccount".Trim().ToLowerInvariant() } else { Get-PimBuiltinAuthDefaultStorageName -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup })
+    $saPick = Select-PimBuiltinAuthStorageAccount -Accounts $saList -DefaultName $saDefault
+    if (-not $saPick.ok) { $result.reason = $saPick.reason; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+    if ($saPick.create) {
+        Note $saPick.reason
+        try {
+            [void](New-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $saPick.name -Location "$($caNow.location)" -Sku Standard_LRS -Kind StorageV2 -AllowBlobPublicAccess $false)
+            [void](Update-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $saPick.name -Properties @{ allowSharedKeyAccess = $false })
+        } catch { $result.reason = "could not create the storage account $($saPick.name): $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
     }
-    elseif ($haveSecret) {
-        Note "ACA secret '$SecretName' already present -- not minting a new credential. Pass -RotateSecret to replace it."
-    } else {
-        Step 'mint a client secret and store it as an ACA secret'
-        # 🪤 `--append` is a FLAG, not a boolean-valued option. `--append true` is rejected with
-        #     ERROR: unrecognized arguments: true
-        # which reads like the command is unsupported rather than mis-spelled. It still matters
-        # that it is present: without it, `credential reset` REVOKES every existing secret on the
-        # registration -- so the wrong fix (dropping the argument) would quietly break whatever
-        # else was using a reused app.
-        $pwd = ''
-        try { $pwd = Add-PimGraphAppPassword -Id $appId -Years $SecretYears -DisplayName 'easyauth' }
-        catch { Write-Host "    Graph refused the credential: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
-        if (-not "$pwd".Trim()) {
-            $result.reason = 'could not mint a client secret for the app registration'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
+    $sa = Get-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $saPick.name -ErrorAsNull
+    if (-not $sa -or "$($sa.properties.allowSharedKeyAccess)" -notmatch '^(?i)false$') { $result.reason = "read-back: the storage account $($saPick.name) does not have shared-key access OFF"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+    $cScope = "$($sa.id)/blobServices/default/containers/$($script:PimBa.tokenContainer)"
+    try { [void](Invoke-PimSetupArm -Method PUT -Path $cScope -ApiVersion (Get-PimSetupApiVersion storage) -Body @{ properties = @{ publicAccess = 'None' } }) }
+    catch { if (-not (Invoke-PimSetupArm -Path $cScope -ApiVersion (Get-PimSetupApiVersion storage) -NotFoundOk -ErrorAsNull)) { $result.reason = "could not create the blob container $($script:PimBa.tokenContainer): $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" } }
+    $rdId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/$($script:PimBa.blobDataContributor)"
+    $readRa = { @(@((Invoke-PimSetupArm -Path "$cScope/providers/Microsoft.Authorization/roleAssignments?`$filter=atScope()" -ApiVersion (Get-PimSetupApiVersion authorization) -ErrorAsNull).value) |
+                  Where-Object { $_ -and "$($_.properties.principalId)" -eq "$($wi.principalId)" -and "$($_.properties.roleDefinitionId)" -like "*$($script:PimBa.blobDataContributor)" -and "$($_.properties.scope)" -ieq $cScope }) }
+    if (-not @(& $readRa).Count) {
+        $raName = Get-PimBuiltinAuthRoleAssignmentName -Scope $cScope -PrincipalId $wi.principalId -RoleDefinitionId $script:PimBa.blobDataContributor
+        $raBody = @{ properties = @{ roleDefinitionId = $rdId; principalId = "$($wi.principalId)"; principalType = 'ServicePrincipal' } }
+        $raOk = $false
+        foreach ($wait in @(0, 10, 20, 30, 60)) {
+            if ($wait) { Start-Sleep -Seconds $wait }
+            try { [void](Invoke-PimSetupArm -Method PUT -Path "$cScope/providers/Microsoft.Authorization/roleAssignments/$raName" -ApiVersion (Get-PimSetupApiVersion authorization) -Body $raBody) } catch { Write-Verbose "role assignment: $($_.Exception.Message)" }
+            if (@(& $readRa).Count) { $raOk = $true; break }
         }
-        # As an ACA secret, referenced by NAME -- so the value never appears in the container spec
-        # or in the app's ARM definition, the same rule the engine secret follows.
-        $stored = $true
-        $eaSecretValue = "$pwd".Trim()
-        try { [void](Invoke-PimEaBusyRetry -Write { Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value $eaSecretValue }) }
-        catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
-        if (-not $stored) {
-            $result.reason = 'could not store the client secret on the container app'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
-        }
-        Note "stored as ACA secret '$SecretName' (never printed, never in the container spec)"
+        if (-not $raOk) { $result.reason = "Storage Blob Data Contributor for $($script:PimBa.webIdentityName) on the container $($script:PimBa.tokenContainer) did not read back (setup needs Owner or User Access Administrator there)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+        Note "Storage Blob Data Contributor for $($script:PimBa.webIdentityName) on the container $($script:PimBa.tokenContainer) ONLY (read back)"
+    } else { Note "$($script:PimBa.webIdentityName) already holds Storage Blob Data Contributor on the container $($script:PimBa.tokenContainer)" }
+    $script:PimEaBlobUri = "$($sa.properties.primaryEndpoints.blob)".TrimEnd('/') + "/$($script:PimBa.tokenContainer)"
+
+    # ---- 4d. the ONE container-app setting the platform reads: the web identity's CLIENT id (an identifier, not a secret)
+    Step "container-app setting '$($script:PimBa.secretName)' = the web identity's client id"
+    $haveSet = @(@($caNow.properties.configuration.secrets) | Where-Object { $_ -and "$($_.name)" -eq $script:PimBa.secretName })
+    $setOk = $false
+    if ($haveSet.Count) {
+        $cur = @(@(Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App) | Where-Object { "$($_.name)" -eq $script:PimBa.secretName })[0]
+        $setOk = ("$($cur.value)".Trim() -eq "$($wi.clientId)".Trim())
     }
+    if (-not $setOk) {
+        $webClient = "$($wi.clientId)".Trim()
+        try { [void](Invoke-PimEaBusyRetry -Write { Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $script:PimBa.secretName -Value $webClient }) }
+        catch { $result.reason = "could not set '$($script:PimBa.secretName)' on ${App}: $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+        [void](Wait-PimArmProvisioned -Path $appPath -ApiVersion (Get-PimSetupApiVersion aca) -TimeoutSeconds 600)
+        $cur = @(@(Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App) | Where-Object { "$($_.name)" -eq $script:PimBa.secretName })[0]
+        if ("$($cur.value)".Trim() -ne $webClient) { $result.reason = "read-back: '$($script:PimBa.secretName)' does not hold the web identity's client id"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+        Note 'set and read back'
+    } else { Note 'already set to the web identity''s client id' }
 }
 
 # ---- 4b. THE DELEGATED PERMISSION THE LOGIN FLOW NEEDS ------------------------------------------
@@ -791,58 +833,35 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
     # 🪤 The reply URLs travel in the same web object, so they are re-sent as they read now: the ID-token switch must
     # never be the call that takes a reply URL away.
     $webNow = (Get-PimGraphApplication -Id $appId -ErrorAsNull).web
-    $webBody = @{ implicitGrantSettings = @{ enableIdTokenIssuance = $true } }
+    $webBody = @{ implicitGrantSettings = @{ enableIdTokenIssuance = $true; enableAccessTokenIssuance = $false } }
     if ($webNow -and @($webNow.redirectUris).Count) { $webBody.redirectUris = @($webNow.redirectUris) }
     [void](Update-PimEaApp @{ web = $webBody })
 }
 
-# ---- 5. configure + enable ---------------------------------------------------------------------
-if ($PSCmdlet.ShouldProcess($App, 'configure the Microsoft identity provider and enable Easy Auth')) {
-    # The app's authConfigs/current, READ-MODIFY-WRITE (Set-PimArmAcaAuthConfig): only the properties named here change.
-    # PURE helper: the child object at -Path under -Node, created (as an empty object) where it is missing.
-    function Get-PimEaAuthNode($Node, [string[]]$Path) {
-        $cur = $Node
-        foreach ($p in $Path) {
-            if ($null -eq $cur.$p) { $cur | Add-Member -NotePropertyName $p -NotePropertyValue ([pscustomobject]@{}) -Force }
-            $cur = $cur.$p
-        }
-        return $cur
-    }
-    function Set-PimEaAuthValue($Node, [string]$Name, $Value) { $Node | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
-    $eaIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
-    Step 'configure the Microsoft identity provider'
-    # = `auth microsoft update --client-id --client-secret-name --issuer --allowed-audiences`: the AAD provider enabled,
-    # its registration (client id, the ACA secret's NAME, the v2 issuer) and the allowed audience.
+# ---- 5. built-in authentication ON, the standard (BUILT-IN-AUTH-1) ------------------------------------------------
+# ONE PUT of authConfigs/current with the standard (engine/_shared/PIM-BuiltinAuth.ps1 New-PimBuiltinAuthConfig), api
+# 2024-10-02-preview: the token store's managed identity exists only from that version -- an older read-modify-write drops it.
+# excludedPaths = EXACTLY the protected-resource metadata documents (Get-PimBuiltinAuthExcludedPaths); anything else is removed.
+$authPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$App/authConfigs/current"
+if ($PSCmdlet.ShouldProcess($App, 'put Microsoft built-in authentication on (the standard)')) {
+    Step 'built-in authentication ON: RedirectToLoginPage, no client secret, token store, account picker, 8-hour session'
+    $authBefore = Invoke-PimSetupArm -Path $authPath -ApiVersion $script:PimBa.authApi -NotFoundOk -ErrorAsNull
+    $before = @(@($authBefore.properties.globalValidation.excludedPaths) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    # AUTH-MODERN-1 (group ruling 2026-11-15): the ONLY paths the platform lets through unauthenticated are the RFC 9728
+    # protected-resource metadata documents (public by definition: they name the sign-in, nothing else). /mcp stays behind
+    # the platform (layer 1) AND is validated by the Manager (layer 2) -- an older /mcp exclusion is removed here.
+    $keepEx = @(Get-PimBuiltinAuthExcludedPaths)
+    $dropped = @($before | Where-Object { $keepEx -notcontains $_ })
+    if ($dropped.Count) { Note "excluded paths removed (only the protected-resource metadata stays outside the sign-in): $($dropped -join ', ')" }
     try {
-        [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate {
-            param($p)
-            $aad = Get-PimEaAuthNode $p @('identityProviders', 'azureActiveDirectory')
-            Set-PimEaAuthValue $aad 'enabled' $true
-            $reg = Get-PimEaAuthNode $aad @('registration')
-            Set-PimEaAuthValue $reg 'clientId' $appId
-            Set-PimEaAuthValue $reg 'clientSecretSettingName' $SecretName
-            Set-PimEaAuthValue $reg 'openIdIssuer' $eaIssuer
-            $val = Get-PimEaAuthNode $aad @('validation')
-            Set-PimEaAuthValue $val 'allowedAudiences' @("api://$appId")
-        })
+        $authProps = New-PimBuiltinAuthConfig -TenantId $TenantId -ClientId $appId -SecretSettingName $script:PimBa.secretName `
+                         -BlobContainerUri $script:PimEaBlobUri -WebIdentityResourceId "$($script:PimEaWeb.resourceId)" -ExcludedPaths $keepEx
+        [void](Invoke-PimEaBusyRetry -Write { Invoke-PimSetupArm -Method PUT -Path $authPath -ApiVersion $script:PimBa.authApi -Body @{ properties = $authProps } })
     } catch {
-        $result.reason = "configuring the Microsoft identity provider failed: $($_.Exception.Message)"
+        $result.reason = "turning built-in authentication on failed: $($_.Exception.Message)"
         Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
     }
-    Step 'enable Easy Auth (unauthenticated requests -> login page)'
-    # = `auth update --enabled true --action RedirectToLoginPage --redirect-provider azureactivedirectory`
-    try {
-        [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate {
-            param($p)
-            Set-PimEaAuthValue (Get-PimEaAuthNode $p @('platform')) 'enabled' $true
-            $gv = Get-PimEaAuthNode $p @('globalValidation')
-            Set-PimEaAuthValue $gv 'unauthenticatedClientAction' 'RedirectToLoginPage'
-            Set-PimEaAuthValue $gv 'redirectToProvider' 'azureactivedirectory'
-        })
-    } catch {
-        $result.reason = "enabling Easy Auth failed: $($_.Exception.Message)"
-        Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
-    }
+    Note "excluded paths: $($keepEx -join ', ') (nothing else)"
 }
 
 # ---- 6. READ IT BACK ---------------------------------------------------------------------------
@@ -852,32 +871,91 @@ if ($PSCmdlet.ShouldProcess($App, 'configure the Microsoft identity provider and
 # shape that fools a writer-only check.
 if (-not $WhatIfPreference) {
     Step 'read the configuration back'
-    # The authConfigs/current resource as ARM now holds it (az's `containerapp auth show`).
-    $authNow = (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties
+    $authNow = (Invoke-PimSetupArm -Path $authPath -ApiVersion $script:PimBa.authApi -NotFoundOk -ErrorAsNull).properties
     $aad = $authNow.identityProviders.azureActiveDirectory
-    $aud = @(@($aad.validation.allowedAudiences) | Where-Object { "$_".Trim() }) | Select-Object -First 1
+    $aud = @(@($aad.validation.allowedAudiences) | Where-Object { "$_".Trim() })
     $enabled = "$($authNow.platform.enabled)".Trim()
-    if (-not "$aud".Trim()) {
-        $result.reason = 'Easy Auth reports NO allowed audience after configuration -- the release gate will still not be able to mint a token'
-        Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
-    }
-    if ("$enabled".Trim().ToLowerInvariant() -ne 'true') {
-        $result.reason = "Easy Auth platform.enabled reads '$enabled' after being turned on"
-        Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
-    }
-    # 🔴 §52.17 -- READ THE ISSUER BACK TOO. A v1 issuer here means the login flow will ask for the
-    # RETIRED Azure AD Graph resource and every human sign-in dies with AADSTS650056, while the
-    # audience and platform.enabled checks above both pass. Two green assertions over a Manager
-    # nobody can open is precisely what happened.
     $iss = "$($aad.registration.openIdIssuer)".Trim()
-    if ("$iss".Trim() -notmatch '(?i)/v2\.0/?$') {
-        $result.reason = "Easy Auth issuer reads '$iss', which is not the v2 endpoint"
-        Write-ResultFile
-        throw ("Set-PimManagerEasyAuth: $($result.reason). A v1 issuer makes the sign-in flow request the " +
-               "RETIRED Azure AD Graph resource, and every browser login then fails with AADSTS650056 while " +
-               "this script's other checks pass. Expected https://login.microsoftonline.com/$TenantId/v2.0")
+    $bad = New-Object System.Collections.Generic.List[string]
+    if ("$enabled".ToLowerInvariant() -ne 'true') { $bad.Add("platform.enabled reads '$enabled'") }
+    if (-not $aud.Count) { $bad.Add('NO allowed audience') }
+    elseif ($aud -notcontains "api://$appId" -or $aud -notcontains $appId) { $bad.Add("audiences read '$($aud -join ',')'") }
+    # 🔴 §52.17 -- a v1 issuer makes the sign-in flow request the RETIRED Azure AD Graph resource (AADSTS650056)
+    if ("$iss" -notmatch '(?i)/v2\.0/?$') { $bad.Add("issuer reads '$iss', which is not the v2 endpoint https://login.microsoftonline.com/$TenantId/v2.0") }
+    if ("$($aad.registration.clientSecretSettingName)" -ne $script:PimBa.secretName) { $bad.Add("the credential setting reads '$($aad.registration.clientSecretSettingName)'") }
+    if ("$($authNow.login.tokenStore.enabled)" -notmatch '^(?i)true$' -or "$($authNow.login.tokenStore.azureBlobStorage.managedIdentityResourceId)" -notmatch '(?i)/id-pim-web$') { $bad.Add('the token store is not on with id-pim-web') }
+    if (@($aad.login.loginParameters) -notcontains 'prompt=select_account') { $bad.Add('the account picker (prompt=select_account) is missing') }
+    # AUTH-MODERN-1: the access token for this app's API scope + offline_access (silent renewal), on the PROVIDER's login block
+    $lpRb = Test-PimBuiltinAuthLoginParametersStandard -LoginParameters @($aad.login.loginParameters) -ClientId $appId
+    foreach ($m in @($lpRb.missing | Where-Object { $_ -ne 'account picker missing' })) { $bad.Add($m) }
+    if ("$($authNow.globalValidation.unauthenticatedClientAction)" -ne 'RedirectToLoginPage') { $bad.Add("unauthenticated callers are '$($authNow.globalValidation.unauthenticatedClientAction)'") }
+    if ($bad.Count) {
+        $result.reason = "built-in authentication did not read back as the standard: $($bad -join '; ')"
+        Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). The Manager was NOT changed further (an opt-in sign-in front, if any, is still in place)."
     }
-    Note "verified: enabled=$enabled audience=$aud issuer=$iss"
+    Note "verified: enabled=$enabled audiences=$($aud -join ',') issuer=$iss credential=$($script:PimBa.secretName) token store=id-pim-web picker=on"
+
+    # ---- 6b. ONLY NOW the Manager container: verify the signed token itself; the opt-in front out of the template ----------
+    # Order (Invardia review 2026-11-14, must-fix): the platform sign-in is ON and read back FIRST; only then is a sign-in
+    # front still in the template removed -- never a window where nothing but the Manager's own check stands in front of it.
+    Step 'the Manager verifies the signed token itself (PIM_HOSTED_AUTH_LAYER=easyauth, signed token required)'
+    $caM = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+    $ctrs = @(@($caM.properties.template.containers) | Where-Object { $_ })
+    $mgrC = @($ctrs | Where-Object { "$($_.name)" -eq $App }) | Select-Object -First 1
+    if (-not $mgrC) { $mgrC = @($ctrs | Where-Object { "$($_.name)" -ne 'signin-front' }) | Select-Object -First 1 }
+    if (-not $mgrC) { $result.reason = "the Manager container of $App could not be found"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)" }
+    $port = [int]$caM.properties.configuration.ingress.targetPort
+    $want = Get-PimBuiltinAuthManagerEnv -ClientId $appId -TenantId $TenantId -Port $port
+    $envNow = @{}; foreach ($e in @($mgrC.env)) { if ($e) { $envNow["$($e.name)"] = $e } }
+    $front = @($ctrs | Where-Object { "$($_.name)" -eq 'signin-front' }).Count -gt 0
+    $leftover = @($envNow.Keys | Where-Object { $_ -match '^(PIM_SIGNIN_FRONT_|SIGNIN_)' })
+    $envDiff = @($want.Keys | Where-Object { -not $envNow.ContainsKey($_) -or "$($envNow[$_].value)" -ne "$($want[$_])" -or "$($envNow[$_].secretRef)".Trim() })
+    if ($front -or $envDiff.Count -or $leftover.Count) {
+        $env2 = @(@($mgrC.env) | Where-Object { $_ -and "$($_.name)" -notin @($want.Keys) -and "$($_.name)" -notmatch '^(PIM_SIGNIN_FRONT_|SIGNIN_)' })
+        foreach ($k in $want.Keys) { $env2 += [pscustomobject]@{ name = $k; value = "$($want[$k])" } }
+        $mgrC | Add-Member -NotePropertyName env -NotePropertyValue @($env2) -Force
+        if ($mgrC.probes) { foreach ($pr in @($mgrC.probes)) { foreach ($pk in 'httpGet', 'tcpSocket') { if ($pr.$pk -and $pr.$pk.port) { $pr.$pk.port = $port } } } }
+        $tpl = $caM.properties.template; $tpl.containers = @($mgrC)
+        try { [void](Invoke-PimEaBusyRetry -Write { Invoke-PimSetupArm -Method PATCH -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$App" -ApiVersion (Get-PimSetupApiVersion aca) -Body @{ properties = @{ template = $tpl } } }) }
+        catch { $result.reason = "could not set the Manager's sign-in settings: $($_.Exception.Message)"; Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Built-in authentication IS on and protects the Manager." }
+        $st = Wait-PimArmProvisioned -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$App" -ApiVersion (Get-PimSetupApiVersion aca) -TimeoutSeconds 600
+        $caB = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+        $mB = @(@($caB.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' }) | Select-Object -First 1
+        $evB = @{}; foreach ($e in @($mB.env)) { if ($e) { $evB["$($e.name)"] = "$($e.value)" } }
+        $missB = @($want.Keys | Where-Object { "$($evB[$_])" -ne "$($want[$_])" })
+        if (@($caB.properties.template.containers).Count -ne 1 -or $missB.Count -or "$st" -notmatch '(?i)^Succeeded') {
+            $result.reason = "read-back of the Manager after the sign-in settings ($st): $(if ($missB.Count) { "not set: $($missB -join ', ')" } else { "containers $(@($caB.properties.template.containers | ForEach-Object { $_.name }) -join '+')" })"
+            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Built-in authentication IS on and protects the Manager."
+        }
+        Note "set and read back$(if ($front) { '; the opt-in sign-in front container was removed (built-in sign-in is in front now)' })$(if ($leftover.Count) { "; leftover settings removed: $($leftover -join ', ')" })"
+    } else { Note 'already set' }
+
+    # ---- 6c. the old Easy Auth client secrets: nothing uses them now -- removed and read back ------------------------
+    Step 'remove the old Easy Auth client secrets (nothing uses them any more)'
+    $caS = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+    if (@(@($caS.properties.configuration.secrets) | Where-Object { $_ -and "$($_.name)" -eq $SecretName }).Count) {
+        try {
+            $keep = @(@(Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App) | Where-Object { $_ -and "$($_.name)" -ne $SecretName } | ForEach-Object {
+                if ("$($_.keyVaultUrl)".Trim()) { @{ name = "$($_.name)"; keyVaultUrl = "$($_.keyVaultUrl)"; identity = "$($_.identity)" } } else { @{ name = "$($_.name)"; value = "$($_.value)" } } })
+            if ($keep.Count -lt (@($caS.properties.configuration.secrets).Count - 1)) { throw 'the secret values could not all be read -- refusing a write that would drop secrets' }
+            [void](Invoke-PimEaBusyRetry -Write { Invoke-PimSetupArm -Method PATCH -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$App" -ApiVersion (Get-PimSetupApiVersion aca) -Body @{ properties = @{ configuration = @{ secrets = @($keep) } } } })
+            [void](Wait-PimArmProvisioned -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$App" -ApiVersion (Get-PimSetupApiVersion aca) -TimeoutSeconds 600)
+            $still = @(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App).properties.configuration.secrets) | Where-Object { $_ -and "$($_.name)" -eq $SecretName }).Count
+            if ($still) { Warn "the container-app secret '$SecretName' still reads back -- a re-run removes it (sign-in is not affected)" } else { Note "container-app secret '$SecretName' removed (read back)" }
+        } catch { Warn "the container-app secret '$SecretName' was not removed yet ($($_.Exception.Message)) -- sign-in is not affected; a re-run removes it" }
+    }
+    $regP = Get-PimGraphApplication -Id $appId -ErrorAsNull
+    $cp = Get-PimBuiltinAuthSecretCleanupPlan -PasswordCredentials @($regP.passwordCredentials)
+    foreach ($r in @($cp.remove)) {
+        try { [void](Invoke-PimSetupGraph -Method POST -Path "https://graph.microsoft.com/v1.0/applications/$($regP.id)/removePassword" -Body @{ keyId = "$($r.keyId)" }) }
+        catch { Warn "the client secret '$($r.name)' was not removed yet ($($_.Exception.Message)) -- sign-in is not affected; a re-run removes it" }
+    }
+    if (@($cp.remove).Count) {
+        $left = @()
+        foreach ($wait in @(0, 3, 6, 12)) { if ($wait) { Start-Sleep -Seconds $wait }; $left = @((Get-PimBuiltinAuthSecretCleanupPlan -PasswordCredentials @((Get-PimGraphApplication -Id $appId -ErrorAsNull).passwordCredentials)).remove); if (-not $left.Count) { break } }
+        if ($left.Count) { Warn "$($left.Count) old Easy Auth client secret(s) still read back on the registration -- a re-run removes them" } else { Note "$(@($cp.remove).Count) old Easy Auth client secret(s) removed from the registration (read back)" }
+    } else { Note 'no Easy Auth client secret on the registration' }
+    if (@($cp.keep).Count) { Note "other credentials on the registration are not this script's and are kept: $(@($cp.keep | ForEach-Object { $_.name }) -join ', ')" }
 }
 
 # ---- 7. RESTRICT WHO MAY SIGN IN (§48.1) --------------------------------------------------------
@@ -1136,6 +1214,6 @@ if (-not $WhatIfPreference) {
 
 $result.ok = $true
 Write-ResultFile
-Write-Host "==> Easy Auth is in front of $App (client $appId)." -ForegroundColor Green
+Write-Host "==> Microsoft built-in sign-in is in front of $App (client $appId; no client secret -- a federated credential with $($script:PimBa.webIdentityName))." -ForegroundColor Green
 Write-Host "    Sign-in is required AND restricted: $($script:PimEaAccess.reason)." -ForegroundColor Green
 exit 0

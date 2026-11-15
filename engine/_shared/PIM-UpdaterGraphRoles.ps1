@@ -12,9 +12,12 @@
       * the ops / Support-app grant at existing installs (dot-source THIS file, call Get-PimUpdaterGraphAppRoles);
       * the updater itself (tools/pim-engine/update-job-entry.ps1 step 2e-quater): it reads the roles in its own Graph
         token and REPORTS a missing one (Get-PimUpdaterGraphRoleCheck) -- it can never grant itself.
-    Why each: the updater puts the database job's identity (id-pim-dbinit) into the SQL admin group and renews it
-    (engine/_shared/PIM-DbInitMembership.ps1). The group is ROLE-ASSIGNABLE on purpose (SEC-32), so its membership through PIM
-    for Groups needs only the PIM-for-Groups rights (framework 4.5 G5). APP-REG-OWNER (framework SECAUDIT-1a item 2): the updater
+    Why each: the updater READS whether the database job's identity (id-pim-dbinit) is a member of the SQL admin group and
+    REPORTS it (engine/_shared/PIM-DbInitMembership.ps1 Invoke-PimDbInitMembershipReport). SECURE-WEB-1 (Invardia / owner
+    2026-11-14; framework G5a 2026-11-15): it holds NO PIM-for-Groups right any more (neither the ReadWrite -- tenant-wide --
+    nor the Read of the assignments); the membership is read through the identity's memberOf only. id-pim-dbinit is a PERMANENT DIRECT member, set ONCE by setup (tools/setup/Setup-PimContainers.ps1:
+    Invoke-PimDbInitMembershipBeforeStart -DirectOnly) or a recorded Invardia Support-app step; the updater never writes it.
+    The ENGINE keeps its own PIM-for-Groups rights (the product function, tools/setup/_PimSetupShared.ps1). APP-REG-OWNER (framework SECAUDIT-1a item 2): the updater
     proves, as an OWNER, that it can change PIM's product app registrations (engine/_shared/PIM-AppRegOwner.ps1) --
     Application.ReadWrite.OwnedBy.
     PURE: no network. ASCII only; PS 5.1 + 7; no modules.
@@ -28,9 +31,9 @@ function Get-PimUpdaterGraphAppRoles {
       with Application.ReadWrite.OwnedBy (SIX, SECAUDIT-1a item 2); SI proved at a customer that the PIM-for-Groups rights alone add and read back a member of a
       role-assignable group). Ids from the live Microsoft Graph service principal (the same ids as the maps in
       tools/setup/_PimSetupShared.ps1).
-        PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup  the ACTIVE member assignment (adminAssign / adminExtend / adminRenew)
-        PrivilegedAssignmentSchedule.Read.AzureADGroup       the read-back: the group's assignmentScheduleInstances
-        RoleManagementPolicy.Read.AzureADGroup               the group's PIM policy maximum, asked for exactly
+        (framework G5a, Invardia 2026-11-15, 3.1.26: PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup,
+         PrivilegedAssignmentSchedule.Read.AzureADGroup and RoleManagementPolicy.Read.AzureADGroup are REMOVED -- the updater
+         no longer writes, renews or reads PIM-for-Groups assignments; its one membership read is the plain memberOf below)
         GroupMember.Read.All                                 READ ONLY: the SQL admin group itself (GET /groups/<id>) and the
                                                              identity's memberOf -- the read-back of a direct member and the
                                                              setup step 'db-job' (G5 update, Invardia 2026-11-05: without a group
@@ -46,13 +49,11 @@ function Get-PimUpdaterGraphAppRoles {
                                                              The updater's one write with it is the proof PATCH
                                                              (engine/_shared/PIM-AppRegOwner.ps1); it never adds itself as an
                                                              owner and never grants itself a role.
-      NEVER a directory-role right and no group WRITE right: the direct add (a) is refused on a role-assignable group (SEC-32)
-      -- expected; (b) follows. Never Application.ReadWrite.All (tenant-wide).
+      NEVER a directory-role right, no group WRITE right and (SECURE-WEB-1 / G5a) no PIM-for-Groups right at all
+      (PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is tenant-wide). Never Application.ReadWrite.All (tenant-wide).
+      FOUR rights since 3.1.26 (was seven).
     #>
     return [ordered]@{
-        'PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup' = '41202f2c-f7ab-45be-b001-85c9728b9d69'
-        'PrivilegedAssignmentSchedule.Read.AzureADGroup'      = 'cd4161cb-f098-48f8-a884-1eda9a42434c'
-        'RoleManagementPolicy.Read.AzureADGroup'              = '69e67828-780e-47fd-b28c-7b27d14864e6'
         'GroupMember.Read.All'                                = '98830695-27a2-44f7-8c18-0c3ebc9698f6'
         'Application.Read.All'                                = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
         'Application.ReadWrite.OwnedBy'                       = '18a4783c-866b-4cc7-a460-3d5e5662c884'

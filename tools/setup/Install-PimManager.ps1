@@ -217,8 +217,10 @@ param(
     # test seam (INSTALL-1 GAP): param([string]$Sql) -> one scalar from the PIM database, as the installer -- records the trial /
     # Pro install edition (Set-PimInstallEditionSetting). A real install: the sign-in front step's database I/O.
     [scriptblock]$StoreSql,
-    # --- test seam (GUIDED-INSTALL-FRONT, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
-    # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallSigninFront -- omit it for a real install ---
+    # --- test seam (BUILT-IN-AUTH-1, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
+    # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallKeyVault -- omit it for a real install ---
+    [scriptblock]$InstallKeyVault,
+    # IGNORED since BUILT-IN-AUTH-1 (no install path moves to the sign-in front any more): kept so existing callers bind
     [scriptblock]$SigninFront,
     # --- test seam (INSTALL-1 item 5, public -> private): param([hashtable]$A) -> the exit code of Convert-PimToPrivate.ps1 ---
     [scriptblock]$ConvertToPrivate
@@ -240,7 +242,8 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 # Invardia Support-app session, else the person's browser sign-in -- Get-PimSignedInIdentity). Loaded at FILE scope (71.32).
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
-# GUIDED-INSTALL-FRONT (2026-10-21): the install ends on the sign-in front (vault + key, state, scope, image, the move)
+# BUILT-IN-AUTH-1 (owner 2026-11-14): the install ends on Microsoft's built-in sign-in (the deploy's 'easyauth' step); from
+# _PimInstallSigninFront.ps1 it runs only the install's own Key Vault step and the database I/O (New-PimInstallSigninFrontIo)
 . (Join-Path $sol 'engine\_shared\PIM-SigninFrontImage.ps1')
 . (Join-Path $here '_PimInstallSigninFront.ps1')
 # the step's real I/O builds the front image (PIM-AcrBuild) and writes the front's database state (PIM-SqlStore): loaded HERE,
@@ -883,38 +886,34 @@ else {
     else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a member of the SQL admin group (a database owner) to run, from the release folder:' $grantCmd }
 }
 
-# ================================================================== 4a. GUIDED-INSTALL-FRONT: the sign-in front
-# Owner 2026-10-21 (trial end-to-end: "no quick dirty" / "biz depends on it works"): a NEW install ends on the shared sign-in
-# front -- the install's own Key Vault wraps its keys, its state is in the PIM database, it passes an access token to the
-# PIM Manager, no client secret is used -- never on Easy Auth. Five steps (signin-front-vault / -state / -app / -image /
-# signin-front), each its own event; a resume skips the ones done. Here, BEFORE the end-of-install check: the database is
-# still reachable from this machine (the check closes the setup window). A failed move rolls itself back to Easy Auth
-# (the PIM Manager is never without a sign-in) and the install stops with the resume command.
-# Under the LEGACY offline -Az seam with no -SigninFront seam there is no Azure to talk to: nothing is run (tests only).
-if ($SigninFront -or -not $azSeam) {
-    $sfIds = @(Get-PimInstallSigninFrontStepIds)
-    $sfDone = @($sfIds | Where-Object { $done.Contains($_) })
-    $sfOnStep = { param($Id, $State, $Message) Emit $Id $State $Message; if ("$State" -in 'ok', 'skipped') { Mark $Id } }
-    $sfArgs = @{ SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; TenantId = $cfg.tenantId; Location = $cfg.location
-                 ManagerApp = $names.managerApp; AcrName = $names.acr; SqlDatabase = $names.sqlDatabase; KeyVaultName = $names.keyVault
-                 RepoRoot = (Split-Path -Parent (Split-Path -Parent $sol)); SolutionRoot = $sol; UpdateJob = $names.updateJob; Done = @($sfDone)
-                 StateFile = (Join-Path $StatePath 'signin-front-rollback.json')
+# ================================================================== 4a. BUILT-IN-AUTH-1: the install's Key Vault (no sign-in front)
+# Owner 2026-11-14: Microsoft's built-in sign-in is the standard. The deploy's 'easyauth' step (Set-PimManagerEasyAuth.ps1)
+# put it on -- no client secret (a federated credential with id-pim-web), token store, account picker -- and read it back.
+# The sign-in front is NOT installed: no 'signin-front' key and no role on it, no front state, image or container, no
+# /signin-oidc reply URL, no PIM_SIGNIN_FRONT_* setting. What stays from the old front step is the install's OWN Key Vault
+# (Standard, RBAC, purge protection; private on a private install) -- the place PIM's secrets go (SEC-10). One step,
+# 'install-keyvault'; a resume skips it when done. Here, BEFORE the end-of-install check.
+# Under the LEGACY offline -Az seam with no -InstallKeyVault seam there is no Azure to talk to: nothing is run (tests only).
+if ($InstallKeyVault -or -not $azSeam) {
+    $kvStep = Get-PimInstallKeyVaultStepId
+    $kvOnStep = { param($Id, $State, $Message) Emit $Id $State $Message; if ("$State" -in 'ok', 'skipped') { Mark $Id } }
+    $kvArgs = @{ SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; TenantId = $cfg.tenantId; Location = $cfg.location
+                 ManagerApp = $names.managerApp; KeyVaultName = $names.keyVault; SolutionRoot = $sol; Done = @(@($kvStep) | Where-Object { $done.Contains($_) })
                  PrivateNetwork = [bool]$cfg.privateNetwork }   # rule 11: a private install's vault is private (made / recovered / found)
-    if (-not $SigninFront) {
-        $SigninFront = { param([hashtable]$A, [scriptblock]$OnStep)
-            $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $A.AcrName `
-                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $A.SqlDatabase -SetupDir $here -AgentPoolName "$($deployArgs['AcrAgentPoolName'])"   # INSTALL-1 item 5: '' on a public install
-            Invoke-PimInstallSigninFront @A -OnStep $OnStep -Io $io }
+    if (-not $InstallKeyVault) {
+        $InstallKeyVault = { param([hashtable]$A, [scriptblock]$OnStep)
+            $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $names.acr `
+                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
+            Invoke-PimInstallKeyVault @A -OnStep $OnStep -Io $io }
     }
-    $sfR = $null
-    try { $sfR = & $SigninFront $sfArgs $sfOnStep } catch { $sfR = @{ ok = $false; failedStep = 'signin-front'; reason = "$($_.Exception.Message)" } }
-    if (-not $sfR -or -not [bool]$sfR.ok) {
-        $sfStep = if ($sfR -and "$($sfR.failedStep)".Trim()) { "$($sfR.failedStep)" } else { 'signin-front' }
-        if (-not @($events | Where-Object { "$($_.step.id)" -eq $sfStep -and $_.state -eq 'failed' }).Count) { Emit $sfStep 'failed' "$(if ($sfR) { $sfR.reason } else { 'the sign-in front step did not answer' })" }
-        Emit 'verify-install' 'failed' "the PIM Manager is not on the sign-in front yet ($sfStep): $(if ($sfR) { $sfR.reason })" 'The PIM Manager still requires a sign-in (Easy Auth stays on until the front works). Fix the cause above, then resume the installation:' $resumeCmd
+    $kvR = $null
+    try { $kvR = & $InstallKeyVault $kvArgs $kvOnStep } catch { $kvR = @{ ok = $false; failedStep = $kvStep; reason = "$($_.Exception.Message)" } }
+    if (-not $kvR -or -not [bool]$kvR.ok) {
+        if (-not @($events | Where-Object { "$($_.step.id)" -eq $kvStep -and $_.state -eq 'failed' }).Count) { Emit $kvStep 'failed' "$(if ($kvR) { $kvR.reason } else { 'the Key Vault step did not answer' })" }
+        Emit 'verify-install' 'failed' "the install's Key Vault is not in place: $(if ($kvR) { $kvR.reason })" 'The PIM Manager is protected by Microsoft''s built-in sign-in. Fix the cause above, then resume the installation:' $resumeCmd
         Finish 1
     }
-    if ("$($sfR.keyVaultId)".Trim()) { $pimInstallMem['keyVaultId'] = "$($sfR.keyVaultId)".Trim() }
+    if ("$($kvR.keyVaultId)".Trim()) { $pimInstallMem['keyVaultId'] = "$($kvR.keyVaultId)".Trim() }
 }
 
 # ================================================================== 4b. INSTALL-HARDEN-1: the END-OF-INSTALL VERIFY

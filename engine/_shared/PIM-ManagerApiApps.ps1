@@ -28,7 +28,7 @@
   Store adapter (compare-and-set over pim.Settings): Get-PimManagerApiAppState, New-PimManagerApiAppChangeRequest,
   Close-PimManagerApiAppChangeRequest, Invoke-PimManagerApiAppChangeApproval. Every store call THROWS on a store failure
   (PIM v2 is SQL-only). PS 5.1-safe (no ?./??, no ternary).
-  Needs PIM-HostedAuth.ps1 (Get-PimJwtParts / Test-PimJwtSignature / Test-PimJwtClaims) for the token check.
+  Needs PIM-HostedAuth.ps1 (Get-PimJwtParts; Invoke-PimTokenValidation from PIM-TokenValidation.ps1 -- Microsoft.IdentityModel) for the token check.
 #>
 
 Set-StrictMode -Off
@@ -258,7 +258,7 @@ function Resolve-PimManagerApiAppChangeDecision {
 function Resolve-PimManagerAppBearer {
     <#
       PURE given its inputs. Is 'Authorization: Bearer <JWT>' a genuine APPLICATION token for this Manager?
-        signature against -Jwks (RS256/384/512 only) -> exp / nbf / issuer (-ExpectedIssuers = this tenant) / audience
+        Microsoft.IdentityModel: signature against -Jwks (RS256 only) -> exp / nbf / issuer (-ExpectedIssuers = this tenant) / audience
         (-ExpectedAudiences, pinned) -> application-only: no 'scp', no upn / preferred_username / unique_name, idtyp (when
         present) = 'app' -> it carries -RequiredRole in 'roles' -> it names its application (appid / azp, a GUID).
       -> @{ ok; status (401 = no / bad token, 403 = genuine but not an application token for this API, 503 = not set up);
@@ -272,14 +272,14 @@ function Resolve-PimManagerAppBearer {
     $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if (-not $iss.Count -or -not $aud.Count) { return (& $no 503 'application sign-in is not set up on this Manager (no pinned tenant / audience)') }
     if ("$Authorization" -notmatch '^\s*Bearer\s+(\S+)\s*$') { return (& $no 401 'no bearer token') }
-    if (-not (Get-Command Get-PimJwtParts -ErrorAction SilentlyContinue)) { return (& $no 503 'the token library is not loaded (refused)') }
-    $jwt = Get-PimJwtParts -Token $Matches[1]
-    if ($null -eq $jwt) { return (& $no 401 'not a well-formed JWT') }
+    if (-not (Get-Command Invoke-PimTokenValidation -ErrorAction SilentlyContinue)) { return (& $no 503 'the token library is not loaded (refused)') }
+    $tok = $Matches[1]
+    if ($null -eq (Get-PimJwtParts -Token $tok)) { return (& $no 401 'not a well-formed JWT') }
     if ($null -eq $Jwks) { return (& $no 503 'the tenant signing keys could not be fetched (refused)') }
-    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
-    if (-not $sig.valid) { return (& $no 401 "signature: $($sig.reason)") }
-    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
-    if (-not $cl.valid) { return (& $no 401 "claims: $($cl.reason)") }
+    # AUTH-MODERN-1: signature (RS256), issuer, audience and lifetime by Microsoft.IdentityModel (Invoke-PimTokenValidation)
+    $vv = Invoke-PimTokenValidation -Token $tok -Jwks $Jwks -ExpectedIssuers $iss -ExpectedAudiences $aud
+    if (-not $vv.valid) { return (& $no 401 "token: $($vv.reason)") }
+    $jwt = [pscustomobject]@{ payload = $vv.payload }
     $p = $jwt.payload
     $app = "$(if ("$($p.appid)".Trim()) { $p.appid } else { $p.azp })".Trim().ToLowerInvariant()
     if ($app -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return (& $no 401 'the token names no application') }

@@ -485,7 +485,8 @@ if (Get-Command Invoke-PimAccessReviewCycleJob -ErrorAction SilentlyContinue) {
 if (Get-Command Invoke-PimRfaSyncJob -ErrorAction SilentlyContinue) {
     Register-PimJobHandler -Type 'rfa-sync' -Handler {
         param($job, $now, $whatIf)
-        $r = Invoke-PimRfaSyncJob -Job $job -NowUtc $now -WhatIf:$whatIf
+        # RFA-API-TOKENS-1: -RoleGraph = the engine's own Graph client, so the app role Requests.Submit follows the allow-list
+        $r = Invoke-PimRfaSyncJob -Job $job -NowUtc $now -WhatIf:$whatIf -RoleGraph { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
         if ($r.failed) { throw "[rfa-sync] $($r.detail)" }
         $r
     }

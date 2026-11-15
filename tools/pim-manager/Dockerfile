@@ -107,7 +107,14 @@ RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/n
  && test -f tools/setup/Set-PimAlertRecipients.ps1 \
  && test -f docs/img/brand/pim-manager-512w.png \
  && echo "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954  tools/pim-manager/third-party/fonts/DejaVuSans.ttf" | sha256sum -c - \
- && echo "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724  tools/pim-manager/third-party/fonts/DejaVuSans-Bold.ttf" | sha256sum -c -
+ && echo "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724  tools/pim-manager/third-party/fonts/DejaVuSans-Bold.ttf" | sha256sum -c - \
+ && echo "46f14d67dfc1894eb24d80282895526db25a854af227eee2fa06a0383fd09e4c  engine/_shared/vendor/identitymodel/Microsoft.IdentityModel.Abstractions.dll" | sha256sum -c - \
+ && echo "90b6fa70f28a3b7711fe95aa30a0c5551f1e6aa28565187aa7b3681194215c84  engine/_shared/vendor/identitymodel/Microsoft.IdentityModel.Logging.dll" | sha256sum -c - \
+ && echo "84409b8c3a52313fe4f4f621fce39544f42074109e870ac2631e627c8b70210f  engine/_shared/vendor/identitymodel/Microsoft.IdentityModel.Tokens.dll" | sha256sum -c - \
+ && echo "b48515aeaa4a8fadc5fcacb45978c808a4d5bbffaf74f8894cc57c0769a9fb9e  engine/_shared/vendor/identitymodel/Microsoft.IdentityModel.JsonWebTokens.dll" | sha256sum -c -
+# ^ AUTH-MODERN-1 (framework decision c5704c10): the token library is VENDORED too -- Microsoft.IdentityModel 8.23.0 (net10.0,
+#   signed by Microsoft; engine/_shared/vendor/identitymodel). Pinned by SHA-256 here (a changed file fails the build) AND in
+#   engine/_shared/PIM-TokenValidation.ps1 (checked again before Add-Type -Path at run time: a mismatch = fail closed).
 # ^ §100.61: the PDF font is VENDORED in the repo (DejaVu Sans 2.37, tools/pim-manager/third-party/fonts, pinned by SHA-256
 #   in third-party/NOTICE.txt) -- no package manager and no extra network at build time; a changed file fails the build.
 

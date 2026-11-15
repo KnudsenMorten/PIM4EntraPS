@@ -1,5 +1,21 @@
 # What's new in PIM Manager
 
+## 3.1.26 · 2026-11-15 · Security
+
+Security release: Microsoft's own sign-in and token checks protect PIM Manager, the request API uses Entra tokens only, and Pro adds a chat in the Manager.
+
+### New features
+
+- **Chat in the Manager (Pro)** - Ask in plain words and have changes prepared, answered by your own Azure OpenAI deployment without any key, under your own role. Changes are only prepared; you save them. Off by default.
+
+### Fixes
+
+- **Microsoft's token library** - Every sign-in token is checked with Microsoft's own library, which PIM Manager tests at every start before it serves a request.
+- **Your sign-in stays fresh** - The page renews your sign-in before it ends, and offers Sign in again or Sign in with another account when needed.
+- **Entra tokens instead of API keys** - The access request API accepts only Microsoft Entra application tokens with an app role. Applications on your allow-list get the role automatically.
+- **Commit and Run now within a minute** - Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job.
+- **Smaller fixes** - The web app holds no Key Vault role (the break-glass passphrase is checked against a protected verifier in the PIM database), and discovery mails are marked as information, not warnings.
+
 ## 3.1.25 · 2026-11-14 · Security
 
 Stronger isolation: the part of PIM Manager that is reachable from the internet now holds only its own data.

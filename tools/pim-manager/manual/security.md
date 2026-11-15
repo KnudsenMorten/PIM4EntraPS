@@ -6,10 +6,13 @@ published at https://invardia.com/products/pim-manager/security/.
 
 ## Sign-in
 
-- Every page needs a signed-in person. Administrators sign in with Microsoft Entra ID through the product's sign-in
-  front: OpenID Connect code flow with PKCE. The front has **no client secret**: the portal's managed identity is a
-  federated credential on the app registration.
-- The portal itself listens only on the local interface behind the front, so nothing reaches it without sign-in.
+- Every page needs a signed-in person. Sign-in and token checks are done by Microsoft: administrators sign in with
+  Microsoft Entra ID through Microsoft's built-in sign-in for Azure Container Apps, with **no client secret** (the
+  portal's managed identity is a federated credential on the app registration).
+- On every request the portal checks the Entra access token itself with Microsoft's token library
+  (Microsoft.IdentityModel): signature, your tenant, the portal as audience, expiry. PIM Manager then decides what the
+  person may do. No API keys and no shared secrets exist. Details for the browser, scripts, AI assistants (MCP) and
+  applications: [How to authenticate](authenticate.md).
 - Sessions last **8 hours, fixed**. Your Conditional Access policies (MFA, compliant device, locations) apply to the
   sign-in as to any Entra application.
 - App assignment is required: only the people or groups you assign can sign in. An optional users group admits all
@@ -32,7 +35,8 @@ Every response carries security headers:
 
 - **Stored in your Azure SQL database:** the desired state and definitions, settings, the change queue and approvals,
   the audit log, the commit journal, configuration backups. Not stored: Temporary Access Pass codes and generated
-  passwords (shown once), API keys (hashes only).
+  passwords (shown once). The access request API takes Microsoft Entra application tokens with an app role; no API key
+  or shared secret is issued or stored.
 - **At rest:** Transparent Data Encryption. **In transit:** HTTPS to every API; SQL connections encrypted with
   certificate validation.
 - **Residency:** every resource is in your subscription, in the region you chose.

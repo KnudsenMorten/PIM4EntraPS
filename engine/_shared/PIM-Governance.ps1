@@ -15,9 +15,9 @@
 #                                   of upcoming expirations + due escalations + auto-renew
 #                                   actions) + the change/notify emitters.
 #   3. Emergency break-glass     -- Test-PimPasscodeHash (constant-time), Test-PimLockout,
-#                                   Get-PimEmergencyTtlHours (clamp), Resolve-PimEmergencyExpectedHash
-#                                   (KV PIM-EmergencyPasscode -> hash, else local hash) --
-#                                   the verify the Manager + the engine share, KV-backed.
+#                                   Get-PimEmergencyTtlHours (clamp), Resolve-PimEmergencyVerifier
+#                                   (the PBKDF2 verifier in pim.Settings, PIM-EmergencyVerifier.ps1; no
+#                                   Key Vault read -- SECURE-WEB-1 3.1.26), else a host-set local hash.
 #   4. Access-review feedback     -- Get-PimAccessReviewDecision (auto-extend rows skip the
 #                                   owner gate; everything else needs owner approval) +
 #                                   New-PimReviewFeedbackRecord (the removal/extension result
@@ -28,6 +28,9 @@
 # reader) so this file stays testable without a tenant.
 
 Set-StrictMode -Off
+
+# SECURE-WEB-1 (3.1.26): the break-glass verifier (PBKDF2 in the PIM database; the web reads no Key Vault)
+if (-not (Get-Command New-PimEmergencyVerifier -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-EmergencyVerifier.ps1') }
 
 # ---------------------------------------------------------------------------
 # Shared field accessor (dict or PSCustomObject), case-insensitive on the
@@ -552,87 +555,81 @@ function Get-PimEmergencyTtlHours {
 function Resolve-PimEmergencyExpectedHash {
     <#
     .SYNOPSIS
-        Resolve the EXPECTED passcode hash for the break-glass verify.
+        The LOCAL (host-set) expected passcode hash for the break-glass verify -- $global:PIM_EmergencyPasscodeHash, a
+        SHA-256 hex a local host sets in memory. Returns @{ hash; source = 'local' } or @{ hash = ''; source = 'none' }.
 
     .DESCRIPTION
-        Priority (so the override works from a client PC even if KV is the
-        source of truth):
-          1. KV secret PIM-EmergencyPasscode (name overridable) -- the secret
-             VALUE may be a passphrase (we hash it) OR already a 64-char SHA256
-             hex (used as-is). Fetched via the existing KV REST reader; never
-             cached to disk.
-          2. local $global:PIM_EmergencyPasscodeHash (config/emergency.custom.ps1).
-        Returns @{ hash; source } or @{ hash=''; source='none' }.
-        The KV fetch is the only non-pure path and is fully guarded.
+        SECURE-WEB-1 (3.1.26): this NEVER reads Key Vault any more. A hosted Manager checks the passphrase against the
+        verifier in the PIM database (Resolve-PimEmergencyVerifier, PIM-EmergencyVerifier.ps1); the web identity holds no
+        Key Vault role. -VaultName / -SecretName are accepted and ignored (older callers pass them).
     #>
     [CmdletBinding()]
     param(
-        [string]$VaultName    = "$($global:PIM_EmergencyVault)",
-        [string]$SecretName   = $(if ($global:PIM_EmergencyPasscodeSecret) { "$($global:PIM_EmergencyPasscodeSecret)" } else { 'PIM-EmergencyPasscode' }),
-        [string]$LocalHash    = "$($global:PIM_EmergencyPasscodeHash)"
+        [string]$VaultName = '',
+        [string]$SecretName = '',
+        [string]$LocalHash = "$($global:PIM_EmergencyPasscodeHash)"
     )
-    if ("$VaultName".Trim() -and (Get-Command Get-PimSqlSecretFromKeyVault -ErrorAction SilentlyContinue)) {
-        try {
-            $val = Get-PimSqlSecretFromKeyVault -VaultName "$VaultName".Trim() -SecretName "$SecretName".Trim()
-            if ("$val".Trim()) {
-                $v = "$val".Trim()
-                $hash = if ($v -match '^[0-9a-fA-F]{64}$') { $v.ToLowerInvariant() } else { Get-PimSha256Hex -Text $v }
-                return [pscustomobject]@{ hash = $hash; source = "keyvault:$SecretName" }
-            }
-        } catch {
-            Write-Warning "  [Emergency] KV passcode '$SecretName' in '$VaultName' unreadable: $($_.Exception.Message) -- falling back to local hash."
-        }
-    }
     if ("$LocalHash".Trim()) { return [pscustomobject]@{ hash = "$LocalHash".Trim().ToLowerInvariant(); source = 'local' } }
     return [pscustomobject]@{ hash = ''; source = 'none' }
+}
+
+function Resolve-PimEmergencyVerifier {
+    <#
+    .SYNOPSIS
+        SECURE-WEB-1 (3.1.26): the stored break-glass VERIFIER (pim.Settings 'EmergencyPassphraseVerifier'), read fresh on
+        every call -- an activation never waits for a cache or an engine run. -Reader { param($name) } returns the stored
+        value (the Manager: Get-PimManagerSetting). Returns @{ ok; verifier; reason } -- never throws.
+    #>
+    param([scriptblock]$Reader)
+    if (-not $Reader) { return [pscustomobject]@{ ok = $false; verifier = $null; reason = 'no store reader' } }
+    $raw = $null
+    try { $raw = & $Reader (Get-PimEmergencyVerifierSettingName) } catch { return [pscustomobject]@{ ok = $false; verifier = $null; reason = "the PIM database could not be read: $((("$($_.Exception.Message)") -split "`n")[0])" } }
+    $p = ConvertFrom-PimEmergencyVerifier -Value $raw
+    if (-not $p.ok) { return [pscustomobject]@{ ok = $false; verifier = $null; reason = $p.reason } }
+    return [pscustomobject]@{ ok = $true; verifier = $raw; reason = '' }
 }
 
 function Get-PimEmergencyPassphraseStatus {
     <#
     .SYNOPSIS
-        REQ-F (2026-09-19): is an emergency passphrase configured -- WITHOUT ever returning it or its hash.
+        REQ-F (2026-09-19) / SECURE-WEB-1 (3.1.26): is an emergency passphrase configured -- WITHOUT ever returning it,
+        its hash or its verifier.
 
     .DESCRIPTION
-        Same resolution order as Resolve-PimEmergencyExpectedHash (the key vault named by PIM_EmergencyVault
-        first, then a host-set in-memory hash), so the Settings card says exactly what an activation will find.
-        Measured 2026-09-19: no hosted Manager had PIM_EmergencyVault, so every activation was refused with
-        "no emergency passcode configured" -- and nothing on screen said so until somebody tried in an incident.
-        Returns @{ configured; source ('keyvault' | 'local' | 'none'); vault; secretName; reason }.
-        -SecretReader is the test seam (default: Get-PimSqlSecretFromKeyVault). PS 5.1-safe.
+        Same resolution order as the verify: the verifier in the PIM database first (-VerifierReader { param($name) }),
+        then a host-set in-memory hash (-LocalHash). NOTHING is read from Key Vault: -VaultName (the Manager's old
+        PIM_EmergencyVault setting) only says that an earlier version kept the passphrase there, so the card can name the
+        one-time move (Set-PimEmergencyPassphrase.ps1 -MigrateFromKeyVault; the updater does it by itself where it may
+        read that secret).
+        Returns @{ configured; source ('database' | 'local' | 'none'); legacyVault; vault; secretName; setUtc; reason }.
+        PS 5.1-safe.
     #>
     [CmdletBinding()]
     param(
+        [scriptblock]$VerifierReader,
         [string]$VaultName  = "$($global:PIM_EmergencyVault)",
         [string]$SecretName = $(if ($global:PIM_EmergencyPasscodeSecret) { "$($global:PIM_EmergencyPasscodeSecret)" } else { 'PIM-EmergencyPasscode' }),
-        [string]$LocalHash  = "$($global:PIM_EmergencyPasscodeHash)",
-        [scriptblock]$SecretReader
+        [string]$LocalHash  = "$($global:PIM_EmergencyPasscodeHash)"
     )
     $v = "$VaultName".Trim(); $s = "$SecretName".Trim()
-    $vaultReason = ''
-    if ($v) {
-        $reader = $SecretReader
-        if (-not $reader) {
-            if (Get-Command Get-PimSqlSecretFromKeyVault -ErrorAction SilentlyContinue) { $reader = { param($vn, $sn) Get-PimSqlSecretFromKeyVault -VaultName $vn -SecretName $sn } }
+    $dbReason = ''
+    if ($VerifierReader) {
+        $rv = Resolve-PimEmergencyVerifier -Reader $VerifierReader
+        if ($rv.ok) {
+            $p = ConvertFrom-PimEmergencyVerifier -Value $rv.verifier
+            return [pscustomobject]@{ configured = $true; source = 'database'; legacyVault = $false; vault = ''; secretName = ''; setUtc = "$($p.setUtc)"
+                                      reason = 'the passphrase check is kept in the PIM database (a salted, slow hash -- never the passphrase)' }
         }
-        if (-not $reader) {
-            $vaultReason = "PIM_EmergencyVault is '$v' but this runtime has no Key Vault reader loaded"
-        } else {
-            try {
-                $val = & $reader $v $s
-                if ("$val".Trim()) {
-                    return [pscustomobject]@{ configured = $true; source = 'keyvault'; vault = $v; secretName = $s; reason = "the passphrase is stored in key vault '$v' (secret $s)" }
-                }
-                $vaultReason = "secret '$s' in key vault '$v' is empty"
-            } catch {
-                $vaultReason = "secret '$s' in key vault '$v' could not be read: $($_.Exception.Message)"
-            }
-        }
-    }
+        $dbReason = "$($rv.reason)"
+    } else { $dbReason = 'this runtime has no PIM database reader' }
     if ("$LocalHash".Trim()) {
-        return [pscustomobject]@{ configured = $true; source = 'local'; vault = $v; secretName = $s; reason = $(if ($vaultReason) { "$vaultReason -- using the passphrase hash this host set in memory" } else { 'a passphrase hash is set in memory by this host (no key vault configured)' }) }
+        return [pscustomobject]@{ configured = $true; source = 'local'; legacyVault = $false; vault = ''; secretName = ''; setUtc = ''; reason = 'a passphrase hash is set in memory by this host' }
     }
-    $why = if ($vaultReason) { $vaultReason } else { 'no key vault is configured for the emergency passphrase (PIM_EmergencyVault is not set on the Manager)' }
-    return [pscustomobject]@{ configured = $false; source = 'none'; vault = $v; secretName = $s; reason = $why }
+    if ($v) {
+        return [pscustomobject]@{ configured = $false; source = 'none'; legacyVault = $true; vault = $v; secretName = $s; setUtc = ''
+                                  reason = "an earlier version kept the passphrase in key vault '$v'; it moves into the PIM database once (the update does it, or run Set-PimEmergencyPassphrase.ps1 -MigrateFromKeyVault)" }
+    }
+    return [pscustomobject]@{ configured = $false; source = 'none'; legacyVault = $false; vault = ''; secretName = ''; setUtc = ''; reason = $(if ($dbReason) { $dbReason } else { 'no emergency passphrase is set up' }) }
 }
 
 function Resolve-PimEmergencyVerification {
@@ -651,6 +648,8 @@ function Resolve-PimEmergencyVerification {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Passcode,
         [AllowEmptyString()][string]$ExpectedHashHex,
+        # SECURE-WEB-1 (3.1.26): the stored PBKDF2 verifier (PIM-EmergencyVerifier.ps1) -- used first when it is usable
+        [AllowNull()][object]$Verifier = $null,
         [Parameter(Mandatory)][datetime]$NowUtc,
         [datetime[]]$Failures = @(),
         [int]$MaxFailures = 5,
@@ -658,8 +657,10 @@ function Resolve-PimEmergencyVerification {
     )
     $lock = Test-PimLockout -Failures $Failures -NowUtc $NowUtc -MaxFailures $MaxFailures -WindowMinutes $WindowMinutes
     if ($lock.locked) { return [pscustomobject]@{ ok = $false; error = "locked: too many failed attempts -- wait $WindowMinutes minutes"; recentFailures = @($lock.recentFailures) } }
-    if (-not "$ExpectedHashHex".Trim()) { return [pscustomobject]@{ ok = $false; error = 'no emergency passcode configured (set KV PIM-EmergencyPasscode or $global:PIM_EmergencyPasscodeHash)'; recentFailures = @($lock.recentFailures) } }
-    if (Test-PimPasscodeHash -Passcode $Passcode -ExpectedHashHex $ExpectedHashHex) {
+    $useVerifier = ($null -ne $Verifier) -and (ConvertFrom-PimEmergencyVerifier -Value $Verifier).ok
+    if (-not $useVerifier -and -not "$ExpectedHashHex".Trim()) { return [pscustomobject]@{ ok = $false; error = 'no emergency passcode configured (run Set-PimEmergencyPassphrase.ps1 once)'; recentFailures = @($lock.recentFailures) } }
+    $match = if ($useVerifier) { Test-PimEmergencyVerifier -Verifier $Verifier -Passphrase $Passcode } else { Test-PimPasscodeHash -Passcode $Passcode -ExpectedHashHex $ExpectedHashHex }
+    if ($match) {
         return [pscustomobject]@{ ok = $true; recentFailures = @($lock.recentFailures) }
     }
     $fails = @($lock.recentFailures) + $NowUtc.ToUniversalTime()

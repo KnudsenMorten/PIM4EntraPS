@@ -397,6 +397,102 @@ function Save-PimActiveAssignmentsSnapshotRows {
         rows = $written; batches = $batches; retries = $retries; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2); snapshotId = $sid }
 }
 
+function Save-PimActiveAssignmentsSnapshotFailure {
+    <#
+      TRUST-1 gap 1 (framework TRUST-1 points 1 + 2; PIM REQUIREMENTS TRUST-1-CHECK). A run where EVERY surface that should
+      be read failed (no row read) never becomes the snapshot: NO generation is written, so the newest COMPLETE generation
+      (what the uplink Counts + Security, Get-PimSnapshotAzurePlan and every reader use) stays the previous read. The
+      failure stays visible:
+        kept = $true   a stored snapshot worth keeping exists: its header gets 'lastRun' { utc; trusted = $false; ok; partial;
+                       error; surfaceErrors } (Set-PimSqlActiveAssignmentsLastRun) and nothing else changes; the Manager's view
+                       (ConvertTo-PimActiveAssignmentsSnapshotView) says the latest read failed.
+        kept = $false  nothing worth keeping is stored (a first run, or only an earlier failure): the failure itself is stored
+                       as a one-document entry with NO rows, zero counts and ok = $false, so the Revoke tab shows the hint.
+        newer = $true  a newer header was stored while this run read the tenant (-Start, review finding 5): left untouched.
+      -Start: the header's identity when the run STARTED (Get-PimSqlActiveAssignmentsHeaderStamp { exists; snapshotId;
+      refreshedUtc }); $null = read it now. Returns { kept; newer; where; keptRefreshedUtc }. A store error THROWS.
+      -Mark { param($cs, $lastRunJson, $start) -> rows marked } / -Store { param($json, $start) -> rows written or a 'where'
+      text } / -ReadKept { param($cs) -> header }: test seams; the defaults are the SQL store.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Entry, [string]$ConnectionString = '', [scriptblock]$Mark = $null, [scriptblock]$Store = $null,
+          [scriptblock]$ReadKept = $null, [AllowNull()][object]$Start = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    $kind = $script:PimActiveAssignmentsSnapshotCacheKind
+    if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+    if ($null -eq $Start -and "$ConnectionString".Trim() -and (Get-Command Get-PimSqlActiveAssignmentsHeaderStamp -ErrorAction SilentlyContinue)) { $Start = Get-PimSqlActiveAssignmentsHeaderStamp -ConnectionString $ConnectionString }
+    $lastRun = [ordered]@{ utc = "$($Entry['refreshedUtc'])"; trusted = $false; ok = [bool]$Entry['ok']; partial = [bool]$Entry['partial']
+                           error = "$($Entry['error'])"; surfaceErrors = @($Entry['surfaceErrors']); correlationId = "$($Entry['correlationId'])" }
+    # Round 5 G2: the KEPT snapshot AGES. Each part that failed this run is named STALE (AA-SOURCE-STALE) on lastRun once its last
+    # good read (the start header's per-part time; the header's refreshedUtc for one written before the per-part times) is older
+    # than Get-PimTrustCarryMaxAgeDays -- the uplink then holds its keys (lastRun.trusted = false holds them already) and the
+    # revoke API refuses its rows (Get-PimActiveAssignmentsCarriedRows).
+    $staleL = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $Start -and [bool](Get-PimActiveAssignmentsHeaderField $Start 'exists')) {
+        $partsA = Get-PimActiveAssignmentsSurfaceParts
+        $perPart = $false; foreach ($pk in 'entraReadUtc', 'azureReadUtc', 'groupsReadUtc', 'appPermissionsReadUtc') { if ("$(Get-PimActiveAssignmentsHeaderField $Start $pk)".Trim()) { $perPart = $true } }
+        $failedS = @(@($Entry['surfaceErrors']) | Where-Object { $null -ne $_ } | ForEach-Object { "$(Get-PimActiveAssignmentsHeaderField $_ 'surface')" } | Where-Object { $partsA.ContainsKey($_) } | Select-Object -Unique)
+        foreach ($sf in $failedS) {
+            $from = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $Start $partsA[$sf].stamp))"
+            if (-not $from -and -not $perPart) { $from = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $Start 'refreshedUtc'))" }
+            if (-not $from) { continue }
+            $at = $null; try { $at = [datetime]::Parse($from, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $at = $null }
+            if ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalDays -gt (Get-PimTrustCarryMaxAgeDays)) { $staleL.Add([ordered]@{ surface = $sf; code = 'AA-SOURCE-STALE'; sinceUtc = $from }) }
+        }
+        # round 6 F1: a PIM-for-Groups SUBSET carried before this run -- each such group ages from ITS OWN last real read
+        # (the header's carried[].groupsFrom), not from the part's read time; one stale entry per group
+        if ($failedS -contains 'pim-for-groups' -and @($staleL | Where-Object { "$($_.surface)" -eq 'pim-for-groups' }).Count -eq 0) {
+            $cjS = "$(Get-PimActiveAssignmentsHeaderField $Start 'carriedJson')"
+            if ($cjS.Trim()) {
+                try {
+                    foreach ($ce in @($cjS | ConvertFrom-Json)) { foreach ($c1 in @($ce)) {
+                        if ($null -eq $c1 -or "$($c1.surface)" -ne 'pim-for-groups' -or $null -eq $c1.groupsFrom) { continue }
+                        foreach ($gp in @($c1.groupsFrom.PSObject.Properties)) {
+                            $gf = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $gp.Value)"
+                            $ga = $null; try { $ga = [datetime]::Parse($gf, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $ga = $null }
+                            if ($null -ne $ga -and ($NowUtc.ToUniversalTime() - $ga).TotalDays -gt (Get-PimTrustCarryMaxAgeDays)) {
+                                $staleL.Add([ordered]@{ surface = 'pim-for-groups'; groupId = "$($gp.Name)"; code = 'AA-SOURCE-STALE'; sinceUtc = $ga.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture) })
+                            }
+                        } } }
+                } catch { }
+            }
+        }
+    }
+    if ($staleL.Count) { $lastRun['stale'] = $staleL.ToArray() }
+    $lrJson = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $lastRun
+    if (-not $Mark -and (Get-Command Set-PimSqlActiveAssignmentsLastRun -ErrorAction SilentlyContinue) -and "$ConnectionString".Trim()) {
+        $Mark = { param($cs, $j, $st) Set-PimSqlActiveAssignmentsLastRun -ConnectionString $cs -LastRunJson $j -StartSnapshotId "$($st.snapshotId)" -StartRefreshedUtc "$($st.refreshedUtc)" }
+    }
+    $marked = 0
+    if ($Mark) { $marked = [int](& $Mark $ConnectionString $lrJson $Start) }
+    if ($marked -gt 0) {
+        $keptAt = ''
+        if (-not $ReadKept -and (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue)) { $ReadKept = { param($cs) Get-PimTenantCacheEntry -Kind 'active-assignments' -HeaderOnly } }
+        if ($ReadKept) { try { $h = & $ReadKept $ConnectionString; if ($null -ne $h) { $keptAt = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $h.refreshedUtc)" } } catch { $keptAt = '' } }
+        return [pscustomobject]@{ kept = $true; newer = $false; where = "sql:pim.TenantCache/$kind (lastRun on the kept snapshot)"; keptRefreshedUtc = $keptAt; stale = $staleL.ToArray() }
+    }
+    $fail = [ordered]@{}
+    foreach ($k in @($Entry.Keys)) { $fail[$k] = $Entry[$k] }
+    $fail['rows'] = @()
+    $fail['counts'] = [ordered]@{ total = 0; 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0; eligible = 0 }
+    $fail['ok'] = $false
+    if (-not "$($fail['error'])".Trim()) {
+        $fail['error'] = "Active PIM assignments could not be read (could not read: " + (@(@($Entry['surfaceErrors']) | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.surface)" }) -join ', ') + ")."
+    }
+    # no part was stored, so no part has an "as of"; and nothing to carry Azure forward from
+    foreach ($pk in 'entraReadUtc', 'azureReadUtc', 'azureMode', 'azureReason', 'azureRows', 'groupsReadUtc', 'groupsRead', 'appPermissionsReadUtc') { if ($fail.Contains($pk)) { $fail.Remove($pk) } }
+    $fail['lastRun'] = $lastRun
+    if (-not $Store) {
+        if ((Get-Command Set-PimSqlActiveAssignmentsFailureDocument -ErrorAction SilentlyContinue) -and "$ConnectionString".Trim() -and $null -ne $Start) {
+            $Store = { param($j, $st) Set-PimSqlActiveAssignmentsFailureDocument -ConnectionString $ConnectionString -ValueJson $j -StartExists ([bool]$st.exists) -StartRefreshedUtc "$($st.refreshedUtc)" }
+        } else { $Store = { param($j, $st) Set-PimTenantCacheEntry -Kind 'active-assignments' -ValueJson $j } }
+    }
+    $w = & $Store (ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $fail) $Start
+    if ($w -is [int] -or $w -is [long]) {
+        if ([long]$w -le 0) { return [pscustomobject]@{ kept = $false; newer = $true; where = ''; keptRefreshedUtc = ''; stale = @() } }
+        $w = "sql:pim.TenantCache/$kind"
+    }
+    return [pscustomobject]@{ kept = $false; newer = $false; where = "$w"; keptRefreshedUtc = ''; stale = @() }
+}
+
 function Test-PimGroupNotPimOnboardedError {
     # BUG-217. PURE. A per-group assignmentSchedules error that only means "this group is not a PIM group" -- not a
     # failed read. Anything else (401/403/5xx, throttling) is still counted as a failure.
@@ -858,6 +954,8 @@ function New-PimSnapshotAzureContext {
             if ($null -eq $v -or $v -is [System.DBNull] -or -not "$v".Trim()) { return $null }
             try { return ("$v" | ConvertFrom-Json).requestedUtc } catch { return $null } }
         ReadAzure   = { param($ctx, $sid) Get-PimSqlActiveAssignmentRowsJson -ConnectionString $ctx.cs -SnapshotId $sid -Kind 'azure-rbac' }
+        # TRUST-1 gap 4: any part's rows of a stored generation (a surface that failed this run is carried from here)
+        ReadKind    = { param($ctx, $sid, $k) Get-PimSqlActiveAssignmentRowsJson -ConnectionString $ctx.cs -SnapshotId $sid -Kind $k }
     }
 }
 
@@ -874,6 +972,11 @@ function Get-PimSnapshotAzurePlan {
     $head = $null
     try { $head = & $Context.ReadHeader $Context } catch { return (& $readIt "the stored header could not be read: $($_.Exception.Message)" '') }
     if ($null -eq $head) { return (& $readIt 'no stored table-form snapshot' '') }
+    # TRUST-1 round 4 item 8: Azure CARRIED because the last read failed keeps its OLD read time -- never "not due" from it;
+    # it is read again on every run until a read succeeds (never carried silently)
+    if ($head.PSObject.Properties['carried'] -and @(@($head.carried) | Where-Object { $null -ne $_ -and "$($_.surface)" -eq 'azure-rbac' }).Count) {
+        return (& $readIt 'the last run could not read Azure (its rows are carried) -- read again' "$(if ($head.PSObject.Properties['azureReadUtc']) { ConvertTo-PimActiveAssignmentsIsoStamp -Value $head.azureReadUtc })")
+    }
     $prev = ''; if ($head.PSObject.Properties['azureReadUtc']) { $prev = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $head.azureReadUtc)" }
     $mark = $null; try { $mark = & $Context.ReadMark $Context } catch { $mark = $null }
     $due = Test-PimSnapshotAzureReadDue -LastReadUtc $prev -MarkUtc $mark -NowUtc $NowUtc
@@ -1370,11 +1473,16 @@ function Invoke-PimActiveAssignmentsSnapshot {
         param([int]$pi, [bool]$ok, [object[]]$items, [int]$status, [string]$errText)
         if ($ok) { foreach ($v in @($items)) { if ($null -ne $v) { if ($pi % 2 -eq 0) { $pimGroupRows.Add($v) } else { $pimGroupEligRows.Add($v) } } }; return }
         if (Test-PimGroupNotPimOnboardedError -Message $errText) { return }   # not a PIM group -- nothing to list, not a failure
+        # TRUST-1 round 6 F5: the group is GONE (deleted while this run read the tenant: HTTP 404 / ResourceNotFound) -- it has no
+        # assignments left, so it is no failure (no warning, nothing carried, no key held). Every other error stays a failure.
+        if ($status -eq 404 -or $errText -match '(?i)\bHTTP 404\b|Request_ResourceNotFound|\bResourceNotFound\b') { return }
         $script:__gFail++
+        # TRUST-1 round 4 item 14: WHICH groups failed, so only their rows are carried (the others' fresh rows stay)
+        $gfId = "$($pimGroupsToRead[[int][Math]::Floor($pi / 2)].Id)".Trim(); if ($gfId -and $null -ne $script:__gFailIds) { [void]$script:__gFailIds.Add($gfId) }
         if (-not $script:__gFirstErr -and ($status -eq 401 -or $status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $script:__gFirstErr = $errText }
         if ($script:__gFail -le 3) { Write-Warning ("  [revoke] {0} for group '{1}' failed: {2}" -f $(if ($pi % 2 -eq 0) { 'assignmentSchedules' } else { 'eligibilitySchedules' }), $pimGroupsToRead[[int][Math]::Floor($pi / 2)].DisplayName, $errText) }
     }
-    $script:__gFail = 0; $script:__gFirstErr = $null
+    $script:__gFail = 0; $script:__gFirstErr = $null; $script:__gFailIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     if ($gPaths.Count -gt 0 -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
         # REQUIREMENTS 67.1: through the engine's shared batch reader (follows @odata.nextLink, re-runs a 429 / 5xx itself).
         $gRes = Invoke-PimGraphBatchGet -Paths @($gPaths.ToArray()) -ProgressLabel '[revoke] pim-for-groups'   # SCHEMA-QUIESCE-LONG-SNAPSHOT: alive every 5 min
@@ -1409,6 +1517,12 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # A surface-level error only when EVERY read failed AND nothing came back -- a few per-group failures are tolerated.
     if (($pimGroupRows.Count + $pimGroupEligRows.Count) -eq 0 -and $gPaths.Count -gt 0 -and $gFail -ge $gPaths.Count -and $gFirstErr) {
         [void]$surfaceErrors.Add([ordered]@{ surface = 'pim-for-groups'; error = $gFirstErr; hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage $gFirstErr) })
+    } elseif ($null -ne $script:__gFailIds -and $script:__gFailIds.Count -gt 0) {
+        # TRUST-1 round 4 item 14: SOME groups could not be read -- a surface error that names them (groupIds), so the job carries
+        # only those groups' last good rows and keeps the fresh rows of every group that was read (it used to drop them silently)
+        $gIds = [string[]]@($script:__gFailIds | Sort-Object)
+        $gEm = "the schedules of $($gIds.Count) group(s) could not be read" + $(if ($gFirstErr) { ": $gFirstErr" } else { '' })
+        [void]$surfaceErrors.Add([ordered]@{ surface = 'pim-for-groups'; error = $gEm; hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'pim-for-groups' -ErrorMessage "$gFirstErr"); groupIds = $gIds })
     }
     Write-Host ("  [revoke] pim-for-groups: {0} active + {1} eligible schedule(s) across {2} group(s) ({3} batch round-trips)" -f $pimGroupRows.Count, $pimGroupEligRows.Count, $pimGroupsToRead.Count, [Math]::Ceiling($gPaths.Count / 20)) -ForegroundColor DarkGray
     # Casing-tolerant property read: SDK objects are PascalCase, REST/$batch bodies are camelCase.
@@ -1568,6 +1682,293 @@ function Invoke-PimActiveAssignmentsSnapshot {
 }
 
 # ===========================================================================
+# TRUST-1 (framework points 1, 2, 3, 7): which surfaces failed THIS run, which the install does not have, and carrying a
+# failed surface's last good rows forward
+# ===========================================================================
+function Get-PimActiveAssignmentsSurfaceParts {
+    <# PURE. surface -> { type (the row type it feeds); stamp (the header's per-part read time) } -- a literal. #>
+    return @{
+        'entra-role'     = @{ type = 'entra-role';     stamp = 'entraReadUtc' }
+        'azure-rbac'     = @{ type = 'azure-rbac';     stamp = 'azureReadUtc' }
+        'pim-for-groups' = @{ type = 'pim-for-groups'; stamp = 'groupsReadUtc' }
+        'app-permission' = @{ type = 'app-permission'; stamp = 'appPermissionsReadUtc' }
+    }
+}
+
+function Get-PimActiveAssignmentsHeaderField {
+    # PURE. A field of a stored header (parsed JSON or a dictionary), $null when absent.
+    param([AllowNull()][object]$Header, [string]$Name)
+    if ($null -eq $Header) { return $null }
+    if ($Header -is [System.Collections.IDictionary]) { if ($Header.Contains($Name)) { return $Header[$Name] }; return $null }
+    if ($Header.PSObject.Properties[$Name]) { return $Header.$Name }
+    return $null
+}
+
+if (-not (Get-Command Get-PimTrustCarryMaxAgeDays -ErrorAction SilentlyContinue)) {
+    function Get-PimTrustCarryMaxAgeDays { <# PURE. LITERAL. Framework TRUST-1 point 8 (the same value as PIM-JobLanes.ps1). #> return 7 }
+}
+
+function Split-PimActiveAssignmentsSurfaceErrors {
+    <#
+      PURE. Framework TRUST-1 point 7: a source the install does NOT HAVE is not part of the check. Every engine Graph read
+      (RoleManagement.Read.All, Directory.Read.All, Application.Read.All, the PIM-for-Groups schedules) and the Azure Reader
+      (reader@subscription / reader@tenant-root, 'always') are in PIM's approved rights list (engine\_shared\PIM-RightsList.ps1),
+      so a failure of any of them FAILED THIS TIME. No surface of this read is behind a feature switch. The one source an
+      install may simply not have is Azure itself: ARM lists NO subscription for the engine (an Entra-only tenant) and Azure was
+      NEVER read before -- ABSENT BY DESIGN. "Read before" (round 3 item 5) = the previous header (either store form) has Azure
+      rows: azureRows > 0 or counts.'azure-rbac' > 0 (an upgraded header without azureReadUtc counts too). -PreviousUnreadable
+      (the previous header could not be read) = nothing is absent: every failure counts as failed this time.
+      Returns @{ failed = [object[]]; absent = [object[]] { surface; code; reason } }.
+    #>
+    param([AllowNull()][object[]]$SurfaceErrors, [AllowNull()][object]$PreviousHeader = $null, [switch]$PreviousUnreadable)
+    $failed = [System.Collections.Generic.List[object]]::new(); $absent = [System.Collections.Generic.List[object]]::new()
+    $num = { param($v) $n = [long]0; [void][long]::TryParse("$v", [ref]$n); $n }
+    $prevAzRows = & $num (Get-PimActiveAssignmentsHeaderField $PreviousHeader 'azureRows')
+    $prevAzCount = & $num (Get-PimActiveAssignmentsHeaderField (Get-PimActiveAssignmentsHeaderField $PreviousHeader 'counts') 'azure-rbac')
+    $azReadBefore = ($prevAzRows -gt 0 -or $prevAzCount -gt 0)
+    foreach ($e in @($SurfaceErrors)) {
+        if ($null -eq $e) { continue }
+        $surf = "$(Get-PimActiveAssignmentsHeaderField $e 'surface')"
+        $msg = "$(Get-PimActiveAssignmentsHeaderField $e 'error')"
+        if (-not $PreviousUnreadable -and $surf -eq 'azure-rbac' -and $msg -match '(?i)\b0 subscriptions\b' -and -not $azReadBefore) {
+            $absent.Add([ordered]@{ surface = $surf; code = 'AA-AZURE-NOT-PRESENT'; reason = 'no Azure subscription is visible to the engine (an Entra-only tenant): Azure is not part of this install''s check' })
+        } else { $failed.Add($e) }
+    }
+    return @{ failed = $failed.ToArray(); absent = $absent.ToArray() }
+}
+
+function Merge-PimActiveAssignmentsCarriedRows {
+    <#
+      TRUST-1 gap 4 (framework points 2 + 8). The rows of a surface that FAILED this run are replaced by that surface's rows of the
+      previous complete generation (-PreviousHeader + -Context.ReadKind, as Azure is carried already), each part keeping its
+      last good read time. Round 3 item 10: a surface whose failures are ALL of its eligible half (state = 'eligible') carries
+      only its ELIGIBLE rows -- this run's fresh active rows stay. A part carried longer than Get-PimTrustCarryMaxAgeDays is
+      STALE (point 8): its rows are still carried and listed with their date, and it is named in 'stale' with the stable code
+      AA-SOURCE-STALE. A surface with no previous rows to carry (a NEW install, a part never read, a one-document previous
+      store, rows that do not add up to the header's count) keeps what this run read of it and is named 'missing'.
+      Returns @{ rows = [object[]]; carried = [object[]] { surface; type; rows; fromSnapshotId; readUtc; eligibleOnly };
+      missing = [object[]]; stale = [object[]] { surface; code; sinceUtc } }.
+    #>
+    param([AllowNull()][object[]]$Rows, [AllowNull()][object[]]$Failed, [AllowNull()][object]$PreviousHeader = $null, [AllowNull()][hashtable]$Context = $null,
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    $parts = Get-PimActiveAssignmentsSurfaceParts
+    $carried = [System.Collections.Generic.List[object]]::new(); $missing = [System.Collections.Generic.List[object]]::new(); $stale = [System.Collections.Generic.List[object]]::new()
+    $replace = @{}   # type -> @{ rows; eligibleOnly }
+    $sid = [long]0; [void][long]::TryParse("$(Get-PimActiveAssignmentsHeaderField $PreviousHeader 'snapshotId')", [ref]$sid)
+    $prevCounts = Get-PimActiveAssignmentsHeaderField $PreviousHeader 'counts'
+    $bySurface = [ordered]@{}
+    foreach ($e in @($Failed)) { $s = "$(Get-PimActiveAssignmentsHeaderField $e 'surface')"; if (-not $bySurface.Contains($s)) { $bySurface[$s] = [System.Collections.Generic.List[object]]::new() }; $bySurface[$s].Add($e) }
+    foreach ($surf in @($bySurface.Keys)) {
+        if (-not $parts.ContainsKey($surf)) { continue }
+        $t = $parts[$surf].type
+        $eligOnly = (@($bySurface[$surf] | Where-Object { "$(Get-PimActiveAssignmentsHeaderField $_ 'state')" -ne 'eligible' }).Count -eq 0)
+        # round 4 item 14: a failure of SOME groups (every entry names its groupIds) carries only those groups' rows
+        $grpSet = $null
+        # (never `@(Get-...Field ...)`: a field that is absent returns $null and @() of a function that returns $null is EMPTY)
+        if (@($bySurface[$surf] | Where-Object { $gv = Get-PimActiveAssignmentsHeaderField $_ 'groupIds'; $null -eq $gv -or -not @($gv | Where-Object { "$_".Trim() }).Count }).Count -eq 0) {
+            $grpSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($ge in $bySurface[$surf]) { foreach ($gid in @(Get-PimActiveAssignmentsHeaderField $ge 'groupIds')) { if ("$gid".Trim()) { [void]$grpSet.Add("$gid".Trim()) } } }
+            if ($grpSet.Count -eq 0) { $grpSet = $null }
+        }
+        $prevRead = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $PreviousHeader $parts[$surf].stamp))"
+        $want = [long]-1; [void][long]::TryParse("$(Get-PimActiveAssignmentsHeaderField $prevCounts $t)", [ref]$want)
+        $reader = $null
+        if ($null -ne $Context) { if ($Context.ContainsKey('ReadKind')) { $reader = { param($c, $s, $k) & $c.ReadKind $c $s $k } } elseif ($t -eq 'azure-rbac' -and $Context.ContainsKey('ReadAzure')) { $reader = { param($c, $s, $k) & $c.ReadAzure $c $s } } }
+        $got = $null
+        if ($sid -gt 0 -and $prevRead -and $want -ge 0 -and $reader) {
+            try {
+                $json = & $reader $Context $sid $t
+                $list = [System.Collections.Generic.List[object]]::new()
+                if ("$json".Length -gt 2) {
+                    $parsed = ConvertFrom-Json -InputObject "$json"   # assigned first: PS 5.1 emits the array as ONE object
+                    foreach ($x in @($parsed)) { foreach ($y in @($x)) { if ($null -ne $y) { $list.Add((ConvertFrom-PimActiveAssignmentsStoredRow -Row $y)) } } }
+                }
+                if ([long]$list.Count -eq $want) { $got = $list }
+            } catch { $got = $null }
+        }
+        if ($null -ne $got) {
+            # never ` = if (...) { list }`: an if-statement's output unrolls the list (a one-row list became the row itself)
+            $keep = $got
+            if ($eligOnly -or $null -ne $grpSet) {
+                $keep = [System.Collections.Generic.List[object]]::new()
+                foreach ($r in $got) { if ((-not $eligOnly -or "$($r.state)" -eq 'eligible') -and ($null -eq $grpSet -or $grpSet.Contains("$($r.groupId)"))) { $keep.Add($r) } }
+            }
+            $maxD = Get-PimTrustCarryMaxAgeDays
+            $ageOf = { param($iso) $a = $null; try { $a = [datetime]::Parse("$iso", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $a = $null }; if ($null -eq $a) { -1 } else { ($NowUtc.ToUniversalTime() - $a).TotalDays } }
+            $isStale = ((& $ageOf $prevRead) -gt $maxD)
+            # round 4 item 4: EACH carried row says so (its JSON goes to the Revoke tab): never offered for a revoke there.
+            # Round 5 G6: a row that was ALREADY carried keeps ITS carriedFromUtc (when it was last really read) -- for a subset of
+            # PIM-for-Groups the part's read time moves on with this run, so the part's time is not the row's; stale is per row,
+            # and for a group subset per GROUP (one stale entry per group, with that group's own date).
+            $grpStale = [ordered]@{}; $grpFrom = [ordered]@{}
+            foreach ($r in $keep) {
+                if ($r -isnot [System.Collections.IDictionary]) { continue }
+                $from = $prevRead
+                if ($r.Contains('carried') -and [bool]$r['carried'] -and "$($r['carriedFromUtc'])".Trim()) {
+                    # the stored row went through ConvertFrom-PimActiveAssignmentsStoredRow (round-trip 'o' text on pwsh 7) -- back to the header's form
+                    $from = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $r['carriedFromUtc'])"
+                    try { $from = [datetime]::Parse($from, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal').ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture) } catch { }
+                }
+                $rs = ((& $ageOf $from) -gt $maxD)
+                $r['carried'] = $true; $r['carriedFromUtc'] = $from; $r['stale'] = [bool]$rs
+                if ($null -ne $grpSet) { $g0 = "$($r['groupId'])"; if (-not $grpFrom.Contains($g0) -or "$from" -lt "$($grpFrom[$g0])") { $grpFrom[$g0] = $from } }
+                if ($null -ne $grpSet -and $rs) { $g0 = "$($r['groupId'])"; if (-not $grpStale.Contains($g0) -or "$from" -lt "$($grpStale[$g0])") { $grpStale[$g0] = $from } }
+            }
+            $replace[$t] = @{ rows = $keep; eligibleOnly = $eligOnly; groups = $grpSet }
+            $carried.Add([ordered]@{ surface = $surf; type = $t; rows = [long]$keep.Count; fromSnapshotId = $sid; readUtc = $prevRead; eligibleOnly = $eligOnly; groupIds = $(if ($null -ne $grpSet) { [string[]]@($grpSet | Sort-Object) } else { $null }); subset = ($null -ne $grpSet)
+                # round 6 F1: per carried group its oldest real read -- an all-failed run after this one ages each group from here
+                groupsFrom = $(if ($null -ne $grpSet) { $grpFrom } else { $null }) })
+            if ($null -ne $grpSet) { foreach ($g0 in @($grpStale.Keys)) { $stale.Add([ordered]@{ surface = $surf; groupId = "$g0"; code = 'AA-SOURCE-STALE'; sinceUtc = "$($grpStale[$g0])" }) } }
+            elseif ($isStale) { $stale.Add([ordered]@{ surface = $surf; code = 'AA-SOURCE-STALE'; sinceUtc = $prevRead }) }
+        } else { $missing.Add([ordered]@{ surface = $surf; type = $t; reason = $(if ($sid -le 0) { 'no previous complete read to carry from' } else { 'the previous rows of this part could not be carried' }) }) }
+    }
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $rt = "$($r.type)"
+        if ($replace.ContainsKey($rt) -and (-not $replace[$rt].eligibleOnly -or "$($r.state)" -eq 'eligible') -and ($null -eq $replace[$rt].groups -or $replace[$rt].groups.Contains("$($r.groupId)"))) { continue }
+        $out.Add($r)
+    }
+    foreach ($t in @($replace.Keys)) { foreach ($r in $replace[$t].rows) { $out.Add($r) } }
+    return @{ rows = $out.ToArray(); carried = $carried.ToArray(); missing = $missing.ToArray(); stale = $stale.ToArray() }
+}
+
+function Find-PimActiveAssignmentsRowIdsForPayload {
+    <#
+      TRUST-1 round 6 F8: the stored snapshot rows a STAGED revoke names, found from its payload (a revoke queued before the
+      payload carried sourceRowId). Read-only. Matches the current generation's rows of the payload's kind by principal and the
+      assignment's own id (roleAssignmentId; else roleDefinitionId; groupId for PIM-for-Groups). Returns the row ids found PLUS
+      '<kind>:' (no row id, only the kind) -- so a part the newest run did not read is refused by its kind even when no row matches.
+      A store error THROWS (the caller refuses: "cannot tell"). -Read { param($kind, $p) -> ids }: test seam.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [string]$ConnectionString = '', [scriptblock]$Read = $null)
+    $pv = { param($n) if ($Payload -is [System.Collections.IDictionary]) { "$($Payload[$n])".Trim() } elseif ($Payload.PSObject.Properties[$n]) { "$($Payload.$n)".Trim() } else { '' } }
+    $map = @{ 'entra-role-revoke' = 'entra-role'; 'azure-rbac-revoke' = 'azure-rbac'; 'group-assignment-revoke' = 'pim-for-groups' }
+    $kind = "$($map["$(& $pv 'type')".ToLowerInvariant()])"
+    if (-not $kind) { return @() }
+    $ids = [System.Collections.Generic.List[string]]::new()
+    if (-not $Read) {
+        if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+        if ("$ConnectionString".Trim() -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlActiveAssignmentsCurrentSnapshotId -ErrorAction SilentlyContinue)) {
+            $cs1 = $ConnectionString
+            $Read = { param($k, $prm)
+                $sid = [long](Get-PimSqlActiveAssignmentsCurrentSnapshotId -ConnectionString $cs1)
+                $w = "(@ra <> N'' AND JSON_VALUE(j, '$.roleAssignmentId') = @ra) OR (@ra = N'' AND @rd <> N'' AND JSON_VALUE(j, '$.roleDefinitionId') = @rd) OR (@g <> N'' AND JSON_VALUE(j, '$.groupId') = @g)"
+                if ($sid -gt 0) { $sql = "SELECT RowId AS id FROM (SELECT RowId, CASE WHEN ISJSON(RowJson) = 1 THEN RowJson END AS j FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND Kind = @k AND PrincipalId = @p) x WHERE $w" }
+                else { $sql = "SELECT j0.id AS id FROM pim.TenantCache t CROSS APPLY OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.rows') WITH (id nvarchar(450) '$.id', type nvarchar(40) '$.type', principalId nvarchar(200) '$.principalId', j nvarchar(max) '$' AS JSON) j0 WHERE t.Kind = N'active-assignments' AND j0.type = @k AND j0.principalId = @p AND ($w)" }
+                @(Invoke-PimSqlQuery -ConnectionString $cs1 -Sql $sql -Parameters @{ s = $sid; k = $k; p = $prm.p; ra = $prm.ra; rd = $prm.rd; g = $prm.g } | ForEach-Object { "$($_.id)" }) }
+        }
+    }
+    if ($Read) { foreach ($x in @(& $Read $kind @{ p = (& $pv 'principalId'); ra = (& $pv 'roleAssignmentId'); rd = (& $pv 'roleDefinitionId'); g = (& $pv 'groupId') })) { if ("$x".Trim()) { $ids.Add("$x".Trim()) } } }
+    $ids.Add("$kind`:")
+    return $ids.ToArray()
+}
+
+function Register-PimActiveAssignmentsStaleParts {
+    <#
+      TRUST-1 point 8 + round 6 F6 / F1: hand EVERY stale part of this run to Register-PimTrustStaleReport, on every run. The
+      stall-report list is what says "already asked for" (id = job | part | source-stale | since; kept 60 days, sent or not), so
+      the same stale part opens exactly ONE fix request, and a registration that failed (a throw, a store that was down) is
+      simply made on the next run. A stale GROUP of PIM-for-Groups is its own part: pim-for-groups.<group id>. Never throws.
+    #>
+    param([AllowNull()][object[]]$Stale, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not (Get-Command Register-PimTrustStaleReport -ErrorAction SilentlyContinue)) { return }
+    foreach ($sx in @($Stale)) {
+        if ($null -eq $sx) { continue }
+        $g = "$(Get-PimActiveAssignmentsHeaderField $sx 'groupId')".Trim()
+        $part = "$(Get-PimActiveAssignmentsHeaderField $sx 'surface')" + $(if ($g) { ".$g" } else { '' })
+        try { [void](Register-PimTrustStaleReport -Job 'pim-active-assignments-snapshot' -Part $part -Code 'AA-SOURCE-STALE' -SinceUtc "$(Get-PimActiveAssignmentsHeaderField $sx 'sinceUtc')" -NowUtc $NowUtc) } catch { }
+    }
+}
+function Get-PimActiveAssignmentsCarriedRows {
+    <#
+      TRUST-1 round 4 item 4: which of -Ids are CARRIED rows of the stored snapshot (not read this run, shown from the last
+      complete read) -- the revoke API refuses them whatever the page sent. Table form: one read-only SQL over the current
+      generation's rows (RowJson carried = true); the one-document form: the stored document's rows. Returns
+      { known; rows = @{ id -> { carriedFromUtc; stale } }; error }. known = $false = could not tell (the caller refuses then).
+      -Read { param($ids) -> rows { id; carriedFromUtc; stale } }: test seam.
+    #>
+    param([AllowNull()][string[]]$Ids, [string]$ConnectionString = '', [scriptblock]$Read = $null, [scriptblock]$Header = $null)
+    $out = @{}
+    $want = @(@($Ids) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() } | Select-Object -Unique)
+    if (-not $want.Count) { return [pscustomobject]@{ known = $true; rows = $out; error = '' } }
+    try {
+        if (-not $Read) {
+            if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimTenantCacheStoreCs -ErrorAction SilentlyContinue)) { $ConnectionString = "$(Get-PimTenantCacheStoreCs)" }
+            $sid = [long]0
+            if ("$ConnectionString".Trim() -and (Get-Command Get-PimSqlActiveAssignmentsCurrentSnapshotId -ErrorAction SilentlyContinue)) { $sid = [long](Get-PimSqlActiveAssignmentsCurrentSnapshotId -ConnectionString $ConnectionString) }
+            if ($sid -gt 0) {
+                $cs0 = $ConnectionString
+                $Read = { param($ids) @(Invoke-PimSqlQuery -ConnectionString $cs0 -Sql "SELECT RowId AS id, CASE WHEN ISJSON(RowJson) = 1 THEN JSON_VALUE(RowJson, '$.carriedFromUtc') END AS carriedFromUtc, CASE WHEN ISJSON(RowJson) = 1 THEN JSON_VALUE(RowJson, '$.stale') END AS stale FROM pim.ActiveAssignmentRows WHERE SnapshotId = @s AND RowId IN (SELECT [value] FROM OPENJSON(@ids)) AND ISNULL(CASE WHEN ISJSON(RowJson) = 1 THEN JSON_VALUE(RowJson, '$.carried') END, N'') = N'true'" -Parameters @{ s = $sid; ids = (ConvertTo-Json -InputObject @($ids) -Compress) }) }
+            } elseif ("$ConnectionString".Trim() -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) {
+                # round 5 H8: the ONE-DOCUMENT form is filtered IN SQL (OPENJSON over its rows, only the asked ids, only carried ones)
+                # -- never the whole 22 MB document read and parsed into this process for a revoke
+                $cs0 = $ConnectionString
+                $Read = { param($ids) @(Invoke-PimSqlQuery -ConnectionString $cs0 -Sql "SELECT j.id AS id, j.carriedFromUtc AS carriedFromUtc, j.stale AS stale FROM pim.TenantCache t CROSS APPLY OPENJSON(CASE WHEN ISJSON(t.ValueJson) = 1 THEN t.ValueJson END, '$.rows') WITH (id nvarchar(450) '$.id', carried nvarchar(10) '$.carried', carriedFromUtc nvarchar(64) '$.carriedFromUtc', stale nvarchar(10) '$.stale') j WHERE t.Kind = N'active-assignments' AND j.carried = N'true' AND j.id IN (SELECT [value] FROM OPENJSON(@ids))" -Parameters @{ ids = (ConvertTo-Json -InputObject @($ids) -Compress) }) }
+            } elseif (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+                $Read = { param($ids) $e = Get-PimTenantCacheEntry -Kind 'active-assignments'; if ($null -eq $e) { return @() }; $set = @{}; foreach ($i in $ids) { $set["$i"] = $true }
+                    @(@($e.rows) | Where-Object { $null -ne $_ -and [bool]$_.carried -and $set.ContainsKey("$($_.id)") } | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; carriedFromUtc = "$($_.carriedFromUtc)"; stale = [bool]$_.stale } }) }
+            } else { return [pscustomobject]@{ known = $false; rows = $out; error = 'the stored snapshot cannot be read in this process' } }
+        }
+        foreach ($r in @(& $Read $want)) { if ($null -ne $r -and "$($r.id)".Trim()) { $out["$($r.id)"] = [pscustomobject]@{ carriedFromUtc = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $r.carriedFromUtc)"; stale = ("$($r.stale)" -match '^(?i)(true|1)$') } } }
+        # Round 5 G2: the KEPT snapshot whose newest run failed on every surface ages -- a part its lastRun names STALE
+        # (AA-SOURCE-STALE) is not from today, so every asked row of that part ('<type>:<id>') is refused too. A header that
+        # cannot be read THROWS here (known = $false = refused). -Header { -> Get-PimSqlActiveAssignmentsHeaderStamp }: test seam.
+        if (-not $Header -and "$ConnectionString".Trim() -and (Get-Command Get-PimSqlActiveAssignmentsHeaderStamp -ErrorAction SilentlyContinue)) { $csH = $ConnectionString; $Header = { Get-PimSqlActiveAssignmentsHeaderStamp -ConnectionString $csH } }
+        if ($Header) {
+            $hs = & $Header
+            # round 6 F3 (decided: every action on data not read this run is refused): a part the newest run could NOT read
+            # (lastRun.surfaceErrors) is refused AT ONCE -- its rows are the kept generation's, as a partial run's carried rows are;
+            # stale = $true once lastRun names it stale (past Get-PimTrustCarryMaxAgeDays)
+            if ($null -ne $hs -and "$(Get-PimActiveAssignmentsHeaderField $hs 'lastRunTrusted')" -eq 'false') {
+                $partsC = Get-PimActiveAssignmentsSurfaceParts; $stT = @{}; $heldT = @{}
+                $sjL = "$(Get-PimActiveAssignmentsHeaderField $hs 'lastRunStaleJson')"
+                if ($sjL.Trim()) { foreach ($x in @($sjL | ConvertFrom-Json)) { foreach ($y in @($x)) { if ($null -ne $y -and $partsC.ContainsKey("$($y.surface)")) { $stT[$partsC["$($y.surface)"].type] = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $y.sinceUtc)" } } } }
+                $fjL = "$(Get-PimActiveAssignmentsHeaderField $hs 'lastRunFailedJson')"
+                if ($fjL.Trim()) { foreach ($x in @($fjL | ConvertFrom-Json)) { foreach ($y in @($x)) { if ($null -ne $y -and $partsC.ContainsKey("$($y.surface)")) { $p0 = $partsC["$($y.surface)"]; $heldT[$p0.type] = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $hs $p0.stamp))" } } } }
+                foreach ($k in @($stT.Keys)) { $heldT[$k] = $stT[$k] }
+                foreach ($id in $want) { $tp = ("$id" -split ':', 2)[0]; if ($heldT.ContainsKey($tp) -and -not $out.ContainsKey("$id")) { $out["$id"] = [pscustomobject]@{ carriedFromUtc = $heldT[$tp]; stale = [bool]$stT.ContainsKey($tp) } } }
+            }
+        }
+        return [pscustomobject]@{ known = $true; rows = $out; error = '' }
+    } catch { return [pscustomobject]@{ known = $false; rows = $out; error = "$($_.Exception.Message)" } }
+}
+
+function Get-PimRevokeCarriedRefusal {
+    <#
+      PURE. TRUST-1 round 4 item 4: the 409 answer for a revoke request that names a row NOT read this run (carried / stale --
+      the page's own flag, or the stored snapshot's, -Stored = Get-PimActiveAssignmentsCarriedRows), or $null when none does.
+      Data that is not current is never revoked from (the page's disabled box is not the guard). -Stored.known = $false =
+      refused too ("cannot tell" is never "fine").
+    #>
+    param([AllowNull()][object[]]$Rows, [AllowNull()][object]$Stored)
+    $bad = [System.Collections.Generic.List[object]]::new()
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $id = "$($r.id)"
+        $own = ($r.PSObject.Properties['carried'] -and [bool]$r.carried) -or ($r -is [System.Collections.IDictionary] -and $r.Contains('carried') -and [bool]$r['carried'])
+        $st = $null; if ($null -ne $Stored -and $null -ne $Stored.rows -and $Stored.rows.ContainsKey($id)) { $st = $Stored.rows[$id] }
+        if ($own -or $null -ne $st) { $bad.Add([ordered]@{ id = $id; lastReadUtc = $(if ($null -ne $st) { "$($st.carriedFromUtc)" } else { "$($r.carriedFromUtc)" }) }) }
+    }
+    if ($null -ne $Stored -and -not [bool]$Stored.known) {
+        return [ordered]@{ status = 409; body = [ordered]@{ ok = $false; carried = $true; refusedCount = @($Rows).Count
+            error = "Whether these rows are current could not be checked ($($Stored.error)) -- nothing was queued. Refresh the page and try again." } }
+    }
+    if (-not $bad.Count) { return $null }
+    $when = @($bad | ForEach-Object { "$($_.lastReadUtc)" } | Where-Object { $_ } | Sort-Object | Select-Object -First 1)
+    return [ordered]@{ status = 409; body = [ordered]@{ ok = $false; carried = $true; refusedCount = $bad.Count; refused = $bad.ToArray()
+        error = ("{0} row(s) are not from today: they could not be read this time and are shown from the last complete read{1}. Nothing was queued -- revoke them once they are read again." -f $bad.Count, $(if ($when.Count) { " ($($when[0]))" } else { '' })) } }
+}
+
+function Get-PimActiveAssignmentsRowCounts {
+    # PURE. The header's counts of a row set (the snapshot's own rule: per type, and how many are eligible).
+    param([AllowNull()][object[]]$Rows)
+    $n = @{ 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0; 'app-permission' = 0 }; $el = 0; $tot = 0
+    foreach ($r in @($Rows)) { if ($null -eq $r) { continue }; $tot++; $t = "$($r.type)"; if ($n.ContainsKey($t)) { $n[$t]++ }; if ("$($r.state)" -eq 'eligible') { $el++ } }
+    return [ordered]@{ total = $tot; 'entra-role' = $n['entra-role']; 'azure-rbac' = $n['azure-rbac']; 'pim-for-groups' = $n['pim-for-groups']; 'app-permission' = $n['app-permission']; eligible = $el }
+}
+
+# ===========================================================================
 # THE SCHEDULER JOB -- 'active-assignments-snapshot'
 # ===========================================================================
 function Invoke-PimActiveAssignmentsSnapshotJob {
@@ -1581,10 +1982,12 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
       🔒 No SQL store -> REFUSED (unimplemented), never a memory-only write. A snapshot kept in the scheduler's
          own process is one the Manager -- another process, usually another container -- can never read, so
          reporting it as written would be the BUG-134 conflation ("a step that cannot work reports success").
-      🔴 A read where EVERY surface failed is STILL WRITTEN (the Revoke tab must show the actionable permission
-         hint rather than a stale "all good"), and the job then THROWS so the run is recorded failed and the
-         engine-failure alert can fire. A PARTIAL read is written and reported ran=$true with the failed surfaces
-         named in the detail.
+      🔴 TRUST-1 (points 1, 2, 3, 7; gaps 1 + 4): a surface the install does not have = UNKNOWN (header 'unknown', a stable
+         code), the run TRUSTED. A surface that failed THIS TIME = PARTIAL: its rows carried from the previous complete
+         generation (header 'carried', the part's last good read time; 'missing' when there is nothing to carry), the other
+         surfaces' rows this run's, ran=$true + warning=$true + trusted=$false. EVERY surface failed (no row read) = NOT
+         written: the previous snapshot stays with 'lastRun' on its header (a new install stores the failure WITHOUT rows,
+         Save-PimActiveAssignmentsSnapshotFailure), and the job THROWS (run failed, the engine-failure alert can fire).
     #>
     param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $type = $script:PimActiveAssignmentsSnapshotJobType
@@ -1608,6 +2011,17 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     $azCtx = $null
     try { $azCtx = New-PimSnapshotAzureContext } catch { $azCtx = $null }
     $azPlan = Get-PimSnapshotAzurePlan -Context $azCtx -NowUtc $NowUtc
+    # TRUST-1: what was stored when this run STARTED -- the previous complete generation's header (what a failed surface is
+    # carried from, and whether a part was read before) and the header's identity (a failing run never overwrites a header
+    # a newer run wrote meanwhile). Unreadable = $null: nothing is carried and nothing is guarded beyond "not newer".
+    # Round 3 item 5: the header is read in BOTH store forms (Get-PimSqlActiveAssignmentsHeaderStamp, JSON values only); a
+    # header that cannot be read makes every failure count as failed THIS time (never absent).
+    $prevHead = $null; $prevUnreadable = $false
+    $startStamp = $null
+    if (Get-Command Get-PimSqlActiveAssignmentsHeaderStamp -ErrorAction SilentlyContinue) {
+        try { $startStamp = Get-PimSqlActiveAssignmentsHeaderStamp -ConnectionString "$(Get-PimTenantCacheStoreCs)" } catch { $startStamp = $null; $prevUnreadable = $true }
+        if ($null -ne $startStamp -and [bool]$startStamp.exists) { $prevHead = $startStamp }
+    } elseif ($null -ne $azCtx) { try { $prevHead = & $azCtx.ReadHeader $azCtx } catch { $prevHead = $null; $prevUnreadable = $true } }
     # Named parameters, never a hashtable splat: @{ Fresh = $true } reaches a wrapper as '-Fresh:', $true and the bare $true
     # then binds BY POSITION to the next parameter (VM gate 2026-10-20, Test-PimActiveAssignmentsSnapshot B6).
     $sc = Get-Command Invoke-PimActiveAssignmentsSnapshot -ErrorAction SilentlyContinue
@@ -1637,18 +2051,90 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     }
     # 100.68: the Dashboard's "Activations handled" ledger -- every time-bound active assignment seen, recorded once
     # (insert-only, engine/_shared/PIM-ImpactCounters.ps1). Never fails the snapshot: a ledger error is said in the detail.
+    # TRUST-1 review finding 7: kept BEFORE the trust decision on purpose -- it records only rows this run SAW (each a real
+    # observation, insert-only, never counted twice), never a carried row; a surface that failed only means fewer were seen.
     $ledTxt = ''
     if (Get-Command Update-PimImpactActivationLedger -ErrorAction SilentlyContinue) {
         $led = Update-PimImpactActivationLedger -ConnectionString (Get-PimTenantCacheStoreCs) -Rows $snap.rows
         $ledTxt = if ($led.ok) { "; activation ledger +$($led.added)" } else { "; activation ledger NOT updated ($($led.error))" }
     }
+    # TRUST-1 (framework points 1, 2, 3, 7). A surface the install does NOT HAVE (Split-...: Azure with no subscription, never
+    # read before) is named UNKNOWN with a stable code and the run stays TRUSTED. A surface that FAILED THIS TIME makes the run
+    # PARTIAL (a WARNING run, trusted = $false): its rows are CARRIED from the previous complete generation with their last
+    # good read time (gap 4), the readable surfaces' rows are this run's -- held per surface, never all. A new install keeps
+    # what it read of the failed surface, flagged 'missing'. Only when EVERY surface that should be read failed (no row read)
+    # is the read not written at all: the previous snapshot stays with the failure on its header, the run FAILS (throw).
+    $split = Split-PimActiveAssignmentsSurfaceErrors -SurfaceErrors $errs -PreviousHeader $prevHead -PreviousUnreadable:$prevUnreadable
+    $errs = @($split.failed)
+    $entry['surfaceErrors'] = $errs
+    if (@($split.absent).Count) { $entry['unknown'] = @($split.absent) }
+    $rowsRead = @($snap.rows).Count
+    $allFailed = ($errs.Count -gt 0 -and $rowsRead -eq 0)
+    $entry['ok'] = -not $allFailed
+    $entry['partial'] = ($errs.Count -gt 0 -and -not $allFailed)
+    if (-not $allFailed -and -not $entry['partial'] -and "$($entry['error'])".Trim() -and @($split.absent).Count) { $entry['error'] = '' }   # only an absent source: nothing failed
+    if ($allFailed) {
+        $fs = Save-PimActiveAssignmentsSnapshotFailure -Entry $entry -Start $startStamp -NowUtc $NowUtc
+        $entry['rows'] = $null; $snap['rows'] = $null
+        # Round 5 G2 / G3: the kept snapshot's parts that BECAME stale on this run open ONE fix request -- a part the kept header
+        # already names stale (its lastRun.stale from an earlier all-failed run, or its own 'stale' list) is not new
+        # round 6 F6: EVERY stale part is handed to the register on every run -- the stall-report list decides "already asked for"
+        # (one request per part and since-date), so a registration that failed yesterday is made today; never a header flag
+        if ($fs.kept -and @($fs.stale).Count) { Register-PimActiveAssignmentsStaleParts -Stale @($fs.stale) -NowUtc $NowUtc }
+        $keptTxt = if ($fs.kept) { "the previous complete snapshot$(if ($fs.keptRefreshedUtc) { " (as of $($fs.keptRefreshedUtc))" }) stays in use; the failure is recorded on it -> $($fs.where)" }
+                   elseif ($fs.newer) { "a newer snapshot was stored while this run read the tenant -- it is left as it is" }
+                   else { "no complete snapshot is stored yet; the failure was stored without rows so the Revoke tab shows it -> $($fs.where)" }
+        throw ("[$type] active assignments could not be read from any surface; this read was NOT stored as the snapshot -- $keptTxt. " + "$($entry.error)")
+    }
+    $carryTxt = ''
+    if ($entry['partial']) {
+        $mc = Merge-PimActiveAssignmentsCarriedRows -Rows $snap.rows -Failed $errs -PreviousHeader $prevHead -Context $azCtx -NowUtc $NowUtc
+        $snap['rows'] = $mc.rows; $entry['rows'] = $mc.rows
+        $entry['counts'] = Get-PimActiveAssignmentsRowCounts -Rows $mc.rows; $snap['counts'] = $entry['counts']
+        $parts = Get-PimActiveAssignmentsSurfaceParts
+        foreach ($cr in @($mc.carried)) {
+            # the carried part keeps its last good read time -- round 5 G6: NOT for a subset of PIM-for-Groups (the part WAS read
+            # this run; only some groups' rows are carried, each with its own carriedFromUtc)
+            if (-not [bool]$cr.subset) { $entry[$parts["$($cr.surface)"].stamp] = "$($cr.readUtc)" }
+            # round 6 F1: the part's read time IS this run's (the snapshot leaves it '' when any group failed) -- else the next run
+            # finds no read time and carries nothing; each carried group keeps its own date on its rows (+ groupsFrom)
+            else { $entry[$parts["$($cr.surface)"].stamp] = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $entry['refreshedUtc'])" }
+            if ("$($cr.type)" -eq 'azure-rbac') { $entry['azureRows'] = [long]$cr.rows; $entry['azureMode'] = 'carried'; $entry['azureReason'] = 'the Azure read failed this run -- the last good rows are carried' }
+        }
+        if (@($mc.carried).Count) { $entry['carried'] = @($mc.carried) }
+        if (@($mc.missing).Count) { $entry['missing'] = @($mc.missing) }
+        # TRUST-1 point 8: a part carried longer than Get-PimTrustCarryMaxAgeDays is STALE -- still listed with its date, named
+        # with AA-SOURCE-STALE, and ONE fix request opens for it on the run where it BECOMES stale (never one per run)
+        if (@($mc.stale).Count) {
+            $entry['stale'] = @($mc.stale)
+            Register-PimActiveAssignmentsStaleParts -Stale @($mc.stale) -NowUtc $NowUtc   # round 6 F6: every run, the list decides
+        }
+        $carryTxt = $(if (@($mc.carried).Count) { "; carried from the last complete read: " + (@($mc.carried | ForEach-Object { "$($_.surface) ($($_.rows) row(s), read $($_.readUtc))" }) -join ', ') } else { '' }) +
+                    $(if (@($mc.missing).Count) { "; NOT read and nothing to carry: " + (@($mc.missing | ForEach-Object { "$($_.surface)" }) -join ', ') } else { '' })
+    }
+    # Round 3 item 4: what the uplink must NOT count as today's -- the parts with no data this run (missing) or carried past the
+    # age limit (stale) -- and the parts this install does not have (absent). Header fields, read by Get-PimUplinkAdoptionQueries.
+    $pu = @(@($entry['missing']) + @($entry['stale']) | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.surface)" } | Select-Object -Unique)
+    $pa = @(@($entry['unknown']) | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.surface)" } | Select-Object -Unique)
+    if ($pu.Count) { $entry['partsUnread'] = [string[]]$pu }
+    if ($pa.Count) { $entry['partsAbsent'] = [string[]]$pa }
     # REQ 100.114 (2) / 100.110: THE ROWS GO INTO A TABLE, IN BATCHES (pim.ActiveAssignmentRows); pim.TenantCache keeps the
     # small header that names the generation. The one-row write of the whole snapshot (22 MB at 38,000 assignments) is
     # what timed out. A failed batch write THROWS from here: the run is recorded failed and the previous complete
     # snapshot stays in place and readable. Only a store that cannot hold the table at all (.stored = $false) still gets
     # the one-document form below.
     $where = ''; $formTxt = ''
-    $tbl = Save-PimActiveAssignmentsSnapshotRows -Entry $entry
+    # TRUST-1 round 4 item 7: the header switch refuses an OLDER generation while a NEWER one is stored (THROW 51115 in
+    # Complete-PimSqlActiveAssignmentSnapshot) -- this run lost a race it must lose: ran, the newer snapshot kept, no failure, no alert
+    try { $tbl = Save-PimActiveAssignmentsSnapshotRows -Entry $entry }
+    catch {
+        if ("$($_.Exception.Message)" -match 'newer active-assignments snapshot') {
+            $entry['rows'] = $null; $snap['rows'] = $null
+            return [pscustomobject]@{ ran = $true; whatIf = $false; total = 0; partial = $false; newerKept = $true
+                detail = "$type`: a newer snapshot was stored meanwhile -- kept (this run's read is not stored)$ledTxt" }
+        }
+        throw
+    }
     if ($tbl.stored) {
         $entry['rows'] = $null; $snap['rows'] = $null
         $where = "$($tbl.where)"
@@ -1670,12 +2156,18 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     if ($useAz) { $formTxt += "; azure $(if ($azPlan.read) { 'read' } else { 'carried forward' }) ($($azPlan.reason))" }
     $c = $snap.counts
     $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups, {4} app-permission; {5} eligible) in {6}s -> {7}{8}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], [int]$c['app-permission'], [int]$c['eligible'], $snap.elapsedSec, $where, $formTxt
-    if (-not $snap.ok) {
-        throw ("[$type] active assignments could not be read from any surface; the failure was stored so the Revoke tab shows it. " + "$($entry.error)")
+
+    $partialTxt = if ($errs.Count) { " PARTIAL -- could not read: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') + $carryTxt } else { '' }
+    $unkTxt = if (@($split.absent).Count) { " | UNKNOWN (not part of this install's check): " + (@($split.absent | ForEach-Object { "$($_.surface) [$($_.code)]" }) -join ', ') } else { '' }
+    $out = [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$c.total; partial = [bool]$entry['partial']
+        detail = "$type`: $sum$partialTxt$unkTxt$ledTxt" }
+    # TRUST-1: a surface that failed this time = a WARNING run, not trusted (the scheduler records 'warning', never 'completed')
+    if ([bool]$entry['partial']) {
+        $out | Add-Member -NotePropertyName 'warning' -NotePropertyValue $true; $out | Add-Member -NotePropertyName 'trusted' -NotePropertyValue $false
+        # round 3 item 11: the scheduler records 'warningSummary' (PIM-Scheduler.ps1 Write-PimJobRunRecord)
+        $out | Add-Member -NotePropertyName 'warningSummary' -NotePropertyValue ("active assignments partial: not read this time: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') + $carryTxt)
     }
-    $partialTxt = if ($errs.Count) { " PARTIAL -- could not read: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') } else { '' }
-    return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$c.total; partial = [bool]$snap.partial
-        detail = "$type`: $sum$partialTxt$ledTxt" }
+    return $out
 }
 
 function Update-PimActiveAssignmentsSnapshotMarks {
@@ -1964,6 +2456,35 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         $pv = $null
         if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains($pk)) { $pv = $Entry[$pk] } } elseif ($Entry.PSObject.Properties[$pk]) { $pv = $Entry.$pk }
         if ($null -ne $pv) { $view[$pk] = $(if ($pk -like '*Utc') { "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $pv)" } else { "$pv" }) }
+    }
+    # TRUST-1 gap 4 / point 7: the parts carried from the last complete read (with their read time), the parts not read with
+    # nothing to carry, and the sources this install does not have -- handed to the page and said in the hint.
+    $hf = { param($n) if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains($n)) { return $Entry[$n] }; return $null }; if ($Entry.PSObject.Properties[$n]) { return $Entry.$n }; return $null }
+    $cv = @(@(& $hf 'carried') | Where-Object { $null -ne $_ }); $mv = @(@(& $hf 'missing') | Where-Object { $null -ne $_ }); $uv = @(@(& $hf 'unknown') | Where-Object { $null -ne $_ })
+    if ($cv.Count) { $view['carried'] = $cv; $view['hint'] = "$($view['hint']); not read this time, shown from the last complete read: " + (@($cv | ForEach-Object { "$($_.surface) (read $(ConvertTo-PimActiveAssignmentsIsoStamp -Value $_.readUtc))" }) -join ', ') }
+    if ($mv.Count) { $view['missing'] = $mv; $view['hint'] = "$($view['hint']); not read this time and nothing earlier to show: " + (@($mv | ForEach-Object { "$($_.surface)" }) -join ', ') }
+    $sv = @(@(& $hf 'stale') | Where-Object { $null -ne $_ })
+    if ($sv.Count) { $view['stale'] = $sv; $view['hint'] = "$($view['hint']); NOT READ for more than $(Get-PimTrustCarryMaxAgeDays) days (a fix request is open), still shown from the last complete read: " + (@($sv | ForEach-Object { "$($_.surface) (since $(ConvertTo-PimActiveAssignmentsIsoStamp -Value $_.sinceUtc))" }) -join ', ') }
+    if ($uv.Count) { $view['unknown'] = $uv; $view['hint'] = "$($view['hint']); not part of this install: " + (@($uv | ForEach-Object { "$($_.surface) [$($_.code)]" }) -join ', ') }
+    # TRUST-1 gap 1: the latest read was NOT whole, so it was not stored as the snapshot (Save-PimActiveAssignmentsSnapshotFailure);
+    # the rows above are the last complete read. Said here -- lastRun* fields, the hint, and its surface errors when the kept
+    # read has none of its own (the page lists them whenever it has no rows to show) -- never by serving the partial rows.
+    $lr = $null
+    if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains('lastRun')) { $lr = $Entry['lastRun'] } } elseif ($Entry.PSObject.Properties['lastRun']) { $lr = $Entry.lastRun }
+    if ($null -ne $lr) {
+        $lrGet = { param($n) if ($lr -is [System.Collections.IDictionary]) { if ($lr.Contains($n)) { return $lr[$n] }; return $null }; if ($lr.PSObject.Properties[$n]) { return $lr.$n }; return $null }
+        $lrTrusted = & $lrGet 'trusted'
+        if ($null -ne $lrTrusted -and -not [bool]$lrTrusted) {
+            $lrUtc = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (& $lrGet 'utc'))"
+            $lrErrs = @(@(& $lrGet 'surfaceErrors') | Where-Object { $null -ne $_ })
+            $view['lastRunTrusted'] = $false
+            $view['lastRunUtc'] = $lrUtc
+            $view['lastRunError'] = "$(& $lrGet 'error')"
+            $view['lastRunSurfaceErrors'] = $lrErrs
+            if ($errs.Count -eq 0 -and $lrErrs.Count) { $view['surfaceErrors'] = $lrErrs }
+            $lrSurf = (@($lrErrs | ForEach-Object { "$($_.surface)" }) -join ', ')
+            $view['hint'] = "$($view['hint']); the latest read$(if ($lrUtc) { " ($lrUtc)" }) was not complete$(if ($lrSurf) { " (could not read: $lrSurf)" }) and was not stored$(if ($storedOk) { ' -- these rows are the last complete read' } else { ' -- no complete read is stored yet' })"
+        }
     }
     return $view
 }

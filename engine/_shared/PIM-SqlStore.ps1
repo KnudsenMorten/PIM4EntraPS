@@ -1217,6 +1217,53 @@ function Get-PimSqlTenantCache {
     return ($j | ConvertFrom-Json)
 }
 
+function Get-PimSqlTenantCacheDocStamp {
+    <#
+      TRUST-1 round 4 (items 1, 6, 12): one JSON value of a stored document (e.g. '$.refreshedUtc' of 'drift', '$.computedUtc'
+      of 'coverage-report'), read cheaply -- what a job saw when it STARTED, for the compare-and-set below. Returns
+      { exists; value } ('' when the row or the value is absent). Throws on a failed read.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][ValidatePattern('^\$\.[A-Za-z0-9_.]+$')][string]$Path)
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$Path') END, N'') AS v FROM pim.TenantCache WHERE Kind = @k" -Parameters @{ k = $Kind })
+    if ($rows.Count -eq 0) { return [pscustomobject]@{ exists = $false; value = '' } }
+    return [pscustomobject]@{ exists = $true; value = "$($rows[0].v)" }
+}
+
+function Set-PimSqlTenantCacheIfUnchanged {
+    <#
+      TRUST-1 round 4 item 1 (second guard): write one document ONLY over the one the run saw when it STARTED -- no row then
+      (-StartExists $false) = only while there is still none; else only while its -Path value is still -StartValue. A newer
+      document another run stored meanwhile is never overwritten. One conditional statement. Returns the rows written (0 = newer).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$ValueJson,
+          [Parameter(Mandatory)][ValidatePattern('^\$\.[A-Za-z0-9_.]+$')][string]$Path, [bool]$StartExists = $false, [AllowEmptyString()][string]$StartValue = '',
+          [datetime]$RefreshedUtc = [datetime]::UtcNow)
+    $sql = @"
+IF @existed = 0
+    INSERT INTO pim.TenantCache (Kind, ValueJson, RefreshedUtc, UpdatedUtc) SELECT @k, @v, @r, SYSUTCDATETIME() WHERE NOT EXISTS (SELECT 1 FROM pim.TenantCache WITH (UPDLOCK, HOLDLOCK) WHERE Kind = @k);   -- round 5 G11: two "no row" writers serialise; the loser inserts 0 rows (= newer kept), never a key violation
+ELSE
+    UPDATE pim.TenantCache SET ValueJson = @v, RefreshedUtc = @r, UpdatedUtc = SYSUTCDATETIME()
+    WHERE Kind = @k AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$Path') END, N'') = @e;
+"@
+    return [int](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ k = $Kind; v = $ValueJson; r = $RefreshedUtc.ToUniversalTime(); existed = [int][bool]$StartExists; e = "$StartValue" } -CommandTimeoutSec 180)
+}
+
+function Set-PimSqlTenantCacheLastRun {
+    <#
+      TRUST-1 round 4 items 6 + 12: a run whose result is NOT stored (every area / source failed, or the previous document could
+      not be read) writes its outcome onto the stored document as 'lastRun' (JSON_MODIFY) -- the rest of the document, its
+      "as of" and the RefreshedUtc column untouched; UpdatedUtc moves -- and only onto the document the run STARTED with
+      (-Path value = -StartValue). Returns the rows marked.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$LastRunJson,
+          [Parameter(Mandatory)][ValidatePattern('^\$\.[A-Za-z0-9_.]+$')][string]$Path, [AllowEmptyString()][string]$StartValue = '')
+    $sql = @"
+UPDATE pim.TenantCache SET ValueJson = JSON_MODIFY(ValueJson, '$.lastRun', JSON_QUERY(@lr)), UpdatedUtc = SYSUTCDATETIME()
+WHERE Kind = @k AND ISJSON(ValueJson) = 1 AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$Path') END, N'') = @e;
+"@
+    return [int](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ k = $Kind; lr = $LastRunJson; e = "$StartValue" } -CommandTimeoutSec 180)
+}
+
 function Get-PimSqlTenantCacheStamps {
     # REQ 100.112: WHEN each kind was last written -- Kind + RefreshedUtc only, NEVER the document (one kind's document can
     # be tens of MB, and reading it is what made a "is there a snapshot?" question cost 25 s). Returns a hashtable
@@ -1574,6 +1621,11 @@ BEGIN
     DECLARE @msg NVARCHAR(300) = CONCAT(N'active-assignment rows incomplete: ', @have, N' of ', @n, N' stored for generation ', @s, N' -- the previous snapshot stays in place');
     THROW 51114, @msg, 1;
 END
+IF EXISTS (SELECT 1 FROM pim.TenantCache WHERE Kind = @k AND TRY_CAST(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.snapshotId') END AS bigint) > @s)
+BEGIN
+    ROLLBACK;
+    THROW 51115, N'a newer active-assignments snapshot was stored while this run read the tenant -- it is left as it is', 1;
+END
 UPDATE pim.ActiveAssignmentSnapshots SET State = N'complete', CompletedUtc = SYSUTCDATETIME(), RowsExpected = @n WHERE SnapshotId = @s;
 MERGE pim.TenantCache AS t USING (SELECT @k AS Kind) AS src ON t.Kind = src.Kind
 WHEN MATCHED THEN UPDATE SET ValueJson = @v, RefreshedUtc = @r, UpdatedUtc = SYSUTCDATETIME()
@@ -1581,6 +1633,90 @@ WHEN NOT MATCHED THEN INSERT (Kind, ValueJson, RefreshedUtc, UpdatedUtc) VALUES 
 COMMIT;
 '@
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ s = $SnapshotId; n = $ExpectedRows; k = 'active-assignments'; v = $HeaderJson; r = $RefreshedUtc.ToUniversalTime() } -CommandTimeoutSec (Get-PimActiveAssignmentRowsCommandTimeoutSec))
+}
+
+function Get-PimSqlActiveAssignmentsHeaderStamp {
+    <#
+      TRUST-1 (review findings 5 + round 3 item 5): the stored header, read CHEAPLY in BOTH store forms (a table header or a
+      one-document snapshot -- JSON values only, never the rows): which generation it names and when it was read (taken at the
+      START of a snapshot run, so a failing run never overwrites a header a newer run wrote meanwhile), and what the previous
+      read had of each part -- the per-part read times, azureRows, the per-type counts, the parts it already called stale --
+      so "was this part read before?" is answered for either form, and for a header written before the per-part times.
+      Returns { exists; snapshotId; refreshedUtc; entraReadUtc; azureReadUtc; groupsReadUtc; appPermissionsReadUtc; azureRows;
+      counts { entra-role; azure-rbac; pim-for-groups; app-permission }; staleJson }. A key the header lacks = $null. Throws on
+      a failed read (the caller then treats every failed surface as failed THIS time, never as absent).
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $j = { param($path) "CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$path') END" }
+    # TRUST-1 round 5 G1: a key with a dash is quoted ONCE in the JSON path ($.counts."entra-role"). Built from [char]34 so no
+    # doubled quote can reach SQL (doubled quotes inside a single-quoted literal are two characters, and JSON_VALUE then
+    # returned NULL for every count -- every previous count read as "never read").
+    $q = [char]34
+    $pE = '$.counts.' + $q + 'entra-role' + $q; $pA = '$.counts.' + $q + 'azure-rbac' + $q
+    $pG = '$.counts.' + $q + 'pim-for-groups' + $q; $pP = '$.counts.' + $q + 'app-permission' + $q
+    $sql = "SELECT ISNULL($(& $j '$.snapshotId'), N'') AS sid, ISNULL($(& $j '$.refreshedUtc'), N'') AS ref, $(& $j '$.entraReadUtc') AS e, $(& $j '$.azureReadUtc') AS a, " +
+           "$(& $j '$.groupsReadUtc') AS g, $(& $j '$.appPermissionsReadUtc') AS ap, $(& $j '$.azureRows') AS azr, $(& $j $pE) AS ce, " +
+           "$(& $j $pA) AS ca, $(& $j $pG) AS cg, $(& $j $pP) AS cp, " +
+           "CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_QUERY(ValueJson, '$.stale') END AS st, $(& $j '$.lastRun.trusted') AS lt, " +
+           "CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_QUERY(ValueJson, '$.lastRun.stale') END AS lst, CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_QUERY(ValueJson, '$.partsAbsent') END AS pa, " +
+           "CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_QUERY(ValueJson, '$.carried') END AS cj, CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_QUERY(ValueJson, '$.lastRun.surfaceErrors') END AS lse FROM pim.TenantCache WHERE Kind = @k"
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ k = 'active-assignments' })
+    if ($rows.Count -eq 0) { return [pscustomobject]@{ exists = $false; snapshotId = ''; refreshedUtc = ''; entraReadUtc = $null; azureReadUtc = $null; groupsReadUtc = $null; appPermissionsReadUtc = $null; azureRows = $null; counts = $null; staleJson = ''; lastRunTrusted = ''; lastRunStaleJson = ''; partsAbsentJson = ''; carriedJson = ''; lastRunFailedJson = '' } }
+    $r = $rows[0]
+    $tx = { param($v) if ($null -eq $v -or $v -is [System.DBNull]) { '' } else { "$v" } }
+    return [pscustomobject]@{ exists = $true; snapshotId = "$($r.sid)"; refreshedUtc = "$($r.ref)"; entraReadUtc = $r.e; azureReadUtc = $r.a; groupsReadUtc = $r.g; appPermissionsReadUtc = $r.ap
+        azureRows = $r.azr; counts = [pscustomobject]@{ 'entra-role' = $r.ce; 'azure-rbac' = $r.ca; 'pim-for-groups' = $r.cg; 'app-permission' = $r.cp }; staleJson = (& $tx $r.st)
+        # round 5 G2 / G3: the newest run's outcome on the KEPT header (lastRun.trusted, the parts it named stale) + the absent parts
+        lastRunTrusted = (& $tx $r.lt); lastRunStaleJson = (& $tx $r.lst); partsAbsentJson = (& $tx $r.pa)
+        # round 6 F1: the header's carried list (a PIM-for-Groups subset names each carried group's own read time, groupsFrom)
+        carriedJson = (& $tx $r.cj)
+        # round 6 F3: the surfaces the newest (failed) run could not read -- refused for every action at once
+        lastRunFailedJson = (& $tx $r.lse) }
+}
+function Set-PimSqlActiveAssignmentsLastRun {
+    <#
+      TRUST-1 gap 1: a snapshot run where EVERY surface that should be read failed never becomes the snapshot. Its outcome is
+      written onto the STORED header as 'lastRun' (JSON_MODIFY): the header keeps naming the same generation; its rows,
+      counts and refreshedUtc are untouched, and so is the row's RefreshedUtc column ("as of"). UpdatedUtc moves, so the
+      Manager's change stamp (Get-PimTenantCacheChangeStamp) sees the new lastRun (review finding 4). Only a header worth
+      keeping is marked (a table-form header, or a one-document snapshot that was itself whole), and ONLY the header the run
+      saw when it STARTED (-StartSnapshotId / -StartRefreshedUtc, Get-PimSqlActiveAssignmentsHeaderStamp): a header a newer
+      run wrote meanwhile is never touched (review finding 5) -- one conditional statement. Returns the rows marked.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$LastRunJson,
+          [AllowEmptyString()][string]$StartSnapshotId = '', [AllowEmptyString()][string]$StartRefreshedUtc = '')
+    $sql = @'
+UPDATE pim.TenantCache
+SET ValueJson = JSON_MODIFY(ValueJson, '$.lastRun', JSON_QUERY(@lr)), UpdatedUtc = SYSUTCDATETIME()
+WHERE Kind = @k
+  AND ISJSON(ValueJson) = 1
+  AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.snapshotId') END, N'') = @sid
+  AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.refreshedUtc') END, N'') = @ref
+  AND (LEFT(ValueJson, 40) LIKE N'{"rowStore":"table"%'
+       OR (ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.ok') END, N'') = N'true'
+           AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.partial') END, N'false') = N'false'));
+'@
+    return [int](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ k = 'active-assignments'; lr = $LastRunJson; sid = "$StartSnapshotId"; ref = "$StartRefreshedUtc" } -CommandTimeoutSec (Get-PimActiveAssignmentRowsCommandTimeoutSec))
+}
+
+function Set-PimSqlActiveAssignmentsFailureDocument {
+    <#
+      TRUST-1 gap 1: a NEW install whose first read failed on every surface stores the failure itself (no rows) so the Revoke
+      tab shows the actionable hint -- but only over what the run saw when it STARTED: no row at all (-StartExists $false),
+      or a one-document entry with the same refreshedUtc. A snapshot a newer run wrote meanwhile is never replaced (review
+      finding 5). Returns the rows written.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$ValueJson, [bool]$StartExists = $false,
+          [AllowEmptyString()][string]$StartRefreshedUtc = '', [datetime]$RefreshedUtc = [datetime]::UtcNow)
+    $sql = @'
+IF @existed = 0
+    INSERT INTO pim.TenantCache (Kind, ValueJson, RefreshedUtc, UpdatedUtc) SELECT @k, @v, @r, SYSUTCDATETIME() WHERE NOT EXISTS (SELECT 1 FROM pim.TenantCache WITH (UPDLOCK, HOLDLOCK) WHERE Kind = @k);   -- round 5 G11: two "no row" writers serialise; the loser inserts 0 rows (= newer kept), never a key violation
+ELSE
+    UPDATE pim.TenantCache SET ValueJson = @v, RefreshedUtc = @r, UpdatedUtc = SYSUTCDATETIME()
+    WHERE Kind = @k AND LEFT(ValueJson, 40) NOT LIKE N'{"rowStore":"table"%'
+      AND ISNULL(CASE WHEN ISJSON(ValueJson) = 1 THEN JSON_VALUE(ValueJson, '$.refreshedUtc') END, N'') = @ref;
+'@
+    return [int](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ k = 'active-assignments'; v = $ValueJson; r = $RefreshedUtc.ToUniversalTime(); existed = [int][bool]$StartExists; ref = "$StartRefreshedUtc" } -CommandTimeoutSec 180)
 }
 
 function Get-PimSqlActiveAssignmentRowsJson {

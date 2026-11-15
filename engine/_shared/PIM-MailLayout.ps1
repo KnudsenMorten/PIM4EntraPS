@@ -730,7 +730,9 @@ function New-PimEventMail {
 # still gets a whole mail (Who acts "Not known", Status "Warning", the problem = its title).
 # =====================================================================================================================
 $script:PimAlertWhoValues     = @('Customer', 'PIM Manager team', 'Not known')
-$script:PimAlertStatusValues  = @('Error', 'Warning', 'Held back', "Needs customer's action")
+# MAIL-SEV-1 (owner 2026-11-14 "It is information. Not warning. Change type"): 'Information' = nothing failed and nobody
+# has to act (new items found, coverage gaps, orphan groups, counts, notices) -- no severity word, "No action is needed".
+$script:PimAlertStatusValues  = @('Error', 'Warning', 'Held back', "Needs customer's action", 'Information')
 # Literals behind functions, never $script: values: a $script: default is $null when this file was loaded once and one of its
 # functions is called from a child script (BUG-79-6b) -- the mail would carry an empty support address.
 function Get-PimAlertSupportMail   { 'support@invardia.com' }
@@ -788,11 +790,13 @@ function Resolve-PimAlertWho {
 }
 
 function Resolve-PimAlertStatus {
-    # One of Error / Warning / Held back / Needs customer's action. Anything else is "Warning". A LABEL in the mail only:
-    # it never changes what a guard blocks, holds or asks approval for.
+    # One of Error / Warning / Held back / Needs customer's action / Information ('info' too). Anything else is "Warning".
+    # A LABEL in the mail only: it never changes what a guard blocks, holds or asks approval for.
     param([AllowNull()][string]$Value)
     $v = "$Value".Trim()
-    foreach ($k in $script:PimAlertStatusValues) { if ($v -ieq $k) { return $k } }
+    if ($v -ieq 'info') { return 'Information' }
+    # literals, never only the $script: list (BUG-79-6b: a $script: value is $null when a function runs from a child script)
+    foreach ($k in @('Error', 'Warning', 'Held back', "Needs customer's action", 'Information')) { if ($v -ieq $k) { return $k } }
     return 'Warning'
 }
 
@@ -869,6 +873,7 @@ function Get-PimAlertMailKind {
         'Held back' { return 'guard' }
         'Error'     { return 'failure' }
         "Needs customer's action" { return 'action' }
+        'Information' { return 'info' }   # MAIL-SEV-1: the sender says nobody acts -- never turned into a decision by its page
     }
     if ("$Tab" -eq 'approvals') { return 'action' }
     return 'info'
@@ -954,10 +959,11 @@ function Get-PimAlertMailModel {
     }
     $deadline = ConvertTo-PimAlertOneLine (& $get 'AlertDeadline')
     if ($kind -eq 'action') { $subjWhat = $subjWhat + $(if ($deadline) { ' - decide by ' + $deadline } else { ' - it waits for your decision' }) }
-    # MAIL-3 (framework §12.11a): the subject's severity word. A failure = Failed; a held change or a decision = Action
-    # needed; any other alert = Warning (drift, gaps, expiring, throttled) -- except a test mail, which is information.
+    # MAIL-3 (framework §12.11a) + MAIL-SEV-1 (owner 2026-11-14): the subject's severity word from THE ONE rule
+    # (Get-PimAlertEventSeverity): Failed = it failed AND the customer acts; Action needed = the customer decides; Warning =
+    # the customer must act soon; no word = information (new items, gaps, orphans, counts, notices, a test mail).
     # AlertSeverity overrides it ('none' = no word).
-    $severity = switch ($kind) { 'failure' { 'failure' } 'guard' { 'action' } 'action' { 'action' } default { 'warning' } }
+    $severity = Get-PimAlertEventSeverity -Event $evt -Kind $kind -Status $status -Who $who
     if ($evt -eq 'mail-test' -or "$rawTitle" -match '(?i)\btest (mail|alert)\b') { $severity = '' }
     $sevTok = (& $get 'AlertSeverity').Trim()
     if ($sevTok) { $severity = if ($sevTok -ieq 'none') { '' } else { $sevTok } }
@@ -1019,7 +1025,13 @@ function Get-PimAlertMailModel {
             $summary = $s.ToArray() -join ' '
         }
     } else {
-        if (-not $summary) { $summary = $problem + '.' + $(if ($todo) { ' ' + $todo + '.' } else { '' }) }
+        if (-not $summary) {
+            if (-not $severity) {
+                # MAIL-SEV-1: an INFORMATION mail says so -- nothing to do; what can be done is offered "when it suits you"
+                $summary = $problem + '. No action is needed.'
+                if ($todo -and $todo -notmatch '^(?i)(nothing|no action)\b') { $summary += ' When it suits you: ' + $todo.Substring(0, 1).ToLowerInvariant() + $todo.Substring(1) + '.' }
+            } else { $summary = $problem + '.' + $(if ($todo) { ' ' + $todo + '.' } else { '' }) }
+        }
     }
 
     # ---- facts (an empty value is left out by the builder) ----
@@ -1151,7 +1163,7 @@ function Get-PimMailTypeInfo {
         'ad-password-delivery'   { return @{ topic = 'New on-premises admin account'; summary = 'This mail carries the first password of a new on-premises admin account. Nothing else was changed. Please hand it to the admin safely and delete this mail afterwards.'; label = '' } }
         'approval-request'       { return @{ topic = 'Approval needed'; summary = 'A delegation waits for your approval. Nothing is granted until you decide. Approve or deny it in PIM Manager with the button below; a reply to this mail does not decide it.'; label = 'Review and approve' } }
         'approval-escalation'    { return @{ topic = 'Approval needed'; summary = 'A delegation waits for your approval: the first approver did not decide in time, so it has come to you. Nothing is granted until you decide. Approve or deny it in PIM Manager with the button below; a reply to this mail does not decide it.'; label = 'Review and approve' } }
-        'discovery-notice'       { return @{ topic = 'Discovery'; summary = 'Discovery found new items that PIM Manager does not manage yet. Nothing was changed. Please review them when it suits you.'; label = 'Open Discovery and gaps' } }
+        'discovery-notice'       { return @{ topic = 'Discovery'; summary = 'For your information: Discovery found new items that PIM Manager does not manage yet. No action is needed. You can look at them in Discovery and gaps whenever it suits you.'; label = 'Open Discovery and gaps' } }
         'emergency-override'     { return @{ topic = 'Emergency override'; summary = 'An emergency override is active on a group, so approval is switched off for it until the override ends. Nothing else was changed. Please check that it was expected.'; label = 'Open in PIM Manager' } }
         'new-admin'              { return @{ topic = 'Welcome'; summary = 'A new admin account was created. Its sign-in details follow in a separate mail; there is nothing else to do.'; label = 'Open in PIM Manager' } }
         'new-permission'         { return @{ topic = 'Permission change'; summary = 'A permission of a group changed. This is for your information; you do not need to do anything unless you did not expect it.'; label = 'Open in PIM Manager' } }
@@ -1181,11 +1193,103 @@ function Get-PimMailTypeSeverity {
         'approval-escalation'      { return 'Action needed' }
         'get-started-reminder'     { return 'Action needed' }
         'pending-actions-reminder' { return 'Action needed' }
-        'discovery-notice'         { return 'Warning' }
         'emergency-override'       { return 'Warning' }
         'update-outcome'           { return (Get-PimMailSeverityWord "$($tk['Outcome'])") }
     }
     return ''
+}
+
+# =====================================================================================================================
+# MAIL-SEV-1 (owner 2026-11-14, SUP-2026-00581: "It is information. Not warning. Change type"; customers forwarded
+# "Warning:" mails thinking something was broken). ONE severity rule for EVERY PIM mail -- template mails and alert mails:
+#   Error (subject word "Failed")  = something failed AND the customer must act
+#   Warning ("Warning" / "Action needed") = the customer must act soon / decide
+#   Information (no word)          = everything else: new items found, coverage gaps, orphan groups, counts, notices.
+#                                    The body says "No action is needed".
+# Get-PimMailSeverityCatalog lists EVERY kind with its class; tests\Test-PimMailSeverity.ps1 fails on a kind without one.
+# =====================================================================================================================
+function Get-PimAlertEventClass {
+    <#
+      PURE. The class of an alert EVENT when its sender passed no deciding status (kind 'info'): 'information' or
+      'warning'. An unknown event is 'warning' (never silently information). Literals in a function (BUG-79-6b).
+    #>
+    param([AllowNull()][string]$Event)
+    switch ("$Event".Trim().ToLowerInvariant()) {
+        'coverage'          { return 'information' }   # new gaps ("item is not delegated yet"), orphan groups, unmanaged bindings
+        'target-missing'    { return 'information' }   # a delegation points at something gone; nothing was changed
+        'autoextend-report' { return 'information' }   # permissions that will be extended by themselves
+        'sessions-revoked'  { return 'information' }   # a notice: a revoke someone asked for is queued
+        'mail-test'         { return 'information' }   # a test mail
+        'drift'             { return 'warning' }       # the tenant differs from the definitions: decide Apply / Ignore
+        'expiring-access'   { return 'warning' }       # access ends soon
+        'break-glass'       { return 'warning' }       # the emergency override is in use
+        'engine-failure'    { return 'warning' }       # a run problem that is not itself a failure (throttled streak)
+    }
+    return 'warning'
+}
+
+function Get-PimAlertEventSeverity {
+    <#
+      PURE. MAIL-SEV-1: the severity of ONE alert mail ('failure' / 'action' / 'warning' / '' = information; the subject word
+      comes from Get-PimMailSeverityWord). -Kind = Get-PimAlertMailKind; -Status / -Who = Resolve-PimAlertStatus / -Who.
+        failure  -> 'failure' (Failed); information when PIM support handles it (-Who 'PIM Manager team': the customer does not act)
+        guard    -> 'action'; information when PIM support handles it
+        action   -> 'action'
+        info     -> -Status 'Information' = information; otherwise the event's class (Get-PimAlertEventClass)
+    #>
+    param([AllowNull()][string]$Event = '', [AllowNull()][string]$Kind = 'info', [AllowNull()][string]$Status = '', [AllowNull()][string]$Who = '')
+    $team = ("$Who".Trim() -ieq 'PIM Manager team')
+    switch ("$Kind") {
+        'failure' { if ($team) { return '' }; return 'failure' }
+        'guard'   { if ($team) { return '' }; return 'action' }
+        'action'  { return 'action' }
+    }
+    if ("$Status".Trim() -ieq 'Information') { return '' }
+    if ((Get-PimAlertEventClass -Event $Event) -eq 'information') { return '' }
+    return 'warning'
+}
+
+function Get-PimMailSeverityCatalog {
+    <#
+      PURE. MAIL-SEV-1: EVERY PIM mail kind with its severity -- source 'template' (templates\mail\<kind>.mailtemplate.html)
+      or 'alert' (the AlertEvent of an alert-notice mail). Each @{ kind; source; severity; old; rule }:
+        severity = what the subject says now: 'Failed' | 'Warning' | 'Action needed' | 'Information' | 'By ...' (decided per
+                   mail, the rule says how); old = what it said before 3.1.26. The owner reads this list.
+    #>
+    @(
+        # ---- template mails (Get-PimMailTypeSeverity) ----
+        [pscustomobject]@{ kind = 'access-review-reminder';   source = 'template'; severity = 'Action needed'; old = 'Action needed'; rule = 'the reviewer must decide before the review closes' }
+        [pscustomobject]@{ kind = 'ad-password-delivery';     source = 'template'; severity = 'Information';   old = 'Information';   rule = 'carries a first password; no severity word on a credential mail' }
+        [pscustomobject]@{ kind = 'alert-notice';             source = 'template'; severity = 'By alert';      old = 'By alert';      rule = 'the alert mail: its event and status decide (the alert rows below)' }
+        [pscustomobject]@{ kind = 'approval-escalation';      source = 'template'; severity = 'Action needed'; old = 'Action needed'; rule = 'an approver must decide' }
+        [pscustomobject]@{ kind = 'approval-request';         source = 'template'; severity = 'Action needed'; old = 'Action needed'; rule = 'an approver must decide' }
+        [pscustomobject]@{ kind = 'daily-summary';            source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a report' }
+        [pscustomobject]@{ kind = 'discovery-notice';         source = 'template'; severity = 'Information';   old = 'Warning';       rule = 'new items found; nothing was changed, no action is needed' }
+        [pscustomobject]@{ kind = 'emergency-override';       source = 'template'; severity = 'Warning';       old = 'Warning';       rule = 'approval is switched off on a group: check soon that it was expected' }
+        [pscustomobject]@{ kind = 'get-started-reminder';     source = 'template'; severity = 'Action needed'; old = 'Action needed'; rule = 'a required setup step is open' }
+        [pscustomobject]@{ kind = 'management-report';        source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a report' }
+        [pscustomobject]@{ kind = 'new-admin';                source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a notice' }
+        [pscustomobject]@{ kind = 'new-permission';           source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a notice' }
+        [pscustomobject]@{ kind = 'new-role';                 source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a notice' }
+        [pscustomobject]@{ kind = 'offboarding-notice';       source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a notice' }
+        [pscustomobject]@{ kind = 'pending-actions-reminder'; source = 'template'; severity = 'Action needed'; old = 'Action needed'; rule = 'something waits on the reader' }
+        [pscustomobject]@{ kind = 'rfa-notice';               source = 'template'; severity = 'By sender';     old = 'By sender';     rule = 'Action needed when it asks someone to decide (MailSeverity action), else Information' }
+        [pscustomobject]@{ kind = 'tap-delivery';             source = 'template'; severity = 'Information';   old = 'Information';   rule = 'carries a Temporary Access Pass; no severity word on a credential mail' }
+        [pscustomobject]@{ kind = 'tier-report';              source = 'template'; severity = 'Information';   old = 'Information';   rule = 'a report' }
+        [pscustomobject]@{ kind = 'update-outcome';           source = 'template'; severity = 'By outcome';    old = 'By outcome';    rule = 'failure = Failed, rolled back = Warning, success = Information' }
+        # ---- alert mails (alert-notice, by AlertEvent; Get-PimAlertEventSeverity) ----
+        [pscustomobject]@{ kind = 'engine-failure';      source = 'alert'; severity = 'By status';     old = 'By status';     rule = 'a failed run = Failed; a held change (safety check) = Action needed; a run problem = Warning; Information when PIM support handles it (who acts = PIM Manager team)' }
+        [pscustomobject]@{ kind = 'drift';               source = 'alert'; severity = 'Warning';       old = 'Warning';       rule = 'the tenant differs from the definitions: Apply or Ignore' }
+        [pscustomobject]@{ kind = 'expiring-access';     source = 'alert'; severity = 'Action needed'; old = 'Action needed'; rule = 'access ends soon: extend what is still needed (the auto-extension list is Information: old Warning)' }
+        [pscustomobject]@{ kind = 'break-glass';         source = 'alert'; severity = 'Action needed'; old = 'Action needed'; rule = 'the emergency override was switched on: check it and switch it off' }
+        [pscustomobject]@{ kind = 'coverage';            source = 'alert'; severity = 'Information';   old = 'Warning';       rule = 'new gaps ("not delegated yet"), orphan groups, unmanaged bindings: no action is needed (a department without an owner or a review nobody answered asks the customer to act = Action needed)' }
+        [pscustomobject]@{ kind = 'target-missing';      source = 'alert'; severity = 'Information';   old = 'Warning';       rule = 'a delegation points at something gone; nothing was changed' }
+        [pscustomobject]@{ kind = 'pending-uncommitted'; source = 'alert'; severity = 'Action needed'; old = 'Action needed'; rule = 'changes wait to be committed or discarded' }
+        [pscustomobject]@{ kind = 'sessions-revoked';    source = 'alert'; severity = 'Information';   old = 'Warning';       rule = 'a notice: the revoke someone asked for is queued' }
+        [pscustomobject]@{ kind = 'owner-review';        source = 'alert'; severity = 'Action needed'; old = 'Action needed'; rule = 'the owner confirms their people' }
+        [pscustomobject]@{ kind = 'autoextend-report';   source = 'alert'; severity = 'Information';   old = 'Warning';       rule = 'permissions will be extended by themselves; nothing to do' }
+        [pscustomobject]@{ kind = 'mail-test';           source = 'alert'; severity = 'Information';   old = 'Information';   rule = 'a test mail' }
+    )
 }
 
 function New-PimFramedMail {

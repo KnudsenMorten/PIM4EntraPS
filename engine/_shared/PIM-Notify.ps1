@@ -461,7 +461,7 @@ function Invoke-PimMailEngineTest {
                 AlertDetail = 'This test mail was sent by the PIM engine job as its own identity, because Send test mail was pressed in Get Started / Settings > Mail & alerting. It proves that the engine can send TAP codes, reminders and alerts.'
                 AlertHeadline = 'Mail from the PIM engine works.'; AlertAction = 'Nothing to do -- this was a test.'
                 # PIM 100.105: who acts / status / problem / what to do (a test: the product works, nobody has to act)
-                AlertWho = 'Customer'; AlertStatus = 'Warning'; AlertProblem = 'This is a test mail: the PIM Manager engine can send mail'; AlertTodo = 'Nothing to do, this was a test'
+                AlertWho = 'Customer'; AlertStatus = 'Information'; AlertProblem = 'This is a test mail: the PIM Manager engine can send mail'; AlertTodo = 'Nothing to do, this was a test'
                 WhenUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
         } catch { $r = @{ sent = $false; reason = "$($_.Exception.Message)" } }
         finally { $global:PIM_MailProofRole = $prevRole }
@@ -469,10 +469,74 @@ function Invoke-PimMailEngineTest {
         $one = "$($r.reason)" -replace "[\r\n]+", ' '; if ($one.Length -gt 300) { $one = $one.Substring(0, 300) }
         $rec['status'] = $(if ($ok) { 'sent' } else { 'failed' }); $rec['at'] = (Get-Date).ToUniversalTime().ToString('o'); $rec['reason'] = $(if ($ok) { '' } else { $one })
         try { & $Writer 'MailEngineTest' $rec } catch { Write-Warning "  [Mail] the engine test mail result could not be recorded: $($_.Exception.Message)" }
+        # SECURE-WEB-1 (3.1.26): the web app no longer sends a test mail of its own, so THIS send is the test-mail proof the
+        # Get Started step reads (pim.Settings 'MailLastTest', against the settings it was sent with) -- and, for an SMTP relay
+        # with a sign-in, the engine reads the relay password from Key Vault as ITS identity (the web reads no secret) and
+        # records only whether it could (pim.Settings 'MailSmtpPasswordCheck'; the value is never kept).
+        try { Save-PimMailEngineTestProof -Ok $ok -Reason $(if ($ok) { '' } else { $one }) -To "$($rec['to'])" -Reader $Reader -Writer $Writer -NowUtc $NowUtc } catch { Write-Warning "  [Mail] the test-mail proof could not be recorded: $($_.Exception.Message)" }
         return @{ ran = $true; sent = $ok; detail = $(if ($ok) { "engine test mail sent to $($rec['to'])" } else { "engine test mail NOT sent: $one" }) }
     } catch {
         return @{ ran = $false; sent = $false; detail = "the engine test mail failed: $($_.Exception.Message)" }
     }
+}
+
+function Save-PimMailEngineTestProof {
+    <#
+      SECURE-WEB-1 (3.1.26). After the engine's test mail: record the proof the Get Started step reads -- pim.Settings
+      'MailLastTest' @{ ok; fingerprint; mode; at; reason; to; by = 'engine' } against the CURRENT settings
+      (Get-PimMailTestFingerprint) -- and, for an SMTP relay with a user name, 'MailSmtpPasswordCheck' @{ readable; reason;
+      vaultName; secretName; at }: whether THIS process (the engine identity) can read the relay password. The value is
+      discarded at once and never written anywhere. -Reader / -Writer as Invoke-PimMailEngineTest. Never throws.
+    #>
+    param([bool]$Ok, [string]$Reason = '', [string]$To = '', [scriptblock]$Reader, [scriptblock]$Writer, [datetime]$NowUtc = [datetime]::UtcNow,
+          # test seam: param($Config) -> the password ('' = none); default Get-PimSmtpRelayPassword
+          [scriptblock]$PasswordReader)
+    try {
+        if (-not $Reader -or -not $Writer) { return }
+        if (-not (Get-Command Get-PimMailTestFingerprint -ErrorAction SilentlyContinue)) { return }
+        $val = { param($n) $v = $null; try { $v = & $Reader $n } catch { $v = $null }; if ($v -is [string]) { $t = "$v".Trim(); if ($t.StartsWith('{')) { try { $v = $t | ConvertFrom-Json } catch { } } else { $v = $t.Trim('"') } }; $v }
+        $mode = ConvertTo-PimMailMode -Value (& $val 'MailMode'); $sender = "$(& $val 'MailSender')".Trim()
+        if (-not $mode) { $mode = 'sharedMailbox' }   # the same default Get-PimMailSetupState reads the proof with
+        $relay = ConvertTo-PimSmtpRelayConfig -Value (& $val 'SmtpRelay')
+        $fp = Get-PimMailTestFingerprint -Mode $mode -Sender $sender -Smtp $relay.config
+        $at = $NowUtc.ToUniversalTime().ToString('o')
+        & $Writer 'MailLastTest' ([ordered]@{ ok = [bool]$Ok; fingerprint = $fp; mode = $mode; at = $at; reason = "$Reason"; to = "$To"; by = 'engine' })
+        if ($mode -eq 'smtp' -and $relay.ok -and "$($relay.config.username)".Trim()) {
+            $pc = [ordered]@{ readable = $false; reason = ''; vaultName = "$($relay.config.vaultName)"; secretName = "$($relay.config.secretName)"; at = $at }
+            try {
+                $__smtpSecret = if ($PasswordReader) { "$(& $PasswordReader $relay.config)" } else { "$(Get-PimSmtpRelayPassword -Config $relay.config)" }
+                $pc.readable = [bool]$__smtpSecret; if (-not $__smtpSecret) { $pc.reason = 'the secret is empty' }
+                $__smtpSecret = $null
+            } catch { $pc.reason = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
+            & $Writer 'MailSmtpPasswordCheck' $pc
+        }
+    } catch { Write-Warning "  [Mail] the engine test-mail proof was not recorded: $($_.Exception.Message)" }
+}
+
+function Get-PimNotifyCredentialMailTypes {
+    # The mail kinds that carry a credential (a TAP, a first password). They are only ever sent by the engine itself, never
+    # handed through a queue (a queue entry is stored and audited -- a credential must never be).
+    @('tap-delivery', 'ad-password-delivery')
+}
+
+function New-PimNotifyMailAction {
+    <#
+      PURE. SECURE-WEB-1 (3.1.26): the payload of ONE queued notify request the web app hands to the engine (pim.ChangeQueue,
+      Kind Action, type 'notify-mail'; the engine sends it through Invoke-PimQueueNotifyMail, PIM-QueueActions.ps1):
+      @{ type = 'notify-mail'; mailType; tokens; recipients; attachments; event; raisedBy; raisedUtc }. -Attachments
+      @{ name; contentType; bytes } travel as base64. Throws on a credential mail kind or no recipient (nothing is queued).
+    #>
+    param([Parameter(Mandatory)][string]$MailType, [hashtable]$Tokens = @{}, [string[]]$Recipients = @(), [object[]]$Attachments = @(),
+          [string]$Event = '', [string]$RaisedBy = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    if ((Get-PimNotifyCredentialMailTypes) -contains "$MailType") { throw "a '$MailType' mail carries a credential and is sent only by the engine itself -- it is never queued" }
+    $to = @(@($Recipients) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if (-not $to.Count) { throw 'no recipient -- nothing to queue' }
+    $tk = [ordered]@{}; if ($Tokens) { foreach ($k in @($Tokens.Keys)) { $tk["$k"] = $Tokens[$k] } }
+    $att = @(@($Attachments) | Where-Object { $_ } | ForEach-Object {
+        $b = $null; if ($_ -is [System.Collections.IDictionary]) { $b = $_['bytes'] } elseif ($_.PSObject.Properties['bytes']) { $b = $_.bytes }
+        @{ name = "$($_.name)"; contentType = "$($_.contentType)"; base64 = $(if ($b) { [Convert]::ToBase64String([byte[]]$b) } else { '' }) } })
+    return [ordered]@{ type = 'notify-mail'; mailType = "$MailType"; tokens = $tk; recipients = $to; attachments = $att
+                       event = "$Event"; raisedBy = "$RaisedBy"; raisedUtc = $NowUtc.ToUniversalTime().ToString('o') }
 }
 
 function Send-PimNotifyMail {
@@ -499,6 +563,18 @@ function Send-PimNotifyMail {
     if ($global:PIM_MailKillSwitch) { return @{ sent = $false; recipient = $rcpt; reason = 'email kill switch on' } }
     if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'alerting.email' -Quiet)) {
         return @{ sent = $false; recipient = $rcpt; reason = 'email feature disabled' }
+    }
+    # SECURE-WEB-1 (3.1.26): the internet-facing web app (PIM Manager) sends NO mail itself -- its identity holds no
+    # Exchange send right. It sets $global:PIM_NotifyMailQueue; a real send in that process is handed to it (a queued notify
+    # request the ENGINE sends at its next run, through this same function). A preview (-WhatIf) still renders. A mail that
+    # carries a credential is never queued (a queue entry is stored and audited): refused, nothing is sent.
+    if ($global:PIM_NotifyMailQueue -is [scriptblock] -and -not $WhatIf -and -not $global:WhatIfMode) {
+        if ((Get-PimNotifyCredentialMailTypes) -contains "$Type") { return @{ sent = $false; queued = $false; recipient = $rcpt; reason = "a '$Type' mail is sent only by the engine -- not from the web app" } }
+        try {
+            $q = & $global:PIM_NotifyMailQueue "$Type" $Tokens @("$rcpt" -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) @($Attachments)
+            return @{ sent = $false; queued = [bool]$q.queued; queueId = "$($q.id)"; recipient = $rcpt
+                      reason = $(if ($q.queued) { 'queued; the engine sends it at its next run (within about 5 minutes)' } else { "not queued: $($q.reason)" }) }
+        } catch { return @{ sent = $false; queued = $false; recipient = $rcpt; reason = "not queued: $($_.Exception.Message)" } }
     }
     # 2) Override/redirect target -- $global:PIM_MailRedirectAllTo handled below
     #    (existing behaviour). 3) Allowlist: when $global:PIM_MailAllowlist is a

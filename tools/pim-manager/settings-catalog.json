@@ -245,16 +245,16 @@
           "tone": "neutral",
           "title": "Let other systems, such as ServiceNow, ask for access?",
           "body": "When on, a system you allow can ask PIM Manager for admin access for a limited time.",
-          "note": "Note: anyone with a valid API key can send requests, so keep the keys safe."
+          "note": "Note: only an application you allow, holding the app role Requests.Submit, can send requests."
         }
       },
       "info": {
-        "what": "Accepts access requests that other systems (for example ServiceNow) send to the REST API on the public broker. A caller can ask for an admin account to be enabled, or a group membership, for a set time, and read or cancel the request. Callers use an allow-listed Entra application token or a PIM API key.",
-        "enabled": "On its next run (within a minute), the access-request job takes in API requests and decides them with the same rules as portal requests. Group requests become a time-limited active membership that is removed at the end. SuperAdmins can create API keys.",
-        "disabled": "Requests that arrive through the API are rejected with 'the access request API is not enabled here', and no new API keys can be created. Portal requests are not affected.",
-        "risk": "Switching it on lets an external system, using a key or application you allowed, enable admin accounts and add group memberships for a time. Anyone holding a valid key can request access. Reversible: switch it off and new API requests are rejected on the next run. Requests already granted run until their end time.",
-        "requires": "A Pro licence (switching it on, or creating an API key, without one is refused). SuperAdmin to change it and to manage API keys. Depends on 'Request for authorization (RFA) portal' being on, and on the public broker being deployed.",
-        "recommended": "On only when a system such as ServiceNow will actually call it. Give each caller its own key with the narrowest scope and an end date.",
+        "what": "Accepts access requests that other systems (for example ServiceNow) send to the REST API on the public broker. A caller can ask for an admin account to be enabled, or a group membership, for a set time, and read or cancel the request. Callers sign in with a Microsoft Entra application token: the application is allow-listed here and holds the app role Requests.Submit on the PIM access request API (Requests.Read for reading status only).",
+        "enabled": "On its next run (within a minute), the access-request job takes in API requests and decides them with the same rules as portal requests. Group requests become a time-limited active membership that is removed at the end.",
+        "disabled": "Requests that arrive through the API are rejected with 'the access request API is not enabled here'. Portal requests are not affected.",
+        "risk": "Switching it on lets an external system, using an application you allowed and assigned the app role, enable admin accounts and add group memberships for a time. Reversible: switch it off and new API requests are rejected on the next run. Requests already granted run until their end time.",
+        "requires": "A Pro licence (switching it on without one is refused). SuperAdmin to change it. Depends on 'Request for authorization (RFA) portal' being on, and on the public broker being deployed.",
+        "recommended": "On only when a system such as ServiceNow will actually call it. Give each caller its own Entra application with a managed identity or a certificate, and only the role it needs.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.api.broker/"
       }
     },
@@ -284,6 +284,46 @@
         "requires": "A Pro licence (switching it on, or calling it, without one is refused). SuperAdmin to change it. The endpoint's Entra sign-in set up for PIM Manager.",
         "recommended": "Off unless you use an assistant with PIM Manager. If on, use it with accounts that have the lowest PIM Manager role that does the job.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.mcp.server/"
+      }
+    },
+    {
+      "key": "FeatureGates.ai.chat",
+      "label": "AI chat in the Manager",
+      "where": "Settings > Features & edition > Feature customization",
+      "route": "/api/settings/feature-gates",
+      "type": "boolean",
+      "default": "Off",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Shows the AI chat panel in PIM Manager. A signed-in person asks questions in plain language and can have changes prepared. The answers come from your own Azure OpenAI deployment (set under AI chat). The chat uses only the MCP tools the person's own PIM Manager role allows, so it can read only what that person can read. A change is only prepared as a pending change; the person saves it in the page.",
+        "enabled": "The chat panel is shown to every signed-in role once AI chat is also switched on and set up under AI chat. Every tool the chat runs is written to the audit trail.",
+        "disabled": "The chat panel is hidden and every chat request is refused with 'the AI chat is switched off'.",
+        "risk": "What the chat reads for a person (for example who holds privileged access) is sent to your Azure OpenAI deployment to write the answer. It never reaches more than that person's own role allows, and it never saves a change. Reversible: switch it off and chat requests are refused at once.",
+        "requires": "A Pro licence. The MCP server switch on. SuperAdmin to change it. An Azure OpenAI deployment, and the role Cognitive Services OpenAI User for PIM Manager's managed identity on it.",
+        "recommended": "Off unless you want the chat. If on, keep the Azure OpenAI resource in your own subscription and region.",
+        "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.ai.chat/"
+      }
+    },
+    {
+      "key": "AiChat",
+      "label": "AI chat: on, endpoint and deployment",
+      "where": "Settings > Features & edition > AI chat",
+      "route": "/api/settings/ai-chat",
+      "type": "map",
+      "default": "Off, no endpoint",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Where the AI chat gets its answers: the address of your Azure OpenAI resource (https://<name>.openai.azure.com or https://<name>.cognitiveservices.azure.com, nothing after the name) and the deployment name on it. PIM Manager signs in there with its own managed identity, so there is no key to enter or store. Any other address is refused.",
+        "enabled": "With AI chat in the Manager also switched on, the chat panel answers through this deployment.",
+        "disabled": "The chat panel is hidden and chat requests are refused. The endpoint and deployment are kept.",
+        "risk": "Only an Azure OpenAI address is accepted, because PIM Manager's sign-in is sent to it. The data sent is what the asking person's own role can read. Reversible: switch it off.",
+        "requires": "SuperAdmin to change it; everyone else sees it read-only. A Pro licence. The role Cognitive Services OpenAI User for PIM Manager's managed identity on the Azure OpenAI resource. Check (Admin) proves the sign-in and one test answer.",
+        "recommended": "Use a deployment in your own subscription and region. Run Check after every change.",
+        "docUrl": "https://invardia.com/docs/pim/settings/AiChat/"
       }
     },
     {
@@ -2180,8 +2220,8 @@
       },
       "info": {
         "what": "The Entra application (client) ids allowed to call the access request REST API, typically your ticketing system. The engine publishes the list to the portal for a fast answer and re-checks every API request itself.",
-        "enabled": "When set: a listed application can request, through the API, that an admin account is enabled for 1-744 hours or that an account gets a timed group membership. API requests are approved on arrival -- no department owner decision -- and the engine applies them on its next run, within a few minutes; a group request is limited to the groups offered (and to the groups set for that key or application), and a Tier 0 or Tier 1 group, or a group with no tier set, waits for a person to approve it. It can also send proposals, which only become pending changes for an administrator.",
-        "disabled": "When empty / at the default: every API call made with an Entra application token is refused. API keys still work if you create them.",
+        "enabled": "When set: a listed application can request, through the API, that an admin account is enabled for 1-744 hours or that an account gets a timed group membership. API requests are approved on arrival -- no department owner decision -- and the engine applies them on its next run, within a few minutes; a group request is limited to the groups offered (and to the groups set for that application), and a Tier 0 or Tier 1 group, or a group with no tier set, waits for a person to approve it. It can also send proposals, which only become pending changes for an administrator.",
+        "disabled": "When empty / at the default: every API call is refused.",
         "risk": "Each listed application can grant timed privileged access without a second person in PIM Manager, so the approval must happen in that system. API group requests are held to the groups offered for ad-hoc access, and each application can be limited to its own groups (Groups each application may request). Reversible: remove the id; the engine refuses its new requests on the next run, but access already granted runs until its end time.",
         "requires": "Pro (Request for authorization portal and the access request API). SuperAdmin to change. Values must be application (client) ids (GUIDs).",
         "recommended": "List only the one application of your ticketing system, and make sure its own workflow requires approval before it calls the API.",
@@ -2234,34 +2274,6 @@
         "requires": "Pro (Request for authorization portal). Only matters when ad-hoc groups are offered. SuperAdmin to change.",
         "recommended": "Keep 24 hours or less; long-term access belongs in the delegation grid, not in ad-hoc requests.",
         "docUrl": "https://invardia.com/docs/pim/settings/RfaBroker.AdHocHours/"
-      }
-    },
-    {
-      "key": "RfaApiKeys",
-      "label": "API keys",
-      "where": "Settings > Access requests (RFA) > RFA broker & API",
-      "route": "/api/rfa/api-keys",
-      "type": "list",
-      "default": "No keys",
-      "feature": "access-request-portal",
-      "confirmOn": true,
-      "confirmOff": false,
-      "confirm": {
-        "on": {
-          "tone": "neutral",
-          "title": "Create an API key?",
-          "body": "Whoever holds this key can ask PIM Manager for admin access for a limited time.",
-          "note": "Note: the key is shown only once, so revoke it at once if it leaks."
-        }
-      },
-      "info": {
-        "what": "Keys for systems that cannot use an Entra application token to call the access request API. Each key has a name, scopes (requests.write to submit, requests.read to read status) and a lifetime of 1-3650 days. The key is shown once; only its hash is stored. It is sent as the X-Api-Key header. A key can be limited to the groups it may request (Groups); without a list it may request every group offered for ad-hoc access.",
-        "enabled": "When a key is created: the next request-portal sync (within a minute or two) publishes its hash to the portal, and a caller with requests.write can then ask for admin accounts to be enabled or timed group memberships to be added -- approved on arrival (a Tier 0 or Tier 1 group, or one with no tier set, waits for a person) and applied by the engine on its next run.",
-        "disabled": "When no key exists (the default) or a key is revoked: calls with it are refused. The engine refuses a revoked key at once; the portal stops accepting it within a few minutes.",
-        "risk": "Anyone holding a write key can grant timed privileged access without an approver in PIM Manager. A key cannot be shown again; if it leaks, revoke it. Expired keys stop working by themselves. Revoking does not end access already granted -- it runs until its end time.",
-        "requires": "Pro (access request API). SuperAdmin to create, list and revoke keys. The request portal must be deployed.",
-        "recommended": "Prefer an allow-listed Entra application. If you need a key, give it only the scope it needs and the shortest lifetime that works, and store it in a secret vault.",
-        "docUrl": "https://invardia.com/docs/pim/settings/RfaApiKeys/"
       }
     },
     {
@@ -3184,10 +3196,10 @@
       "confirmOff": false,
       "info": {
         "what": "In an incident, switches off the approval step on group member activation for the groups you choose, for 1 to 24 hours, so people who are already eligible can activate at once without waiting for an approver. Use it when the normal approvers cannot be reached and access is needed now. It grants nothing: nobody gets access they are not already eligible for, and people still activate through PIM.",
-        "enabled": "When you press Disable approval: 1) your passphrase is checked against the hash kept in this installation's key vault; 5 wrong attempts lock activation for 15 minutes, and every attempt is audited. 2) The override (groups, who, why, until when) is recorded and the engine starts at once. 3) Within about a minute the engine switches approval off on the member activation policy of each chosen group, mails each group's owners and audits every change.",
+        "enabled": "When you press Disable approval: 1) your passphrase is checked against a salted, slow hash kept in this installation's database (never the passphrase itself); 5 wrong attempts lock activation for 15 minutes, and every attempt is audited. 2) The override (groups, who, why, until when) is recorded and the engine starts at once. 3) Within about a minute the engine switches approval off on the member activation policy of each chosen group, mails each group's owners and audits every change.",
         "disabled": "At the end time, or when a SuperAdmin presses Restore now, the engine applies each group's policy template in full again, so approval is back on. The restore is audited.",
         "risk": "While it is on, an eligible member of a chosen group activates without an approver, so choose as few groups as the incident needs and as few hours as possible. Microsoft Entra role policies and Azure resource policies are not touched. Without a passphrase set up, activation is refused.",
-        "requires": "SuperAdmin and the emergency passphrase. The passphrase is set up once per installation by an Azure administrator (Owner of the resource group and Key Vault Secrets Officer on its key vault) with the command the card shows.",
+        "requires": "SuperAdmin and the emergency passphrase. The passphrase is set up once per installation by an administrator who is a member of the installation's SQL admin group (and Reader on its resource group) with the command the card shows. It works the moment the command finishes.",
         "recommended": "Set up the passphrase now, before an incident, and keep it with your emergency access instructions. Leave the override off except in an incident.",
         "docUrl": "https://invardia.com/docs/pim/settings/EmergencyOverride/"
       }

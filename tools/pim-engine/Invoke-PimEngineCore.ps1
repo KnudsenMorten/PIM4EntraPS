@@ -231,6 +231,16 @@ if (-not $env:PIM_SkipPreflight) {
     } catch { throw "Preflight FAILED: could not authenticate to the tenant / resolve the organization (check PIM_TenantId / PIM_ClientId / PIM_CertThumbprint or MI): $($_.Exception.Message)" }
 }
 
+# WEB-AUTH-SELF-CHECK-1 (framework, binding) / AUTH-MODERN-1: before the engine verifies any signed request, the token library
+# (Microsoft.IdentityModel, hash-pinned) is proven end to end on three made-up tokens (accepted / another key refused / alg none
+# refused) through the SAME function the checks use. Only when signed requests are on (off = nothing is verified, nothing to
+# prove) and never for a plan. A deviation = one red line and exit 1 (fail closed); OK = one line.
+if (-not $WhatIf -and (Get-Command Test-PimSignedRequestSelfCheckNeeded -ErrorAction SilentlyContinue) -and (Test-PimSignedRequestSelfCheckNeeded)) {
+    $__sc = Invoke-PimSignedRequestSelfCheck
+    Write-Host ("    " + $__sc.line) -ForegroundColor $(if ($__sc.ok) { 'DarkCyan' } else { 'Red' })
+    if (-not $__sc.ok) { exit 1 }
+}
+
 $res = Invoke-PimEngine -Scope $Scope -Mode $Mode -WhatIf:$WhatIf -Prune:$Prune -FromQueue:$FromQueue
 
 # --- discovery sweep + per-type auto-create policy (REQUIREMENTS §8) ------------

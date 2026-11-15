@@ -52,8 +52,9 @@
 
 Set-StrictMode -Off
 
-# The JWT parser + RS256 verifier + claim checks live in ONE place (PIM-HostedAuth.ps1, SEC-01); the engine loads it here.
-if (-not (Get-Command Test-PimJwtSignature -ErrorAction SilentlyContinue)) {
+# The JWT parser and the token validation (Microsoft.IdentityModel, PIM-TokenValidation.ps1 through PIM-HostedAuth.ps1) live
+# in ONE place; the engine loads it here.
+if (-not (Get-Command Invoke-PimTokenValidation -ErrorAction SilentlyContinue)) {
     $__srAuth = Join-Path $PSScriptRoot 'PIM-HostedAuth.ps1'
     if (Test-Path -LiteralPath $__srAuth) { . $__srAuth }
 }
@@ -472,7 +473,7 @@ function Test-PimSignedRequestToken {
     <#
       PURE. Verifies ONE captured signature for ONE person in ONE position. Checks, in order (the first failure is the reason):
         a token; well-formed; the key set is there; the key id is PUBLISHED (a request older than the published keys fails
-        closed); the RS256 signature; issuer + audience pinned and matching; iat <= captured <= exp (clock skew); the token's
+        closed); the RS256 signature, issuer + audience (Microsoft.IdentityModel); iat <= captured <= exp (clock skew); the token's
         user IS -ExpectedUser; that user's role in -RoleMap is one of -AllowedRoles.
       Returns @{ ok; reason; user; kid; role }.
     #>
@@ -487,25 +488,42 @@ function Test-PimSignedRequestToken {
     if (-not $kid) { return (& $no 'the token names no key id' '' '') }
     $published = @(@($Jwks.keys) | Where-Object { $_ -and "$($_.kid)".Trim() -eq $kid })
     if (-not $published.Count) { return (& $no "the signing key '$kid' is not (any longer) published by the tenant -- a request older than the published keys fails closed" '' $kid) }
-    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
-    if (-not $sig.valid) { return (& $no "signature: $($sig.reason)" '' $kid) }
     $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if (-not $iss.Count) { return (& $no 'no issuer is pinned (the tenant id is unknown to the engine)' '' $kid) }
     if (-not $aud.Count) { return (& $no "no audience is pinned (pim.Settings 'SignedRequests'.audiences is empty)" '' $kid) }
+    # AUTH-MODERN-1: the Manager signs with the token it VERIFIED -- since 3.1.26 the ACCESS token (the browser's, a script's
+    # bearer, MCP); a v1 access token names the app as api://<id>. An ID token carries no scp.
+    $kind = "$($Signature.TokenKind)".Trim().ToLowerInvariant()
+    if ($kind -eq 'access') { $aud = @(@($aud) + @($aud | Where-Object { $_ -notmatch '^api://' } | ForEach-Object { "api://$_" }) + @($aud | Where-Object { $_ -match '^api://' } | ForEach-Object { $_.Substring(6) }) | Select-Object -Unique) }
+    # the signature (RS256), issuer and audience by Microsoft.IdentityModel (framework decision c5704c10); the LIFETIME is judged
+    # below at the CAPTURE time (the engine acts later than the person asked), not at the engine's own clock
+    if (-not (Get-Command Invoke-PimTokenValidation -ErrorAction SilentlyContinue)) { return (& $no 'the token library is not loaded -- nothing can be verified (fail closed)' '' $kid) }
+    $vv = Invoke-PimTokenValidation -Token "$($Signature.Token)" -Jwks $Jwks -ExpectedIssuers $iss -ExpectedAudiences $aud -NoLifetime
+    if (-not $vv.valid) { $cls = if ("$($vv.reason)" -match 'InvalidIssuer') { 'claims: issuer' } elseif ("$($vv.reason)" -match 'InvalidAudience') { 'claims: audience' } else { 'signature:' }; return (& $no "$cls $($vv.reason)" '' $kid) }
+    $pl = $vv.payload
     # the time line: iat <= captured <= exp
     $cap = $Signature.CapturedUtc
     if (-not ($cap -is [datetime])) { $tmp = [datetime]::MinValue; if ([datetime]::TryParse("$cap", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$tmp)) { $cap = $tmp } else { return (& $no 'the capture time is unreadable' '' $kid) } }
     $cap = [datetime]::SpecifyKind($cap, [DateTimeKind]::Utc)
-    $iatRaw = "$($jwt.payload.iat)".Trim(); $expRaw = "$($jwt.payload.exp)".Trim()
+    $iatRaw = "$($pl.iat)".Trim(); $expRaw = "$($pl.exp)".Trim()
     if ($iatRaw -notmatch '^\d+$') { return (& $no 'the token carries no issued-at (iat)' '' $kid) }
     if ($expRaw -notmatch '^\d+$') { return (& $no 'the token carries no expiry (exp)' '' $kid) }
     $iat = ([datetimeoffset]::FromUnixTimeSeconds([int64]$iatRaw)).UtcDateTime
     $exp = ([datetimeoffset]::FromUnixTimeSeconds([int64]$expRaw)).UtcDateTime
     if ($cap -lt $iat.AddSeconds(-$ClockSkewSeconds)) { return (& $no ("captured {0:o}, before the token was issued ({1:o})" -f $cap, $iat) '' $kid) }
     if ($cap -gt $exp.AddSeconds($ClockSkewSeconds)) { return (& $no ("captured {0:o}, after the token expired ({1:o})" -f $cap, $exp) '' $kid) }
-    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $cap -ClockSkewSeconds $ClockSkewSeconds
-    if (-not $cl.valid) { return (& $no "claims: $($cl.reason)" '' $kid) }
+    if ("$($pl.nbf)".Trim() -match '^\d+$' -and $cap -lt ([datetimeoffset]::FromUnixTimeSeconds([int64]"$($pl.nbf)")).UtcDateTime.AddSeconds(-$ClockSkewSeconds)) { return (& $no 'captured before the token was valid (nbf)' '' $kid) }
+    if ($kind -eq 'access') {
+        # a delegated scope (user_impersonation, or mcp.access from earlier MCP setups) -- an access token without scp is an
+        # application's and is never a person's signature; tid = this tenant
+        $scp = @("$($pl.scp)".Trim() -split '\s+' | Where-Object { $_ })
+        if (-not $scp.Count) { return (& $no 'the access token carries no delegated scope (an application token is never a person''s signature)' '' $kid) }
+        if (-not @($scp | Where-Object { $_ -in @('user_impersonation', 'mcp.access') }).Count) { return (& $no "the access token's scope '$($scp -join ' ')' is not this app's (user_impersonation)" '' $kid) }
+        $tidPin = ''; foreach ($i in $iss) { if ("$i" -match '([0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})') { $tidPin = $Matches[1]; break } }
+        if ($tidPin -and "$($pl.tid)".Trim() -ine $tidPin) { return (& $no "the access token's tid '$($pl.tid)' is not this tenant" '' $kid) }
+    }
+    $jwt = [pscustomobject]@{ header = $jwt.header; payload = $pl }
     # SEC-89: a signed change is a PERSON's -- an application's token is refused for what it is.
     if (Get-Command Get-PimJwtAppOnlyReason -ErrorAction SilentlyContinue) {
         $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
@@ -689,6 +707,27 @@ function Get-PimSignedRequestStoreCs {
     return ''
 }
 
+function Test-PimSignedRequestSelfCheckNeeded {
+    <# Are signed requests on (observe / enforce)? Only then does the engine verify tokens -- and must prove the library first. Never throws. #>
+    try {
+        $cs = Get-PimSignedRequestStoreCs
+        return ((Get-PimSignedRequestConfig -Value (Get-PimSignedRequestSettingValue -ConnectionString $cs)).mode -ne 'off')
+    } catch { return $true }   # unreadable = assume on: proving the library costs a second, skipping it could hide a broken one
+}
+
+function Invoke-PimSignedRequestSelfCheck {
+    <#
+      WEB-AUTH-SELF-CHECK-1: the engine's start-up proof of the token library (Test-PimIdentityModelSelfCheck, PIM-TokenValidation.ps1),
+      ONCE per process (kept in $global:PIM_SignedRequestSelfCheck). @{ ok; passed; line }. Not ok = the job entry exits 1, and
+      Initialize-PimSignedRequestRun verifies nothing (every check fails closed).
+    #>
+    param([switch]$Force)
+    if (-not $Force -and $global:PIM_SignedRequestSelfCheck -is [hashtable]) { return $global:PIM_SignedRequestSelfCheck }
+    $r = if (Get-Command Test-PimIdentityModelSelfCheck -ErrorAction SilentlyContinue) { Test-PimIdentityModelSelfCheck }
+         else { @{ ok = $false; passed = 0; line = '[auth] token library self-check FAILED: PIM-TokenValidation.ps1 is not loaded -- refusing to verify (fail closed)' } }
+    $global:PIM_SignedRequestSelfCheck = $r
+    return $r
+}
 function Initialize-PimSignedRequestRun {
     <#
       Once per engine run (keyed by the job's correlation id): the mode; when not off, the pins, the published keys, the role
@@ -714,6 +753,9 @@ function Initialize-PimSignedRequestRun {
     if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
     if (-not $tid) { $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim() }
     if ($tid -and (Get-Command Get-PimHostedDefaultIssuers -ErrorAction SilentlyContinue)) { $st.issuers = @(Get-PimHostedDefaultIssuers -TenantId $tid) }
+    # WEB-AUTH-SELF-CHECK-1: no verification on an unproven token library -- every check then fails closed (no key set)
+    $sc = Invoke-PimSignedRequestSelfCheck
+    if (-not $sc.ok) { $st.jwks = $null; $st.keysError = "$($sc.line)"; $st.lines.Add("signed requests: $($sc.line)"); return $st }
     $k = Get-PimOpenIdSigningKeys -TenantId $tid -Fetch $Fetch
     $st.jwks = $k.jwks; $st.keysError = "$($k.error)"
     $st.roleMap = Get-PimSignedRequestRoleMap -ManagerAccess (Get-PimSignedRequestSettingValue -ConnectionString $cs -Name 'ManagerAccess') `

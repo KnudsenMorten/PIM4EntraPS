@@ -56,6 +56,14 @@ deployment is a supported choice) and no credentials lying around.
   sign-in is never optional: the installation creates the sign-in registration, switches
   authentication on, reads the setting back, and **stops rather than finishing with an
   unprotected console**. ✅ 2026-09-08
+- **Sign-in and token checks by Microsoft, permissions by PIM — no keys, no secrets.** ✅ 2026-11-15 (3.1.26) Microsoft's
+  built-in sign-in stands in front of the Manager. On every request the Manager also checks the person's Entra access
+  token with Microsoft's own token library (signature, your tenant, the Manager as audience, expiry) and then decides
+  what the person may do. The browser renews the token on its own before it ends, so an open page keeps working through
+  the 8-hour session; when that is not possible it offers **Sign in again** or **Sign in with another account**. Scripts
+  use a person's Entra token (the Azure CLI works without a consent prompt), AI assistants sign in over OAuth with Entra
+  (the MCP endpoint tells them where), and services use their own Entra application token, accepted only when you list
+  the application. There are no API keys and no shared secrets anywhere. See *How to authenticate* in the manual.
 - **Say exactly who may open the Manager.** ✅ 2026-09-09 Signing in only proves someone has
   an account in your organisation. You can name the people or groups allowed in as part of
   the installation: they are assigned first, the assignments are checked, and only then is
@@ -740,6 +748,13 @@ deployment is a supported choice) and no credentials lying around.
   and confirm the pattern right in Settings before importing.
 
 ## 9. Auth / Identity
+- **Sign-in by Microsoft's built-in Container Apps sign-in, with no secret.** ✅ 2026-11-15 — the PIM Manager page,
+  its API and its AI assistant endpoint sit behind Microsoft's own sign-in for Azure Container Apps. Microsoft's platform
+  checks every request's sign-in before it reaches PIM, and refuses a request without a valid Entra sign-in for PIM. The
+  sign-in uses no password or client secret: the Manager's managed identity proves the app to Entra. Signed-in sessions
+  are kept in the customer's own storage account, which accepts no shared keys. You choose the account you sign in
+  with, so an admin account can be used instead of the account signed in to the computer. The only address that answers
+  without a sign-in is the standard discovery document that tells an AI assistant where to sign in; it holds no data.
 - **Signing in works whatever an administrator is called.** ✅ 2026-09-22 — the Manager verifies that the two
   identity headers its authentication front door supplies describe the same person, and only then accepts the
   sign-in. An HTTP header can carry plain English letters only, so a display name with a space or an accent
@@ -1795,6 +1810,15 @@ deployment is a supported choice) and no credentials lying around.
   access-review decisions, owner reviews, auto-extend, running and cancelling jobs, and staging and committing your own
   changes. Every tool runs the page's own code under the signed-in person's own role. Emergency access, break-glass,
   revocations, deletions and settings changes stay in the Manager.
+- **Chat in the Manager (Pro).** 🟡 built for 3.1.26 — An **Ask** button in the Manager opens a chat: ask in plain words
+  ("who can activate Global Administrator?", "which jobs failed today?") or have a change prepared. The answers come from
+  your own Azure OpenAI deployment, and the chat works only through the assistant (MCP) tools your own role allows, so it
+  reads only what you can read. It looks things up and **prepares** changes as pending changes; saving, approving,
+  emergency access, revocations and deletions are never done from the chat -- you save a prepared change in the page.
+  PIM Manager signs in to Azure OpenAI with its own managed identity: there is no key to enter or store, and only an Azure
+  OpenAI address is accepted. Every action the chat runs is in the audit trail; the conversation itself stays in your
+  browser tab. Off by default; a SuperAdmin sets it up under **Settings › Features & edition › AI chat**, and **Check**
+  proves the sign-in and one test answer.
 
 ## 12. Notifications / Email
 - **Every mail names the installation that sent it.** ✅ 2026-11-12 — The subject and the first line of every mail name the installation (for example "[PROD] example-prod: Warning: ..."), and the body names your tenant, so you always know which environment a mail is about.
@@ -2348,6 +2372,8 @@ On top of the free edition, a Pro licence adds:
 - the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
   time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
 - the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
+- the **chat in the Manager** — ask questions and have changes prepared, answered by your own Azure OpenAI deployment under
+  the person's own role;
 - **API applications** — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a
   person saves every change they prepare;
 - the **API and MCP reference** in the portal — every route and assistant tool of the version you run, for your role;

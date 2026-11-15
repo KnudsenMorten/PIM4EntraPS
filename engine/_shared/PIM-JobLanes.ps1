@@ -114,6 +114,8 @@ function Get-PimEngineScopeArea {
     return "engine:$k"
 }
 
+function Get-PimSingleWriterJobTypes { <# PURE. LITERAL. TRUST-1 round 4 item 1: jobs whose every run (scheduled, Run now, trigger) shares one lock. #> return @('active-assignments-snapshot', 'drift-snapshot', 'coverage') }
+
 function Get-PimJobAreas {
     <#
       PURE-ish (uses Resolve-PimEngineScope when the engine is loaded, else the shipped scope groups). What ONE job writes:
@@ -141,7 +143,11 @@ function Get-PimJobAreas {
         foreach ($v in $script:PimJobTypeAreas[$type]) { & $add $v }
     }
     $areas = @($set.ToArray() | Sort-Object)
-    return [pscustomobject]@{ job = "job:$name"; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1) }
+    # TRUST-1 round 4 item 1: the three snapshot jobs write ONE stored document each -- their scheduled run, a Run now and a
+    # TRIGGER ('trigger:<type>:All', no -JobName) take the SAME lock, 'job:<scheduled name>' (the shipped name = the type), so
+    # two runs of one of them never write at the same time. Every other job keeps 'job:<its name>'.
+    $jobKey = if ($type -in (Get-PimSingleWriterJobTypes)) { "job:$type" } else { "job:$name" }
+    return [pscustomobject]@{ job = $jobKey; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1) }
 }
 
 function Get-PimLaneCap {
@@ -754,12 +760,82 @@ function Register-PimStallRunReport {
             foreach ($k in $names2) {
                 $v = if ($st -is [System.Collections.IDictionary]) { $st[$k] } else { $st.$k }
                 $at = Get-PimNoProgressStamp $(if ($null -ne $v -and $v.PSObject.Properties['registeredUtc']) { $v.registeredUtc })
-                if ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalHours -le 48) { $map["$k"] = $v }
+                # TRUST-1 round 4 item 13 + round 6 F6: a source-stale entry is kept until sent AND, sent or not, for 60 days -- the list is
+                # what tells "already asked for" (Register-PimTrustStaleReport), so a part stale for weeks never opens a second request
+                $unsentStale = ($null -ne $v -and "$($v.trigger)" -eq 'source-stale' -and (-not "$($v.sentUtc)".Trim() -or ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalDays -le 60)))
+                if ($unsentStale -or ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalHours -le 48)) { $map["$k"] = $v }
             }
         }
         if ($map.Contains($e.id)) { $res.reason = 'already registered'; return [pscustomobject]$res }
         $map[$e.id] = $e
         & $SetSetting (Get-PimStallReportSettingName) ([pscustomobject]$map)
+        $res.registered = $true
+    } catch { $res.registered = $false; $res.reason = "$($_.Exception.Message)" }
+    return [pscustomobject]$res
+}
+
+function Get-PimTrustCarryMaxAgeDays { <# PURE. LITERAL. Framework TRUST-1 point 8: a part carried longer than this is STALE (Invardia may change it). #> return 7 }
+
+function Register-PimTrustStaleReport {
+    <#
+      Framework TRUST-1 point 8 (Invardia 2026-11-13): a part of a job's data that has not been read for Get-PimTrustCarryMaxAgeDays
+      opens ONE fix request -- through the same register-once / sent-once run report as a stalled run (pim.Settings
+      'UplinkStallReports', Select-PimStallReportsDue -> New-PimStallRunReportRecord): Outcome warning, ErrorClass <code> (e.g.
+      coverage-source-stale), FailedStep the part. The id is job | part | source-stale | since, so the SAME stale part is never
+      registered twice; the caller registers it only on the run where the part BECOMES stale. NEVER throws, never sends.
+      -Job: the uplink job id (pim-<type>). -Part: [a-z0-9.-]. -Code: the stable code. Returns @{ registered; id; reason }.
+    #>
+    param([Parameter(Mandatory)][string]$Job, [Parameter(Mandatory)][string]$Part, [Parameter(Mandatory)][string]$Code, [string]$SinceUtc = '',
+          [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null)
+    $res = [ordered]@{ registered = $false; id = ''; reason = '' }
+    try {
+        if (-not $GetSetting) { $GetSetting = { param($n) if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { Get-PimSetting -Name $n } } }
+        if (-not $SetSetting) { $SetSetting = { param($n, $v) if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { [void](Set-PimSetting -Name $n -Value $v) } else { throw 'no settings store is loaded in this process' } } }
+        $part = ("$Part".ToLowerInvariant() -replace '[^a-z0-9.-]', '-').Trim('-'); if ($part.Length -gt 60) { $part = $part.Substring(0, 60) }
+        $cls = "$Code".ToLowerInvariant()
+        if ($Job -notmatch '^pim-[a-z0-9-]{1,56}$' -or -not $part -or $cls -notmatch '^[a-z0-9-]{1,40}$') { $res.reason = 'job / part / code not in the agreed shape'; return [pscustomobject]$res }
+        $e = [pscustomobject][ordered]@{ id = ("{0}|{1}|source-stale|{2}" -f $Job, $part, "$SinceUtc"); job = $Job; jobName = $Job; step = $part; trigger = 'source-stale'
+            errorClass = $cls; minutes = 0; sinceUtc = "$SinceUtc"; registeredUtc = $NowUtc.ToUniversalTime().ToString('o'); sentUtc = '' }
+        $res.id = $e.id
+        # the next map from what is stored: entries of the last 48 h, and every UNSENT source-stale entry (round 4 item 13: a
+        # fix request never expires before it went out). '' = this entry is there already.
+        $merge = {
+            param($st)
+            if ($st -is [string]) { $st = $(if ("$st".Trim()) { $st | ConvertFrom-Json } else { $null }) }
+            $map = [ordered]@{}
+            if ($null -ne $st) {
+                $names2 = if ($st -is [System.Collections.IDictionary]) { @($st.Keys) } else { @($st.PSObject.Properties | ForEach-Object { $_.Name }) }
+                foreach ($k in $names2) {
+                    $v = if ($st -is [System.Collections.IDictionary]) { $st[$k] } else { $st.$k }
+                    if ($null -eq $v) { continue }
+                    $at = Get-PimNoProgressStamp $(if ($v.PSObject.Properties['registeredUtc']) { $v.registeredUtc })
+                    # round 6 F6: kept until sent, and (sent or not) 60 days -- "already registered" is read from this list, never a header flag
+                    $unsentStale = ("$($v.trigger)" -eq 'source-stale' -and (-not "$($v.sentUtc)".Trim() -or ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalDays -le 60)))
+                    if ($unsentStale -or ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalHours -le 48)) { $map["$k"] = $v }
+                }
+            }
+            if ($map.Contains($e.id)) { return '' }
+            $map[$e.id] = $e
+            return [pscustomobject]$map
+        }
+        # round 4 item 15: the same compare-and-set as the other shared pim.Settings list writer (Update-PimJobTriggerList): read
+        # the raw value, write only while it is unchanged, retry -- a stall report registered at the same moment is never lost.
+        # A test (seams) or a process without the SQL settings store keeps the plain read / write.
+        $casCs = ''; if (Get-Command Get-PimSchedulerLeaseStoreCs -ErrorAction SilentlyContinue) { try { $casCs = "$(Get-PimSchedulerLeaseStoreCs)" } catch { $casCs = '' } }
+        if (-not $PSBoundParameters.ContainsKey('GetSetting') -and $casCs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSettingIfUnchanged -ErrorAction SilentlyContinue)) {
+            for ($i = 0; $i -lt 8; $i++) {
+                $raw = Get-PimSqlSettingRaw -ConnectionString $casCs -Name (Get-PimStallReportSettingName)
+                $parsed = $null; if ("$raw".Trim()) { try { $parsed = $raw | ConvertFrom-Json } catch { $parsed = $null } }
+                $next = & $merge $parsed
+                if ("$next" -eq '') { $res.reason = 'already registered'; return [pscustomobject]$res }
+                $json = $next | ConvertTo-Json -Depth 6 -Compress
+                if ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $casCs -Name (Get-PimStallReportSettingName) -NewValueJson $json -ExpectedValueJson $raw) -gt 0) { $res.registered = $true; return [pscustomobject]$res }
+            }
+            $res.reason = 'the stall report list kept changing -- not registered this run (the next run registers it)'; return [pscustomobject]$res
+        }
+        $next = & $merge (& $GetSetting (Get-PimStallReportSettingName))
+        if ("$next" -eq '') { $res.reason = 'already registered'; return [pscustomobject]$res }
+        & $SetSetting (Get-PimStallReportSettingName) $next
         $res.registered = $true
     } catch { $res.registered = $false; $res.reason = "$($_.Exception.Message)" }
     return [pscustomobject]$res

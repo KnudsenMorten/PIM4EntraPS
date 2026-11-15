@@ -76,12 +76,17 @@
   Selected ONLY by PIM_HOSTED_AUTH_LAYER=signin-front; unset, every Manager keeps today's
   Easy Auth path unchanged.
 
-  PS 5.1-safe: no ?./??, no ternary, no RSA.ImportFromPem (JWKS n/e -> RSAParameters),
+  PS 5.1-safe syntax: no ?./??, no ternary (the token library itself needs PowerShell 7 / .NET 10 -- see PIM-TokenValidation.ps1),
   null-guarded throughout. The decision functions are PURE (no I/O) so they are fully
   unit-testable offline and behave identically live -- tests/Test-PimHostedAuth.ps1.
 #>
 
 Set-StrictMode -Off
+
+# AUTH-MODERN-1 (framework decision c5704c10): every token SIGNATURE / issuer / audience / lifetime check below goes through
+# Microsoft.IdentityModel (engine/_shared/PIM-TokenValidation.ps1, the vendored, hash-pinned library). This file keeps only
+# the AUTHORIZATION facts (tenant, scope, a person, the edge headers) and the unverified base64 / kid readers.
+. (Join-Path $PSScriptRoot 'PIM-TokenValidation.ps1')
 
 # ---- base64url / JWT decoding (pure) -----------------------------------------
 
@@ -162,117 +167,8 @@ function Get-PimJwtAppOnlyReason {
     return ''
 }
 
-# ---- claim validation (pure) --------------------------------------------------
-
-function Test-PimJwtClaims {
-    # PURE: are this token's claims acceptable? Checks issuer, audience, exp and nbf
-    # with a small clock-skew allowance. Returns @{ valid; reason }.
-    # An EMPTY expected-issuer / expected-audience list means "do not constrain that
-    # dimension" -- but exp is ALWAYS enforced (an unexpiring principal is never ok).
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][object]$Payload,
-        [string[]]$ExpectedIssuers = @(),
-        [string[]]$ExpectedAudiences = @(),
-        [datetime]$NowUtc = ([datetime]::UtcNow),
-        [int]$ClockSkewSeconds = 300
-    )
-    if ($null -eq $Payload) { return @{ valid = $false; reason = 'no payload' } }
-
-    # exp -- mandatory. Unix seconds.
-    $expRaw = "$($Payload.exp)".Trim()
-    if (-not $expRaw -or $expRaw -notmatch '^\d+$') { return @{ valid = $false; reason = 'missing/!numeric exp claim' } }
-    $expUtc = ([datetimeoffset]::FromUnixTimeSeconds([int64]$expRaw)).UtcDateTime
-    if ($NowUtc.ToUniversalTime() -gt $expUtc.AddSeconds($ClockSkewSeconds)) {
-        return @{ valid = $false; reason = ("token expired at {0:o}" -f $expUtc) }
-    }
-    # nbf -- optional, enforced when present.
-    $nbfRaw = "$($Payload.nbf)".Trim()
-    if ($nbfRaw -and $nbfRaw -match '^\d+$') {
-        $nbfUtc = ([datetimeoffset]::FromUnixTimeSeconds([int64]$nbfRaw)).UtcDateTime
-        if ($NowUtc.ToUniversalTime() -lt $nbfUtc.AddSeconds(-$ClockSkewSeconds)) {
-            return @{ valid = $false; reason = ("token not valid before {0:o}" -f $nbfUtc) }
-        }
-    }
-    # iss
-    $issuers = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($issuers.Count -gt 0) {
-        $iss = "$($Payload.iss)".Trim()
-        if (-not $iss) { return @{ valid = $false; reason = 'missing iss claim' } }
-        $ok = $false
-        foreach ($i in $issuers) { if ($iss -eq $i) { $ok = $true; break } }
-        if (-not $ok) { return @{ valid = $false; reason = ("issuer '$iss' is not an expected issuer") } }
-    }
-    # aud -- may be a string or an array.
-    $auds = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($auds.Count -gt 0) {
-        $tokenAuds = @(@($Payload.aud) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-        if ($tokenAuds.Count -eq 0) { return @{ valid = $false; reason = 'missing aud claim' } }
-        $ok = $false
-        foreach ($a in $tokenAuds) { if ($auds -contains $a) { $ok = $true; break } }
-        if (-not $ok) { return @{ valid = $false; reason = ("audience '{0}' is not an expected audience" -f ($tokenAuds -join ',')) } }
-    }
-    return @{ valid = $true; reason = 'claims ok' }
-}
-
-# ---- signature validation (pure given a key set) ------------------------------
-
-function Test-PimJwtSignature {
-    # PURE given $Jwks: verify the RS256 signature of a parsed JWT against a JWKS-shaped
-    # key set (@{ keys = @( @{ kid; n; e; kty } ) }). Returns @{ valid; reason }.
-    # Only RS256/RS384/RS512 are accepted -- 'none' and HMAC algs are REFUSED outright
-    # (the classic alg-confusion downgrade).
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][object]$Jwt,
-        [Parameter(Mandatory)][object]$Jwks
-    )
-    if ($null -eq $Jwt -or $null -eq $Jwt.header) { return @{ valid = $false; reason = 'no parsed token' } }
-    $alg = "$($Jwt.header.alg)".Trim().ToUpperInvariant()
-    $hash = $null
-    if     ($alg -eq 'RS256') { $hash = [System.Security.Cryptography.HashAlgorithmName]::SHA256 }
-    elseif ($alg -eq 'RS384') { $hash = [System.Security.Cryptography.HashAlgorithmName]::SHA384 }
-    elseif ($alg -eq 'RS512') { $hash = [System.Security.Cryptography.HashAlgorithmName]::SHA512 }
-    else { return @{ valid = $false; reason = ("unsupported/unsafe alg '$alg' (only RS256/384/512 accepted)") } }
-
-    $kid = "$($Jwt.header.kid)".Trim()
-    $keys = @()
-    if ($Jwks -and $Jwks.keys) { $keys = @($Jwks.keys) }
-    if ($keys.Count -eq 0) { return @{ valid = $false; reason = 'empty key set' } }
-
-    $match = $null
-    foreach ($k in $keys) {
-        if ($null -eq $k) { continue }
-        if ($kid -and "$($k.kid)".Trim() -ne $kid) { continue }
-        if ("$($k.kty)".Trim() -and "$($k.kty)".Trim().ToUpperInvariant() -ne 'RSA') { continue }
-        $match = $k; break
-    }
-    if ($null -eq $match) { return @{ valid = $false; reason = ("no JWKS key matches kid '$kid'") } }
-
-    $modulus  = ConvertFrom-PimBase64Url -Text "$($match.n)"
-    $exponent = ConvertFrom-PimBase64Url -Text "$($match.e)"
-    if ($null -eq $modulus -or $null -eq $exponent) { return @{ valid = $false; reason = 'JWKS key modulus/exponent unreadable' } }
-    $sig = ConvertFrom-PimBase64Url -Text "$($Jwt.signature)"
-    if ($null -eq $sig) { return @{ valid = $false; reason = 'signature is not valid base64url' } }
-
-    $rsa = $null
-    try {
-        # RSAParameters import -- NOT ImportFromPem (unavailable on PS 5.1, see §22).
-        $rsa = [System.Security.Cryptography.RSA]::Create()
-        $p = New-Object System.Security.Cryptography.RSAParameters
-        $p.Modulus  = $modulus
-        $p.Exponent = $exponent
-        $rsa.ImportParameters($p)
-        $data = [System.Text.Encoding]::ASCII.GetBytes($Jwt.signingInput)
-        $ok = $rsa.VerifyData($data, $sig, $hash, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-        if ($ok) { return @{ valid = $true;  reason = 'signature verified' } }
-        return         @{ valid = $false; reason = 'signature verification FAILED' }
-    } catch {
-        return @{ valid = $false; reason = ("signature check errored: " + $_.Exception.Message) }
-    } finally {
-        if ($null -ne $rsa) { try { $rsa.Dispose() } catch {} }
-    }
-}
+# (the hand-written claim / signature checks Test-PimJwtClaims / Test-PimJwtSignature are gone -- AUTH-MODERN-1: every token
+#  is validated by Microsoft.IdentityModel through Invoke-PimTokenValidation, PIM-TokenValidation.ps1)
 
 # ---- LAYER 1: edge consistency (pure) -----------------------------------------
 
@@ -485,6 +381,71 @@ function Test-PimEdgeHeadersConsistent {
     return @{ trusted = $true; identity = $identity; oid = (Get-PimPrincipalObjectIdFromBlob -Blob $decoded); reason = 'auth-edge headers consistent' }
 }
 
+function Get-PimAccessTokenAudiences {
+    <#
+      PURE. AUTH-MODERN-1: the audiences an access token for THIS app may carry -- each pinned value as given plus its
+      api:// form (a v2 token names the bare client id, a v1 token the api:// URI). Empty in = empty out (never "any").
+    #>
+    [CmdletBinding()] param([string[]]$Audiences = @())
+    $a = @($Audiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    return @(@($a) + @($a | Where-Object { $_ -notmatch '^api://' } | ForEach-Object { "api://$_" }) + @($a | Where-Object { $_ -match '^api://' } | ForEach-Object { $_.Substring(6) }) | Select-Object -Unique)
+}
+
+function Resolve-PimAccessTokenCaller {
+    <#
+      AUTH-MODERN-1 / SIGNIN-TOKEN-LIFETIME-1: is this a PERSON's Entra ACCESS token for THIS app, from THIS tenant, now?
+      The token itself (signature RS256, issuer = this tenant v1 / v2, audience = this app as id or api://id, exp / nbf with
+      5 minutes clock skew) is validated by Microsoft.IdentityModel (Invoke-PimTokenValidation). Then the AUTHORIZATION facts:
+      tid = this tenant, not an application's token (SEC-89), a delegated scope (scp) holding one of -Scopes, a user
+      (preferred_username / upn / unique_name -- never the email claim) and an oid. Each refusal names its reason.
+      Used by the web path (the sign-in's access token, a script's bearer), /mcp and the sign-in front.
+      @{ trusted; identity; oid; reason; kind = 'access'; scopes }.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Token = '',
+        [object]$Jwks = $null,
+        [string[]]$ExpectedIssuers = @(),
+        [string[]]$ExpectedAudiences = @(),
+        [string]$TenantId = '',
+        [string[]]$Scopes = @('user_impersonation')
+    )
+    $no = { param($why) return @{ trusted = $false; identity = ''; oid = ''; reason = $why; kind = 'access'; scopes = @() } }
+    $want = @($Scopes | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($want.Count -eq 0) { return (& $no 'access token: no scope is pinned -- failing closed') }
+    $t = "$Token".Trim()
+    if (-not $t) { return (& $no 'no access token on the request') }
+    if ($null -eq (Get-PimJwtParts -Token $t)) { return (& $no 'the access token is not a well-formed JWT (an API key or any other non-Entra value is never accepted)') }
+    $v = Invoke-PimTokenValidation -Token $t -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers -ExpectedAudiences (Get-PimAccessTokenAudiences -Audiences $ExpectedAudiences)
+    if (-not $v.valid) { return (& $no ("access token: " + $v.reason)) }
+    $pl = $v.payload
+    $tid = "$TenantId".Trim(); $tokTid = "$($pl.tid)".Trim()
+    if ($tid -and -not $tokTid) { return (& $no 'access token: no tid claim (refused)') }
+    if ($tid -and $tokTid -ine $tid) { return (& $no "access token: tid '$tokTid' is not this tenant") }
+    $appOnly = Get-PimJwtAppOnlyReason -Payload $pl
+    if ($appOnly) { return (& $no ("access token: " + $appOnly)) }
+    $scp = @("$($pl.scp)".Trim() -split '\s+' | Where-Object { $_ })
+    if ($scp.Count -eq 0) { return (& $no 'not a person''s access token (no scp -- an ID token or an application token is refused)') }
+    if (-not @($scp | Where-Object { $want -contains $_ }).Count) { return (& $no ("access token scope '$($scp -join ' ')' is not '$($want -join ''' or ''')'")) }
+    $who = ''
+    foreach ($c in @('preferred_username', 'upn', 'unique_name')) { $x = "$($pl.$c)".Trim(); if ($x) { $who = $x; break } }
+    $oid = Get-PimJwtObjectId -Payload $pl
+    if (-not $who -or -not $oid) { return (& $no 'access token names no user (preferred_username / upn and oid)') }
+    return @{ trusted = $true; identity = $who; oid = $oid; reason = 'access token validated by Microsoft.IdentityModel; tenant, person and scope authorised'; kind = 'access'; scopes = @($scp) }
+}
+
+function Get-PimJwtAudienceUnverified {
+    <#
+      PURE. The aud claim(s) of a token WITHOUT verifying it -- used ONLY to tell "an access token for another resource"
+      (the platform's default token when the sign-in does not request this app's API scope yet) from "an access token for
+      THIS app" (which must then verify, or the request is refused). It never decides trust.
+    #>
+    [CmdletBinding()] param([string]$Token = '')
+    $j = Get-PimJwtParts -Token $Token
+    if ($null -eq $j) { return @() }
+    return @(@($j.payload.aud) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+}
+
 function Resolve-PimMcpBearer {
     <#
       PURE given its inputs. REQ 93 -- who is calling /mcp, proven by the BEARER TOKEN itself, never by edge headers.
@@ -495,6 +456,12 @@ function Resolve-PimMcpBearer {
       (excludedPaths) and answer an unauthenticated client 401 + WWW-Authenticate -- the MCP sign-in discovery -- instead of
       a 302 to the login page. Outside Easy Auth the X-MS-* headers are the caller's own words, so they are never read.
       Returns @{ ok; status (401 = no / bad token, 403 = valid token but not allowed, 503 = not configured); identity; reason }.
+      AUTH-MODERN-1 (owner 2026-11-15 "use only modern and secure method"): the token is checked by Test-PimAccessToken --
+      RS256 only, issuer + tid pinned to this tenant, aud = this app (id or api://id), exp / nbf with clock skew, a
+      delegated scope (-Scopes: user_impersonation, the standard; mcp.access, the scope earlier MCP setups created), a user
+      + oid. An API key, a non-JWT, the wrong audience / tenant, an expired token or a token without scp (an ID token, an
+      application token) = 401. Only a VALID person's token for another scope is 403 (insufficient scope). Applications
+      reach the API through the allow-listed /api/app path (PIM-ManagerApiApps.ps1), never through /mcp.
     #>
     [CmdletBinding()]
     param(
@@ -502,32 +469,29 @@ function Resolve-PimMcpBearer {
         [object]$Jwks = $null,
         [string[]]$ExpectedIssuers = @(),
         [string[]]$ExpectedAudiences = @(),
-        [string]$Scope = 'mcp.access',
+        [string[]]$Scopes = @('user_impersonation', 'mcp.access'),
+        [string]$TenantId = '',
         [datetime]$NowUtc = ([datetime]::UtcNow)
     )
     $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $want = @($Scopes | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($iss.Count -eq 0 -or $aud.Count -eq 0) {
-        return @{ ok = $false; status = 503; identity = ''; reason = 'MCP sign-in is not configured on this Manager (no pinned issuer / audience) -- run Set-PimManagerMcpAuth.ps1 -Apply' }
+        return @{ ok = $false; status = 503; identity = ''; reason = 'MCP sign-in is not configured on this Manager (no pinned issuer / audience: PIM_HOSTED_AUTH_TENANT + PIM_HOSTED_EASYAUTH_AUD, or PIM_MCP_AUDIENCE)' }
     }
     if ("$Authorization" -notmatch '^\s*Bearer\s+(\S+)\s*$') { return @{ ok = $false; status = 401; identity = ''; reason = 'no bearer token' } }
-    $jwt = Get-PimJwtParts -Token $Matches[1]
-    if ($null -eq $jwt) { return @{ ok = $false; status = 401; identity = ''; reason = 'the bearer token is not a well-formed JWT' } }
+    $tok = $Matches[1]
+    $jwt = Get-PimJwtParts -Token $tok
+    if ($null -eq $jwt) { return @{ ok = $false; status = 401; identity = ''; reason = 'the bearer token is not a well-formed JWT (an API key or any other non-Entra value is never accepted)' } }
     if ($null -eq $Jwks) { return @{ ok = $false; status = 503; identity = ''; reason = 'the tenant signing keys could not be fetched -- cannot verify any token (refused)' } }
-    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
-    if (-not $sig.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token signature: $($sig.reason)" } }
-    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
-    if (-not $cl.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token claims: $($cl.reason)" } }
-    # SEC-89: an application's token is refused for what it is, before any scope / user reasoning.
-    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
-    if ($appOnly) { return @{ ok = $false; status = 403; identity = ''; reason = "MCP: $appOnly" } }
-    $scopes = @("$($jwt.payload.scp)" -split '\s+' | Where-Object { $_ })
-    if ($scopes.Count -eq 0) { return @{ ok = $false; status = 403; identity = ''; reason = "an application token (no delegated scope) -- MCP needs a person signed in for '$Scope'" } }
-    if ($scopes -notcontains $Scope) { return @{ ok = $false; status = 403; identity = ''; reason = ("the token's scope (" + ($scopes -join ' ') + ") is not '$Scope' -- request a token for api://<this Manager>/$Scope") } }
-    $who = ''
-    foreach ($c in @('upn', 'preferred_username', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
-    if (-not $who) { return @{ ok = $false; status = 403; identity = ''; reason = 'the token names no user (no upn / preferred_username)' } }
-    return @{ ok = $true; status = 200; identity = $who; oid = (Get-PimJwtObjectId -Payload $jwt.payload); reason = "delegated token with '$Scope'" }
+    $v = Resolve-PimAccessTokenCaller -Token $tok -Jwks $Jwks -ExpectedIssuers $iss -ExpectedAudiences $aud -TenantId $TenantId -Scopes $want
+    if (-not $v.trusted) {
+        # a VALID person's token that only lacks the scope is 403 (insufficient_scope); everything else is 401
+        $st = 401
+        if ("$($v.reason)" -match '^access token scope ') { $st = 403 }
+        return @{ ok = $false; status = $st; identity = ''; reason = ("MCP: " + $v.reason + $(if ($st -eq 403) { " -- request a token for api://<this Manager>/$($want[0])" } else { '' })) }
+    }
+    return @{ ok = $true; status = 200; identity = "$($v.identity)"; oid = "$($v.oid)"; reason = 'delegated access token verified'; token = $tok }
 }
 
 # ---- the composite decision ---------------------------------------------------
@@ -618,8 +582,17 @@ function Resolve-PimHostedPrincipal {
         # pre-SEC-28 contract); an unrecognised value is 'none'.
         [string]$AuthLayer = '',
         # front 1.4.0: refuse the ID token behind the front (the caller reads PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN)
-        [bool]$RequireFrontAccessToken = $false
+        [bool]$RequireFrontAccessToken = $false,
+        # AUTH-MODERN-1 (strict layer): the raw Authorization header (a script's / MCP client's own access token, or nothing),
+        # the sign-in's X-MS-TOKEN-AAD-ACCESS-TOKEN, this tenant (tid), the delegated scope, and whether the ID token may still
+        # be used when no access token for this app is present (PIM_HOSTED_ID_TOKEN_FALLBACK, default on)
+        [string]$Authorization = '',
+        [string]$AccessToken = '',
+        [string]$TenantId = '',
+        [string[]]$AccessScopes = @('user_impersonation'),
+        [bool]$AllowIdTokenFallback = $true
     )
+
     $layerIn = "$AuthLayer".Trim().ToLowerInvariant()
     if (-not $layerIn) { $layerIn = 'easyauth' }
     elseif ($layerIn -notin @('easyauth', 'signed-token', 'signin-front', 'none')) { $layerIn = Get-PimHostedAuthLayer -Value $layerIn }
@@ -659,48 +632,62 @@ function Resolve-PimHostedPrincipal {
         return @{ trusted = $true; identity = $edge.identity; oid = "$($edge.oid)"; layer = 'edge-consistency'; reason = $edge.reason }
     }
 
-    # LAYER 2 -- signed token required.
-    if (-not "$SignedToken".Trim()) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = 'PIM_HOSTED_REQUIRE_SIGNED_TOKEN is on but no X-MS-TOKEN-AAD-ID-TOKEN was supplied (enable token store on the auth edge)' }
+    # LAYER 2 -- AUTH-MODERN-1 (owner 2026-11-15; framework decision c5704c10): every token is validated by Microsoft's
+    # library (Invoke-PimTokenValidation / Resolve-PimAccessTokenCaller: signature RS256, issuer, audience, lifetime), then
+    # authorised here. The ACCESS token first -- a script's / MCP client's own 'Authorization: Bearer', else the sign-in's
+    # X-MS-TOKEN-AAD-ACCESS-TOKEN (scp user_impersonation, tid = this tenant). The ID token ONLY as the FALLBACK for an
+    # install whose sign-in does not request this app's API scope yet -- the result names the path (tokenPath).
+    $tid = "$TenantId".Trim()
+    $refuse = { param($why, $pth) return @{ trusted = $false; identity = ''; layer = 'signed-token'; tokenPath = "$pth"; reason = $why } }
+    $path = ''; $tok = ''; $kind = ''; $who = ''; $oid = ''; $note = ''
+    $ah = "$Authorization".Trim()
+    if ($ah) {
+        if ($ah -notmatch '^(?i)Bearer\s+(\S+)$') { return (& $refuse 'the Authorization header is not a Bearer access token (only an Entra access token is accepted there) -- refused' 'bearer') }
+        $tok = $Matches[1]
+        if ($null -eq (Get-PimJwtParts -Token $tok)) { return (& $refuse 'the Authorization bearer is not a signed Entra token (an API key or a page token is never accepted there) -- refused' 'bearer') }
+        $v = Resolve-PimAccessTokenCaller -Token $tok -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers -ExpectedAudiences $ExpectedAudiences -TenantId $tid -Scopes $AccessScopes
+        if (-not $v.trusted) { return (& $refuse "bearer: $($v.reason)" 'bearer') }
+        $path = 'bearer'; $kind = 'access'; $who = "$($v.identity)"; $oid = "$($v.oid)"
+    } else {
+        $at = "$AccessToken".Trim()
+        if ($at) {
+            $mine = @(Get-PimAccessTokenAudiences -Audiences $ExpectedAudiences)
+            $ta = @(Get-PimJwtAudienceUnverified -Token $at)
+            if ($mine.Count -and @($ta | Where-Object { $mine -contains $_ }).Count) {
+                # an access token FOR THIS APP: it must validate (an expired one is refused; the page renews it)
+                $v = Resolve-PimAccessTokenCaller -Token $at -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers -ExpectedAudiences $ExpectedAudiences -TenantId $tid -Scopes $AccessScopes
+                if (-not $v.trusted) { return (& $refuse "X-MS-TOKEN-AAD-ACCESS-TOKEN: $($v.reason)" 'access-token') }
+                $path = 'access-token'; $kind = 'access'; $tok = $at; $who = "$($v.identity)"; $oid = "$($v.oid)"
+            } else { $note = "the sign-in's access token is for another resource ($(if ($ta.Count) { $ta -join ',' } else { 'unreadable' })) -- the sign-in does not request this app's API scope yet" }
+        } else { $note = 'no access token on the request -- the sign-in does not request this app''s API scope yet' }
     }
-    $jwt = Get-PimJwtParts -Token $SignedToken
-    if ($null -eq $jwt) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = 'X-MS-TOKEN-AAD-ID-TOKEN is not a well-formed JWT' }
+    if (-not $path) {
+        if (-not $AllowIdTokenFallback) { return (& $refuse "$note; the ID-token fallback is off -- refused" 'none') }
+        # ---- the ID-token FALLBACK, validated by the same library
+        if (-not "$SignedToken".Trim()) {
+            return @{ trusted = $false; identity = ''; layer = 'signed-token'; tokenPath = 'none'; reason = 'PIM_HOSTED_REQUIRE_SIGNED_TOKEN is on but no X-MS-TOKEN-AAD-ID-TOKEN was supplied (enable token store on the auth edge)' }
+        }
+        if ($null -eq (Get-PimJwtParts -Token $SignedToken)) { return (& $refuse 'X-MS-TOKEN-AAD-ID-TOKEN is not a well-formed JWT' 'id-token-fallback') }
+        $v = Invoke-PimTokenValidation -Token $SignedToken -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers -ExpectedAudiences $ExpectedAudiences
+        if (-not $v.valid) { return (& $refuse ("token rejected: " + $v.reason) 'id-token-fallback') }
+        $pl = $v.payload
+        # SEC-89: an application's token is refused explicitly -- not only because it carries no username claim.
+        $appOnly = Get-PimJwtAppOnlyReason -Payload $pl
+        if ($appOnly) { return (& $refuse $appOnly 'id-token-fallback') }
+        if ($tid -and "$($pl.tid)".Trim() -and "$($pl.tid)".Trim() -ine $tid) { return (& $refuse "the token's tid '$($pl.tid)' is not this tenant" 'id-token-fallback') }
+        foreach ($p in @('preferred_username', 'upn', 'email', 'unique_name')) { $x = "$($pl.$p)".Trim(); if ($x) { $who = $x; break } }
+        if (-not $who) { return (& $refuse 'verified token carries no username claim' 'id-token-fallback') }
+        $oid = Get-PimJwtObjectId -Payload $pl
+        $path = 'id-token-fallback'; $kind = 'id'; $tok = "$SignedToken".Trim()
     }
-    if ($null -eq $Jwks) {
-        # Fail CLOSED: strict mode with no key set cannot verify anything.
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = 'no JWKS available to verify the token (failing closed)' }
+    # The edge headers must describe the SAME person as the validated token: the object id when both carry one, else the name.
+    if ("$($edge.oid)" -and $oid) {
+        if ("$($edge.oid)" -ne $oid) { return (& $refuse ("header object id ('$($edge.oid)') disagrees with the VERIFIED token object id ('$oid') -- rejected") $path) }
+    } elseif ($edge.identity -and ("$($edge.identity)".ToLowerInvariant() -ne $who.ToLowerInvariant())) {
+        return (& $refuse ("header identity ('$($edge.identity)') disagrees with the VERIFIED token identity ('$who') -- rejected") $path)
     }
-    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
-    if (-not $sig.valid) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("token signature rejected: " + $sig.reason) }
-    }
-    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $ExpectedIssuers -ExpectedAudiences $ExpectedAudiences -NowUtc $NowUtc
-    if (-not $cl.valid) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("token claims rejected: " + $cl.reason) }
-    }
-    # SEC-89: an application's token is refused explicitly -- not only because it carries no username claim.
-    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
-    if ($appOnly) { return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = $appOnly } }
-    # Identity comes from the VERIFIED token, never from the headers.
-    $tokenName = ''
-    foreach ($p in @('preferred_username', 'upn', 'email', 'unique_name')) {
-        $v = "$($jwt.payload.$p)".Trim()
-        if ($v) { $tokenName = $v; break }
-    }
-    if (-not $tokenName) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = 'verified token carries no username claim' }
-    }
-    # The header identity must match the verified token, or the headers are lying.
-    if ($edge.identity -and ($edge.identity.ToLowerInvariant() -ne $tokenName.ToLowerInvariant())) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("header identity ('$($edge.identity)') disagrees with the VERIFIED token identity ('$tokenName') -- rejected") }
-    }
-    # SEC-90: the oid of the VERIFIED token. An edge blob that names a different oid is lying, exactly as a different name.
-    $tokenOid = Get-PimJwtObjectId -Payload $jwt.payload
-    if ("$($edge.oid)" -and $tokenOid -and "$($edge.oid)" -ne $tokenOid) {
-        return @{ trusted = $false; identity = ''; layer = 'signed-token'; reason = ("header object id ('$($edge.oid)') disagrees with the VERIFIED token object id ('$tokenOid') -- rejected") }
-    }
-    return @{ trusted = $true; identity = $tokenName; oid = $tokenOid; layer = 'signed-token'; reason = 'signed token verified (signature + claims)' }
+    return @{ trusted = $true; identity = $who; oid = $oid; layer = 'signed-token'; tokenPath = $path; tokenKind = $kind; token = $tok
+              reason = $(if ($path -eq 'id-token-fallback') { "signed ID token validated by Microsoft.IdentityModel -- FALLBACK: $note" } else { "access token validated by Microsoft.IdentityModel ($path)" }) }
 }
 
 # ---- CR7: the shared sign-in front (framework §12.11g) -------------------------
@@ -732,15 +719,17 @@ function Test-PimManagerFrontBearerPath {
 function Test-PimManagerPageToken {
     <#
       PURE. The /api page token (one per Manager process, embedded in the page; the SEC-31 second factor next to the
-      identity). OFF the sign-in front (-Front:$false) it is exactly today's check: 'Authorization: Bearer <token>'.
-      Behind the front, Authorization belongs to the front (the user's ID token), so the page sends the token in
-      X-PIM-Token as well and only that header counts.
+      identity). AUTH-MODERN-1 (owner 2026-11-15): on EVERY layer the page token travels in X-PIM-Token and only that
+      header counts -- 'Authorization' belongs to Entra access tokens alone, so a page token there is never accepted
+      (-Authorization and -Front are kept for the callers' signature and are not consulted). Constant-time comparison.
     #>
     [CmdletBinding()]
     param([string]$Authorization = '', [string]$PageTokenHeader = '', [string]$ExpectedToken = '', [bool]$Front = $false)
-    if (-not "$ExpectedToken") { return $false }
-    if ($Front) { return ("$PageTokenHeader" -eq "$ExpectedToken") }
-    return ("$Authorization" -and "$Authorization" -eq "Bearer $ExpectedToken")
+    $a = "$PageTokenHeader"; $b = "$ExpectedToken"
+    if (-not $b -or -not $a -or $a.Length -ne $b.Length) { return $false }
+    $d = 0
+    for ($i = 0; $i -lt $a.Length; $i++) { $d = $d -bor ([int][char]$a[$i] -bxor [int][char]$b[$i]) }
+    return ($d -eq 0)
 }
 
 function Resolve-PimSigninFrontPrincipal {
@@ -748,7 +737,7 @@ function Resolve-PimSigninFrontPrincipal {
       PURE given its inputs. CR7: who is calling, proven by the token the shared sign-in front forwarded -- since front
       1.4.0 an ACCESS token for this app's own API scope (-AccessScope, aud = the client id or api://<client id>, v1 or
       v2 issuer), before it the user's ID token (no scp; refused with -RequireAccessToken).
-      Same verification primitives as layer 2 (Test-PimJwtSignature + Test-PimJwtClaims) -- no new crypto.
+      Validated by Microsoft.IdentityModel (Invoke-PimTokenValidation), the same helper as every other token path.
       Fails CLOSED on: issuer or audience not pinned (any tenant's token would verify), no token, a malformed
       token, no key set, a bad signature, bad iss / aud / exp / nbf, an access token without -AccessScope in its scp,
       an ID token when -RequireAccessToken, an application's token (SEC-89: idtyp = app, or roles with no user --
@@ -775,34 +764,33 @@ function Resolve-PimSigninFrontPrincipal {
     }
     $tok = "$IdToken".Trim()
     if (-not $tok) { return (& $no 'sign-in front: no forwarded token on this request (refused)') }
-    $jwt = Get-PimJwtParts -Token $tok
-    if ($null -eq $jwt) { return (& $no 'sign-in front: the forwarded token is not a well-formed JWT') }
+    if ($null -eq (Get-PimJwtParts -Token $tok)) { return (& $no 'sign-in front: the forwarded token is not a well-formed JWT') }
     if ($null -eq $Jwks) { return (& $no 'sign-in front: no JWKS available to verify the token (failing closed)') }
-    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
-    if (-not $sig.valid) { return (& $no ('sign-in front: token signature rejected: ' + $sig.reason)) }
+    # AUTH-MODERN-1: the token is validated by Microsoft.IdentityModel (signature RS256, issuer, audience = the client id or
+    # api://<client id>, lifetime) -- then authorised here.
+    $v = Invoke-PimTokenValidation -Token $tok -Jwks $Jwks -ExpectedIssuers $iss -ExpectedAudiences (Get-PimAccessTokenAudiences -Audiences $aud)
+    if (-not $v.valid) { return (& $no ('sign-in front: token rejected: ' + $v.reason)) }
+    $pl = $v.payload
     # SEC-89: a token without `scp` is NOT automatically an ID token -- an application's access token has none either.
-    # Refuse it for what it is, before the ID-token / access-token reasoning below.
-    $appOnly = Get-PimJwtAppOnlyReason -Payload $jwt.payload
+    $appOnly = Get-PimJwtAppOnlyReason -Payload $pl
     if ($appOnly) { return (& $no ('sign-in front: ' + $appOnly)) }
-    $scp = @("$($jwt.payload.scp)".Trim() -split '\s+' | Where-Object { $_ })
+    $scp = @("$($pl.scp)".Trim() -split '\s+' | Where-Object { $_ })
     $kind = 'ID token'
     if ($scp.Count) {
-        # front 1.4.0 (framework 12.11g item 10): an ACCESS token for the app's OWN API -- the audience is this app as a GUID (v2)
-        # or its api:// URI (v1), and the delegated scope must be the one the front asks for. Any other scope: refused.
+        # front 1.4.0 (framework 12.11g item 10): an ACCESS token for the app's OWN API, with the scope the front asks for
         $kind = 'access token'
-        $aud = @($aud + @($aud | Where-Object { $_ -notmatch '^api://' } | ForEach-Object { "api://$_" }) | Select-Object -Unique)
         if ($scp -notcontains "$AccessScope".Trim()) {
             return (& $no ("sign-in front: the forwarded access token carries scope '$($scp -join ' ')', not '$AccessScope' -- refused"))
         }
-    } elseif ($RequireAccessToken) {
-        return (& $no 'sign-in front: an ID token was forwarded, but this Manager accepts only the access token (PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN) -- refused')
+    } else {
+        if ($RequireAccessToken) { return (& $no 'sign-in front: an ID token was forwarded, but this Manager accepts only the access token (PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN) -- refused') }
+        # an ID token names the app as a bare client id, never as the api:// URI
+        if (@(@($pl.aud) | Where-Object { "$_" -match '^api://' }).Count -and -not @(@($pl.aud) | Where-Object { $aud -contains "$_" }).Count) { return (& $no 'sign-in front: token claims rejected: an ID token for the api:// audience') }
     }
-    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
-    if (-not $cl.valid) { return (& $no ('sign-in front: token claims rejected: ' + $cl.reason)) }
     $who = ''
-    foreach ($c in @('preferred_username', 'upn', 'email', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
+    foreach ($c in @('preferred_username', 'upn', 'email', 'unique_name')) { $x = "$($pl.$c)".Trim(); if ($x) { $who = $x; break } }
     if (-not $who) { return (& $no 'sign-in front: the verified token carries no username claim') }
-    return @{ trusted = $true; identity = $who; oid = (Get-PimJwtObjectId -Payload $jwt.payload); layer = 'signin-front'; reason = "sign-in front $kind verified (signature + claims)" }
+    return @{ trusted = $true; identity = $who; oid = (Get-PimJwtObjectId -Payload $pl); layer = 'signin-front'; reason = "sign-in front $kind validated by Microsoft.IdentityModel" }
 }
 
 function Get-PimHostedListenerPrefix {
@@ -861,7 +849,12 @@ function Test-PimHostedAuthPosture {
     if ($layer -eq 'signed-token') { $strict = $true }
     if ($strict) {
         return @{ hosted = $true; strict = $true; level = 'signed-token'; ok = $true
-                  message = 'HOSTED auth: STRICT -- the signed Entra token is verified (signature + issuer + audience + expiry) on every request.' }
+                  message = @(
+                      'HOSTED auth: STRICT -- two layers: Microsoft''s built-in sign-in in front (layer 1), and the Manager validates the'
+                      '  Entra token on every request with Microsoft.IdentityModel (layer 2: RS256 signature, this tenant, audience = this'
+                      '  app, expiry) -- the ACCESS token (a script / MCP bearer, else the sign-in''s token; scope user_impersonation), the'
+                      '  ID token only as the reported fallback while the sign-in does not request the API scope.'
+                  ) -join [Environment]::NewLine }
     }
     return @{ hosted = $true; strict = $false; level = 'edge-consistency'; ok = $false
               message = @(

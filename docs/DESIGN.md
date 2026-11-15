@@ -3126,18 +3126,16 @@ See §17.7 for the full template/approval mechanics.
     (`Get-PimRestToken`) takes the managed-identity branch when `IDENTITY_ENDPOINT` is present
     **and no client id is configured**; a hosted job therefore carries no `PIM_ClientId` (a client
     id with no usable credential would suppress the MI and authenticate as nothing).
-  - **The updater's Graph permissions (owner decision 2026-11-05; 3.0.54 adds the sixth).** The updater holds exactly six
-    Microsoft Graph application permissions -- `PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup`,
-    `PrivilegedAssignmentSchedule.Read.AzureADGroup`, `RoleManagementPolicy.Read.AzureADGroup`,
-    `GroupMember.Read.All` and `Application.Read.All` (both read only; the member-side read of the database job
-    identity's memberships, `GET /servicePrincipals/{id}/memberOf`, reads a service principal and needs both), and
+  - **The updater's Graph permissions (3.1.26).** The updater holds exactly four Microsoft Graph application
+    permissions -- `GroupMember.Read.All` and `Application.Read.All` (both read only; the member-side read of the database
+    job identity's memberships, `GET /servicePrincipals/{id}/memberOf`, reads a service principal and needs both),
     `Application.ReadWrite.OwnedBy` (writes only to app registrations the updater OWNS -- see "The updater owns PIM's app
-    registrations" below) -- and no directory role, no group write right and no tenant-wide application write right. With them, setup and every update keep the database job's own identity an
-    **active member of the SQL admin group**: a direct add first; on the role-assignable group that
-    is refused by design, so an active PIM-for-Groups assignment follows, permanent where the group's
-    policy allows, otherwise for the policy's maximum (said, with the end date) and renewed from 30
-    days before it ends. The membership is **read back before** the database job or the support job
-    starts; without the read-back the job is not started. The list lives in one place
+    registrations" below) and `User.ReadBasic.All` (the alert recipients' mail addresses) -- and no directory role, no group
+    write right, no PIM-for-Groups right and no tenant-wide application write right. The database job's own identity is a
+    **permanent direct member of the SQL admin group**, set once by setup (a direct add, read back) or by a recorded
+    Invardia Support-app step. Every update **reads** that membership and reports it when it is missing (a converge line
+    and the setup step `db-job`); it never writes it. The membership is **read back before** the database job or the
+    support job starts; without the read-back the job is not started. The list lives in one place
     (`Get-PimUpdaterGraphAppRoles`): setup grants it, and the updater checks its own token on every
     run and reports a missing permission -- it never grants itself.
     **When the membership cannot be read (3.0.48).** Right after a grant, a managed identity's token
@@ -3194,10 +3192,9 @@ See §17.7 for the full template/approval mechanics.
   - **Across tenants.** A managed identity lives in one directory, so a managing tenant acting *into*
     a managed tenant (S5) uses a multi-tenant application with a credential (§27.4).
   - Certificates or managed identity are the default everywhere. The Manager's web sign-in has **no
-    client secret**: the sign-in front (§11, "Web sign-in") proves itself with its managed identity's
-    federated credential. A client secret is accepted only where a platform requires one — an
-    installation set up earlier with Easy Auth (until it is moved to the sign-in front), or a container
-    engine deliberately configured to act as a named application.
+    client secret**: Microsoft's built-in sign-in (§11, "Web sign-in") proves itself with the web
+    identity's federated credential. A client secret is accepted only where a platform requires one —
+    a container engine deliberately configured to act as a named application.
 - **Two permission sets, granted by setup, never widened by a re-run**
   (`tools/setup/_PimSetupShared.ps1`: `Get-PimGraphAppRoleMap -RoleSet Engine|Manager`, applied by
   `Grant-PimMiGraph`, which **throws** on a refused assignment rather than warning).
@@ -3248,8 +3245,11 @@ See §17.7 for the full template/approval mechanics.
     identities read access on **that one secret**.
   - *none* — every send returns "switched off" (also to the TAP readiness probe).
   The Manager's Get Started > Mail sender and Settings > Mail & alerting > Mail sending are one form over
-  `GET/PUT /api/settings/mail`; `POST /api/settings/mail/test` sends a test mail and records the result
-  against the settings it proved, so "done" follows the data (a changed relay makes an old proof stale).
+  `GET/PUT /api/settings/mail`; `POST /api/settings/mail/test` queues a test mail that the PIM engine sends as its
+  own identity at its next run (within about 5 minutes); the engine records the result against the settings it
+  proved, so "done" follows the data (a changed relay makes an old proof stale). The PIM Manager web app itself sends
+  no mail: every mail it raises is queued for the engine, and it never reads or stores the SMTP password (the
+  published script puts it in Key Vault).
   Both scripts are published as standalone downloads with every release.
 - **Deleting** a provisioned admin *account* (test cleanup / offboarding) needs more than the
   Graph app roles above — user delete is a privileged directory operation requiring an
@@ -3693,9 +3693,8 @@ Cheap, and **never reachable without authentication**. Two exposure shapes are s
 chosen at deploy time (`Invoke-PimDeployAll -Exposure external|internal`, default `external` for
 new deployments; §11.4):
 
-- **External (default)** — the Manager is reachable over the internet, always behind Entra sign-in
-  through the sign-in front (below), which the installation creates, enables and reads back before
-  it completes. An optional allow-list assigns named people/groups and switches the app to
+- **External (default)** — the Manager is reachable over the internet, always behind Microsoft's
+  built-in sign-in (below), which the installation turns on and reads back before it completes. An optional allow-list assigns named people/groups and switches the app to
   *assignment required*. The container registry defaults to Basic.
 - **Internal (private-only)** — the Manager is reachable only from the VNet and peered/GSA clients;
   SQL gets a private endpoint by default and the registry defaults to Premium (Basic has no network
@@ -3726,21 +3725,69 @@ An environment's exposure cannot be changed in place (it is a property of the Co
 environment); moving between them is a rebuild (`Rebuild-PimEnvExternal.ps1`, §27.7). The diagram
 below is the **private-only** reference topology.
 
-**Web sign-in: the sign-in front.** The Manager's web app runs two containers. The **sign-in front**
-is the only one the platform's ingress reaches; the Manager itself listens on the loopback address
-only, so nothing reaches it except through the front. The front signs the person in with Microsoft
-Entra (authorization-code flow with PKCE) and redeems the code with its **managed identity's federated
-credential** — there is no client secret and no certificate, and the front refuses to start if one is
-configured. The session is pinned to a fixed length (8 hours by default), never extended by activity.
-Each request reaches the Manager with the person's signed token (on a new installation an access
-token for the Manager's own API), and the Manager verifies that token itself (signature, issuer, audience, expiry) before it maps the person to a role;
-a token that belongs to an application rather than a person is refused. Sessions, the token cache and
-the encryption keys live in the installation's own SQL database, the keys wrapped by a key in the
-installation's Key Vault, so a restart or an update signs nobody out. The same security headers
-(content security policy, HSTS, no framing) are set on every response. The front is one shared,
-reviewed component used by every product of the family; PIM Manager builds it from source at the
-version it pins, and the public release carries that source (`vendor/signin-front`, kept identical
-to the shared original and scanned so that it holds no secret, identifier or host name).
+**Web sign-in: Microsoft's built-in sign-in.** The Manager is protected by the sign-in that Azure
+Container Apps provides (built-in authentication). In plain words:
+
+* **Nobody reaches a page without signing in.** A browser is sent to Microsoft Entra ID first
+  (authorization-code flow). A program calling the API without a session gets `401`. A request that
+  merely *claims* to be signed in (a made-up identity header) also gets `401` -- it never reaches the
+  Manager.
+* **Entra always asks which account.** The sign-in always shows the account picker, so an
+  administrator who is signed in to the browser with an everyday account can choose the separate
+  admin account.
+* **No password for the sign-in itself.** The sign-in app registration trusts the Manager's own web
+  identity (`id-pim-web`, a managed identity) through a federated credential. There is no client
+  secret to store, rotate or leak, and nothing expires on a timer.
+* **Sign-in and token checks are done by Microsoft; PIM checks what you may do.** Two layers protect every
+  request. First, Microsoft's built-in sign-in stands in front of the Manager. Second, the Manager checks
+  the person's Entra **access token** on every request with **Microsoft's own token library,
+  Microsoft.IdentityModel 8.23.0** (`Microsoft.IdentityModel.JsonWebTokens` with `.Tokens`, `.Logging` and
+  `.Abstractions`; the net10.0 builds, signed by Microsoft). The library checks the RS256 signature against
+  the tenant's published keys, the issuer (this tenant), the audience (this Manager), the expiry and the
+  start time, with five minutes of clock skew. The Manager then checks the tenant id, the delegated scope
+  `user_impersonation`, that a person (not an application) signed in, and the person's role. The token
+  comes from the sign-in itself (the browser), or from `Authorization: Bearer` (scripts, the MCP endpoint).
+* **The library ships inside the product, pinned.** The four library files are part of the release
+  (`engine/_shared/vendor/identitymodel`). The image build checks each file's SHA-256. The Manager and the
+  engine check every file against the SHA-256 written in their own code before they load it. A file that
+  is missing or differs means no token is accepted at all. At every start, before it serves a request,
+  the Manager also proves the library works: it checks three made-up tokens (one that must be accepted,
+  one signed with another key and one without a signature, which must both be refused). If any answer
+  is wrong, the Manager does not start. The engine does the same before it checks signed changes.
+* **The browser keeps a valid token without a new sign-in.** The access token lasts about an hour; the
+  sign-in asks for `offline_access`, and the page renews the token a few minutes before it ends (and
+  once more when a request comes back as not signed in). When renewal is not possible, the page offers
+  **Sign in again** and **Sign in with another account**.
+* **No keys, no shared secrets.** The page's own session value travels only in its own header, never as
+  a bearer token. Scripts use a person's Entra token (the Azure CLI is pre-authorised for the scope);
+  applications use their own Entra token and must be on the SuperAdmin's list. How-to:
+  `tools/pim-manager/manual/authenticate.md`.
+* **The MCP endpoint is protected the same way.** `/mcp` stays behind the built-in sign-in and the Manager
+  checks the token itself. Only the protected-resource metadata documents
+  (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`) are open: they name
+  the tenant's Entra sign-in and the scope, nothing else. The Manager's own `401` points an MCP client to
+  them.
+* **Signed changes use the same check.** The token the Manager verified is kept with the change. The
+  engine checks it again with the same library before it acts.
+* **Sessions end after 8 hours**, fixed -- activity never extends them.
+* **The token store has its own small place.** It is one blob container (`pim-auth-tokens`) in the
+  installation's own storage account, which accepts only Microsoft Entra sign-ins (no account keys).
+  The web identity may read and write that one container and nothing else, and holds no Key Vault
+  role.
+* **One container, one door.** The Manager's app runs one container; the platform's sign-in is the
+  only way in.
+
+The installation sets all of this up and reads every part back before it reports success. The nightly
+update checks the same settings on every run and **reports** any difference (it never changes sign-in
+settings or rights itself); the fix is a setup step. An installation that chose the optional sign-in
+front (`Set-PimManagerSigninFront.ps1`) keeps it -- an update never moves it back.
+
+The **access request portal** (the separate request app) uses the same built-in sign-in, also without
+a secret: its API answers `401` to anyone without a valid Microsoft Entra token, and the request app
+verifies the token itself as well. Its **PIN pages are the one named exception**: the people who
+request access have admin accounts that are *disabled* until access is granted, so they cannot sign
+in to Microsoft. They sign in to those pages with a PIN mailed to the address on record, with rate
+limits, a lockout after repeated wrong PINs and a short, HttpOnly, Secure, SameSite=Strict session.
 
 ### 11.1 Single-tenant topology
 
@@ -3779,15 +3826,15 @@ to the shared original and scanned so that it holds no secret, identifier or hos
  └────────────────────────────────────────────────────────────────────────────────────┘
         ACR (container image, MI pull)        (no Key Vault: the identities are managed identities)
 ```
-> A container install has **one Key Vault**, for the sign-in front: it holds only the key that wraps the
-> front's session encryption keys (the identities are managed identities, so no credential is stored).
+> A container install has **one Key Vault**: the place PIM keeps the few secrets it has (the identities
+> are managed identities, so no credential for them is stored, and the web sign-in has no secret at all).
 > The MSP managing tenant's Key Vault additionally holds its non-exportable baseline-signing key.
 
 **Access levels (defense in depth, all private):**
 1. **Network** — only the mgmt / PAW-tier0 / SAW-tier1 subnets (or VPN/Bastion)
    can reach the app's private endpoint; the internet cannot.
-2. **Identity** — the sign-in front (Entra) forces sign-in; unauthenticated → redirect
-   to login; the Manager verifies the token it receives itself.
+2. **Identity** — Microsoft's built-in sign-in forces sign-in; unauthenticated → redirect
+   to Microsoft Entra ID (an API caller: `401`); the Manager verifies the token it receives itself.
 3. **Authorization** — the manager maps the signed-in principal to SuperAdmin /
    Admin / Reader, and **portal-admins** are delegated managers scoped by tier,
    level, service and scope (helpdesk L2 sees only its AU-scoped groups).
@@ -4075,12 +4122,26 @@ Key semantics:
   `All`. `engine-delta` is create/update only; `All` names the scope set, not a destructive mode.
 - **The web app starts no job (3.1.25)** — the Manager's identity is the identity of an app that
   is reachable from the internet, so it holds only its own data: no Container Apps job right, no
-  Contributor, no role-assignment right, no registry push and no Key Vault secrets right (the one
-  exception is reading the hash of the break-glass passphrase, a single secret). On a
+  Contributor, no role-assignment right, no registry push and no Key Vault role of any kind (the
+  break-glass passphrase is checked against a salted hash in the PIM database, §17.9). Its only
+  Azure data right is on its own data: the sign-in token store (one blob container). On a
   configuration commit, a queue commit and **Run now** the work is queued and the engine picks it
   up at its next scheduled start (within about five minutes); `Start-PimManagerTickNow` answers
   "next scheduled start" and makes no Azure call. The updater reports any such right it finds on
-  the Manager's identity as a security finding. Runs in progress do not stop it — a
+  the Manager's identity as a security finding.
+- **The wake queue (3.1.26)** — so that a commit or **Run now** still starts the engine within a
+  minute, the install has ONE Azure Storage queue, `pim-wake`, in its own storage account (Entra
+  sign-in only, no shared keys). The Manager's identity may only put a message on that one queue;
+  the message is a job name and nothing else (`{"job":"engine"}`), sent with the managed identity
+  (no key, no shared access signature). A separate Container Apps job, `caj-pim-wake`, is started
+  by the platform when a message arrives (an event trigger that reads the queue as the engine's
+  identity). That job decides, not the sender: it accepts only a name from the list it ships with,
+  only in a message younger than 15 minutes that carries nothing else, records every accepted and
+  refused message in the audit log, and then runs one normal engine run — the same image, the same
+  identity and the same checks as a scheduled start. Without the queue (or before its rights are
+  granted) the Manager answers "next scheduled start" as before. Setup creates the queue, the job
+  and the three rights on that queue; the updater keeps the queue and the job current and reports
+  a missing right. Runs in progress do not stop it — a
   new execution works on the areas they do not hold; only when the most runs that may go side by
   side are already running does it wait (one of them picks the work up when it finishes its current
   job). It is debounced (45 s) so a multi-entity commit starts one execution, and never fails the
@@ -4447,7 +4508,7 @@ PIM Manager deploys in one of **two modes**. They share one engine (REST-only,
 no PowerShell modules), one SQL data model, and one identity model: **managed identity**
 where the engine is hosted in Azure, an **engine application authenticating with a
 certificate** elsewhere (§7, §27) — never device-code; no client secret for the web sign-in (the
-sign-in front uses its managed identity's federated credential). The mode only changes *where it runs* and
+built-in sign-in uses the web identity's federated credential). The mode only changes *where it runs* and
 *how it is wired up*.
 
 | | Community mode (S2, this edition) | Subscription mode |
@@ -4457,7 +4518,7 @@ sign-in front uses its managed identity's federated credential). The mode only c
 | Host | Azure Container Apps in **your** subscription: a scale-to-zero Manager, the scheduled engine job and the in-cloud nightly updater (§11.6.0) | The same |
 | Identity | Container **managed identities** for the engine, Manager and updater | The same; an engine application only where a tenant must be crossed (S5) |
 | Store | Azure SQL, managed-identity contained users only; secrets only in the installation's Key Vault | The same |
-| Manager auth | The **sign-in front** (Entra sign-in, no client secret), always on; external ingress by default, private-only optional | The same |
+| Manager auth | **Microsoft's built-in sign-in** (Entra sign-in, no client secret, account picker, 8-hour session), always on; external ingress by default, private-only optional | The same |
 | Updates | Release rings + the in-cloud updater: a new ring version at the **nightly** run; "Update now" only for an installation that said yes to connecting to Invardia (it then holds an install key) | Release rings + the in-cloud updater: nightly, or "Update now" |
 | What differs | Only the licensed **features** (Pro features are listed in chapter 17) and the package source above. Every other difference between a Community and a Pro installation is a defect (2026-11-11). | |
 > **Real environment values never live in the published docs.** This guide uses
@@ -4632,7 +4693,7 @@ direct re-run never reshapes an environment by itself.
 
 What it wires:
 - **`--ingress external`** → on an **external** environment (the default) the Manager is
-  internet-reachable behind Entra sign-in through the sign-in front; on an **internal-only** environment it gets a
+  internet-reachable behind Microsoft's built-in sign-in; on an **internal-only** environment it gets a
   **private static IP** — the one ingress reachable from peered/hub/GSA clients.
   (`--ingress internal` is app-to-app only and would be unreachable from VNet clients — a
   multi-hour lesson baked into the script.)
@@ -7816,8 +7877,9 @@ policy on a marker-fenced lab group (approver inherited from the group's departm
 For GA / PRA / tenant-root-owner groups protected by `Groups_RequireApproval` (formerly `approval-required`):
 - **Activation**: Manager **Audit & Settings → Emergency access (break-glass)** (SuperAdmin only)
   → the administrator enters the **emergency passphrase**, verified server-side against the
-  per-instance Key Vault secret `PIM-EmergencyPasscode` (never stored locally;
-  in-memory comparison). On success the server writes the override to the shared store,
+  installation's passphrase check in the PIM database (`pim.Settings['EmergencyPassphraseVerifier']`,
+  a salted PBKDF2-SHA256 hash — never the passphrase; read fresh on every activation, so it works
+  the moment it is set up). On success the server writes the override to the shared store,
   `pim.Settings['EmergencyOverride']`:
   `{ active, scopeGroupTags[], activatedBy, activatedAt, expiresAt }` (a failed SQL write
   throws — it never falls back to a file the engine would not see) and the engine
@@ -7848,41 +7910,48 @@ For GA / PRA / tenant-root-owner groups protected by `Groups_RequireApproval` (f
   audit either way (a wrong passphrase is `emergency.passcode.failed`; a lockout or a missing
   passphrase is `emergency.activate.refused`). Nothing is **granted**: responders still activate their
   eligible membership through PIM, and Entra role and Azure resource policies are not touched.
-- **Provisioning the passphrase (2026-09-19).** Measured that day, no Manager had `PIM_EmergencyVault`
-  and no script provisioned the passphrase, so every activation was refused.
-  `tools/setup/Set-PimEmergencyPassphrase.ps1` (certificate SPN or signed-in; `-WhatIf`) takes the
-  passphrase as a SecureString (or a prompt, typed twice; min 12 characters, no leading/trailing
-  whitespace), stores its **SHA-256 hex** as the secret `PIM-EmergencyPasscode` in the environment's
-  own key vault (the verifier uses a 64-char hex as-is, so the clear passphrase is never in the vault
-  or on a command line), grants the Manager's managed identity **Key Vault Secrets User on that
-  secret only**, sets `PIM_EmergencyVault` on the Manager (ARM read-modify-write,
-  `Set-PimAcaAppEnvValue`), and reads each one back. All ARM / Key Vault REST, no az CLI. The Manager
-  maps the `PIM_EmergencyVault` / `PIM_EmergencyPasscodeSecret` env vars into the globals the
-  verifier reads, and `Get-PimSqlSecretFromKeyVault` mints its vault token through PIM-Rest when the
-  Az module is absent (the hosted containers ship none).
+- **Provisioning the passphrase.** `tools/setup/Set-PimEmergencyPassphrase.ps1` (certificate SPN or
+  signed-in; `-WhatIf`) takes the passphrase as a SecureString (or a prompt, typed twice; min 12
+  characters, no leading/trailing whitespace), turns it into its SHA-256 hex in the operator's own
+  window, and stores only a **verifier** derived from that: PBKDF2-HMAC-SHA256, 600 000 iterations,
+  16 random bytes of salt per write, a 32-byte key (`engine/_shared/PIM-EmergencyVerifier.ps1`). The
+  verifier is written to `pim.Settings['EmergencyPassphraseVerifier']`, read back, checked against the
+  same hash and audited (`emergency.passphrase.set`). The clear passphrase is never stored, never on a
+  command line and never logged. The person running it is a member of the installation's SQL admin
+  group (and Reader on its resource group, to find the database from the Manager app). The script
+  writes nothing in Key Vault, makes no role assignment and does not change the Manager app.
+- **No Key Vault right for the web app.** The Manager is the internet-facing app, so its identity
+  holds **no Key Vault role at all**: the check reads the store the Manager already reads. The setting
+  name marks it as secret material, so a configuration backup never copies it and a restore can never
+  bring an old passphrase back. An installation whose passphrase was kept in a key vault by an earlier
+  version is moved once: the update reads that secret with the updater's own identity and stores the
+  verifier derived from it (the passphrase does not change); where it may not read it, the update
+  says so and `Set-PimEmergencyPassphrase.ps1 -VaultName <vault> -MigrateFromKeyVault` does the same
+  move as the signed-in administrator. A Key Vault role still held by the web identity is reported by
+  the update as a security finding.
 - **Status on the card.** `GET /api/emergency-status` (Reader+) carries `passphrase` =
-  `Get-PimEmergencyPassphraseStatus` (configured / source / vault / secret name / reason — **never
-  the passphrase or its hash**). The Settings card shows *"Passphrase: configured (kept in key vault …)"*
-  or, when none is set up, one calm line *"Not set up yet — set an emergency passphrase first (once)."*,
-  who runs the setup and where, and the published two-line command (download from the support site,
-  then the run line with the tenant, subscription, resource group and web app name this installation
-  knows; a placeholder for what it cannot read, such as the key vault). Every input and the activate
-  button are disabled until then, with the reason as their tooltip.
+  `Get-PimEmergencyPassphraseStatus` (configured / source / legacyVault / reason — **never the
+  passphrase, its hash or the verifier**). The Settings card shows *"Passphrase: configured (kept as a
+  salted hash in this installation's database)"* or, when none is set up, one calm line *"Not set up
+  yet — set an emergency passphrase first (once)."*, who runs the setup and where, and the published
+  two-line command (download from the support site, then the run line with the tenant, subscription,
+  resource group and web app name this installation knows). When the passphrase still sits in an
+  earlier version's key vault, the card says it moves once and the command carries `-VaultName …
+  -MigrateFromKeyVault`. Every input and the activate button are disabled until then, with the reason
+  as their tooltip.
 - **Card text (2026-11-10).** The top of the card says what it does in two sentences (approval off for
   chosen groups for 1–24 hours, eligible people activate at once; nobody gets new access). The steps
   above, the lockout and what is never touched are behind the card's *More info* (settings catalog
   entry `EmergencyOverride`). The setup script is published as one self-contained file, like the
   other support scripts.
-- **Shared verify (pure, KV-backed).** The verify is extracted into
+- **Shared verify (pure).** The verify is extracted into
   `engine/_shared/PIM-Governance.ps1` so the Manager *and* any client-PC
-  break-glass path use the identical logic. `Resolve-PimEmergencyExpectedHash`
-  resolves the expected hash **KV-first** (`PIM-EmergencyPasscode` via the
-  existing KV REST reader — the secret value may be the passphrase, which is
-  hashed, or a 64-char SHA256 hex, used as-is) then the local
-  `$global:PIM_EmergencyPasscodeHash` fallback (so it still works from a client
-  PC when KV is the source of truth). `Resolve-PimEmergencyVerification` composes
-  the pure pieces: `Test-PimLockout` (5-in-15-min) → `Test-PimPasscodeHash`
-  (`Test-PimConstantTimeEqual`) → record a failure on miss; `Get-PimEmergencyTtlHours`
+  break-glass path use the identical logic. `Resolve-PimEmergencyVerifier` reads the
+  stored verifier through a store reader (the Manager: `Get-PimManagerSetting`); a local
+  console may instead set `$global:PIM_EmergencyPasscodeHash` in memory
+  (`Resolve-PimEmergencyExpectedHash`). `Resolve-PimEmergencyVerification` composes
+  the pure pieces: `Test-PimLockout` (5-in-15-min) → `Test-PimEmergencyVerifier`
+  (PBKDF2, constant-time compare; or `Test-PimPasscodeHash` for the local hash) → record a failure on miss; `Get-PimEmergencyTtlHours`
   clamps the requested TTL to 1–24h (default 4). All injected-time, no I/O in the
   core, fully offline-tested (`tests/Test-PimGovernance.ps1`).
 
@@ -10321,6 +10390,36 @@ campaigns, owner reviews, auto-extend, access-request decide / end, jobs, reconc
 break-glass, restore, revocation, deletions, guard release, and settings / licence / tenant changes are read-only or
 absent in the MCP and stay in the page.
 
+**Chat in the Manager (Pro `ai.chat`, off by default; MANAGER-CHAT-1, 3.1.26).** The chat panel is a client of the MCP
+tools, inside the Manager. `POST /api/chat` takes the conversation from the browser (user and assistant turns only; the
+system instructions are the server's own) and answers through the customer's Azure OpenAI deployment
+(`{endpoint}/openai/deployments/{deployment}/chat/completions`, api-version **2024-10-21** by default -- the GA version of
+chat completions with function tools, validated against the deployment in use). How it is protected:
+- **The person's own role, and nothing more.** The caller is resolved exactly as for every other route. The model is
+  offered only the MCP tools that role lists, and of those only the ones that read or prepare; every tool call it makes
+  runs through the same MCP dispatch as an assistant connected to `/mcp`, with that person's identity and role. A tool the
+  role does not list, a tool that saves, approves, runs or ends something, and emergency access, revocations and deletions
+  are never offered and are refused if named. So the data sent to the model is only what that person may read, and a
+  change is only **prepared** as a pending change -- the person reviews and saves it in the page.
+- **Tool results are data.** The server's instructions tell the model that tool results are data, never instructions,
+  and nothing the model writes can widen the role: every action is the caller's own, and the writes only prepare.
+  Secrets, tokens, keys and connection strings are removed from every tool result before it is sent, and each result is
+  size-capped.
+- **Keyless.** PIM Manager signs in to Azure OpenAI with its own managed identity (a token for
+  `https://cognitiveservices.azure.com`); the identity needs the role Cognitive Services OpenAI User on that resource. There
+  is no key field: a key-like setting is refused. Where PIM Manager has no managed identity, the chat is not available.
+- **Only an Azure OpenAI address.** Because PIM Manager's sign-in is sent to the endpoint, the endpoint must be
+  `https://<name>.openai.azure.com` or `https://<name>.cognitiveservices.azure.com` -- no path, port or user information;
+  anything else is refused on save and again on every call, and redirects are not followed.
+- **Bounded.** At most six rounds of tool calls per question (then one final answer without tools), a token budget per
+  question, a time limit per call. The model is a reasoning model: it gets a real completion budget
+  (`max_completion_tokens`), and an empty answer that ran out of budget is said calmly.
+- **Nothing kept, everything audited.** The conversation lives only in the browser tab (Clear chat empties it). Every tool
+  call is audited exactly as an MCP call (`mcp.<read|propose>`), marked `via ai-chat`.
+- **Ops proof.** `GET /api/chat/status` tells every role whether the chat is on for it; Admin and up also see the endpoint
+  host and deployment, and `?check=1` gets a token and asks for one tiny fixed test answer (no tenant data). Settings
+  (`AiChat`: on, endpoint, deployment, api-version) are changed by a SuperAdmin and audited; a Pro setup step writes the same settings by parameters and grants no Azure role.
+
 **The API and MCP reference (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** The reference is generated from the code of the running version,
 never kept by hand: every route with its method, path, the role its body checks first and its Pro feature, and every
 MCP tool with its kind, role and input schema. The one-line descriptions come only from a curated file, never from code
@@ -11158,12 +11257,13 @@ cannot see either one — the restore reports a faithful match and the Manager t
 unresolvable and its assignments are already gone), and repairs them after the restore and
 **before** exposure, verifying every SID by reading it back.
 
-### 27.8 Sign-in secret rotation — one command, not (yet) unattended
+### 27.8 Sign-in secret rotation — there is nothing to rotate
 
-The portal's built-in sign-in (Container Apps authentication) does not accept a managed identity, so it
-uses an app registration with a **client secret**: minted by `Set-PimManagerEasyAuth.ps1`, valid **two
-years**, stored only as the Container Apps secret `easyauth-client-secret`. It grants nothing in Azure,
-Graph or the database — it only completes the sign-in.
+The portal's built-in sign-in (Container Apps authentication) has **no client secret**: the sign-in app
+registration trusts the web identity `id-pim-web` by a federated credential, and the platform signs in
+with it (`Set-PimManagerEasyAuth.ps1` sets this up and removes the old `easyauth*` client secrets once
+the new sign-in reads back). Nothing expires on a timer. The text below describes the rotation that an
+installation set up before this change needed, until its next setup run.
 
 It is the one thing in the design that fails on a timer. Today it is **reported, then renewed by a
 deliberate command** — nothing renews it unattended:
@@ -12006,10 +12106,9 @@ banner; "Verify permissions" and "Check again" check again at once.
 | both | a mail mode is chosen | the stored mode (shared mailbox is the default) |
 | shared mailbox | the sender mailbox exists | Microsoft Graph resolving the address PIM sends as |
 | shared mailbox | the engine job's scoped send right | the engine job's own last real send ("not proven yet" until it has sent) |
-| shared mailbox | the PIM Manager's scoped send right | the Manager's own last real send -- Send a test mail proves it |
 | shared mailbox | no tenant-wide Graph Mail.Send on either identity | their Microsoft Graph application permissions |
 | SMTP relay | server, port, From address and user set | the stored relay settings |
-| SMTP relay | the password in Key Vault, readable by the sender | the PIM Manager reading the secret (the value is discarded) |
+| SMTP relay | the password in Key Vault, readable by the sender | the PIM engine reading the secret at its test mail (the value is discarded; the web app never reads it) |
 | SMTP relay | a test mail through these settings | the latest test mail, for exactly these settings |
 | both | alert recipients | the Alerting settings |
 
@@ -12393,9 +12492,22 @@ portal -- use it:
 ### 32.5 The portal's sign-in and headers
 
 Every response carries Content-Security-Policy (own origin only, `frame-ancestors 'none'`), Strict-Transport-Security
-(one year), X-Frame-Options DENY, nosniff and Referrer-Policy same-origin. Sessions are 8 hours, fixed. The sign-in
-front without a secret -- OpenID Connect code flow with PKCE, the portal's managed identity as a federated credential,
-the portal bound to the local interface behind it -- replaces Easy Auth **(in build)**.
+(one year), X-Frame-Options DENY, nosniff and Referrer-Policy same-origin. Sessions are 8 hours, fixed. The sign-in is
+Microsoft's built-in sign-in without a secret: the code flow, the account picker, the web identity as a federated
+credential, the token store reached by that identity, and the Manager verifying the signed token itself (§11, "Web
+sign-in").
+
+**The access request API (`<portal>/api/v1`).** Other systems sign in with a Microsoft Entra application token only;
+there are no API keys and no shared secrets. Microsoft's built-in sign-in is in front of every `/api/v1` route (only the
+PIN portal pages are let through, because the requesters' admin accounts are disabled until access is granted), and the
+broker verifies every bearer itself as well: an RS256 signature against the tenant's signing keys, the issuer and the
+tenant id of this tenant, the audience of the PIM access request API, the token's lifetime (two minutes of clock skew), an
+application token (no user), the application allowed under Settings > Access requests > API applications, and the
+application role for the route -- `Requests.Submit` (submit, status, cancel) or `Requests.Read` (status only). The setup
+step that prepares the PIM access request API defines both roles, and the request job assigns `Requests.Submit` to every
+allowed application and removes it from one that leaves the list, reading each change back. A caller gets its token with
+a managed identity, or else a certificate. PIM cannot see how a token was obtained, so "no client secret" is kept by how
+the calling application is registered.
 
 ### 32.6 Release control
 

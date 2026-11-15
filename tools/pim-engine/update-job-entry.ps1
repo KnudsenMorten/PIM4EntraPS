@@ -82,6 +82,8 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-BuiltinAuth.ps1')     # BUILT-IN-AUTH-1 the built-in sign-in standard -- REPORTED only (never written here)
+. (Join-Path $solRoot 'engine\_shared\PIM-Wake.ps1')             # WAKE-1 (3.1.26) the wake queue + the event-triggered wake job (step 2e-sexies; grants REPORTED only)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
 . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkSqlUser.ps1')  # G3A-COPY-LEFTOVER: the pull job's OWN database user (100.156 B); its admin group membership READ only
@@ -363,13 +365,14 @@ function Invoke-PimUpdaterConvergeStep {
         Say ("database job ($When): $($db.state) -- $($db.detail)") $(if ($db.state -eq 'ok') { 'DarkGray' } else { 'Yellow' })
         if ([int]$db.warnings) { Say ("converge ($When): $fixByHand to fix by hand in all (database job: $([int]$db.warnings))") 'Yellow' }
     } catch { Say "  db job converge skipped: $($_.Exception.Message)" 'Yellow' }
-    # ---- 2e-quater. DBINIT-MEMBERSHIP (framework 4.5 point 5, owner via Invardia 2026-11-05) -- THE DATABASE JOB IDENTITY IN ----
-    # THE SQL ADMIN GROUP, BY THE PRODUCT'S OWN UPDATE CODE (never a hand-made Graph call): (a) a direct add, else (b) an ACTIVE
-    # PIM-for-Groups member assignment, PERMANENT first, TIME-LIMITED only when the group's policy refuses permanent (said, with
-    # the end date); (c) READ BACK; (d) both refused = both errors named and the database job is not started on it. A
-    # time-limited membership ending within 30 days is renewed (adminExtend) and read back; a failed renewal is a WARNING with
-    # the end date (this line + the heartbeat's db-job detail), never a failed update. REST through this updater's own identity;
-    # a refusal NAMES the missing permission and changes nothing -- nothing is granted here (engine/_shared/PIM-DbInitMembership.ps1).
+    # ---- 2e-quater. DBINIT-MEMBERSHIP -- THE DATABASE JOB IDENTITY IN THE SQL ADMIN GROUP, READ AND REPORTED ONLY -----------
+    # SECURE-WEB-1 (Invardia / owner 2026-11-14, 3.1.26): the updater holds NO PIM-for-Groups write right any more
+    # (PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is tenant-wide). id-pim-dbinit is a PERMANENT DIRECT member, set
+    # ONCE by setup or a recorded Support-app step; this step only READS it (Invoke-PimDbInitMembershipReport: never a
+    # member add, never an assignment request, never a renewal) through ONE plain read -- the identity's memberOf
+    # (GroupMember.Read.All + Application.Read.All; framework G5a, Invardia 2026-11-15: no PIM-for-Groups right at all) -- and
+    # REPORTS "not a member" as drift (a converge line counted to fix by hand + the setup step 'db-job' = missing). The job gate (2f) is unchanged: the database
+    # job is started only on a membership READ as true in this run (or an earlier proof when the read is refused).
     $dbm = $null; $dbProof = $null; $dbProofGroup = ''
     # the updater's OWN Graph permissions (owner 2026-11-05 "Grant updater the right"; ONE list: Get-PimUpdaterGraphAppRoles):
     # read from the roles in its own Graph token and REPORTED when one is missing -- setup / the Support app grants them, the
@@ -386,11 +389,11 @@ function Invoke-PimUpdaterConvergeStep {
         if ($db -and [bool]$db.present -and "$($db.identityPrincipalId)".Trim() -and $db.adminIsGroup -ne $false) {
             $dmSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
             $dmAdm = Get-PimDbInitAdminGroup -Arm $armSeam -ResourceGroupId "/subscriptions/$sub/resourceGroups/$rg" -SqlServer $dmSrv
-            if ($dmAdm.isGroup -eq $false) { Say "database job identity: $($dmAdm.reason) -- not put into a group" 'Yellow' }
+            if ($dmAdm.isGroup -eq $false) { Say "database job identity: $($dmAdm.reason) -- no group membership to read" 'Yellow' }
             elseif (-not $dmAdm.groupId) { Say "database job identity: the SQL admin group is not known ($($dmAdm.reason)) -- nothing written" 'Yellow' }
             else {
                 $dmGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
-                $dbm = Invoke-PimDbInitMembershipEnsure -Graph $dmGraph -GroupId $dmAdm.groupId -GroupName $dmAdm.name -PrincipalId "$($db.identityPrincipalId)" -IdentityName "$($db.identityName)"
+                $dbm = Invoke-PimDbInitMembershipReport -Graph $dmGraph -GroupId $dmAdm.groupId -GroupName $dmAdm.name -PrincipalId "$($db.identityPrincipalId)" -IdentityName "$($db.identityName)"
                 foreach ($l in @($dbm.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
                 $fixByHand += [int]$dbm.warnings
                 # the READ-BACK is the fact the heartbeat reports (a hand-read or an earlier run's proof is replaced by it)
@@ -453,6 +456,21 @@ function Invoke-PimUpdaterConvergeStep {
         $fixByHand += [int]$dlu.warnings
         if ("$($dlu.state)" -ne 'n/a') { Say ("pull job database user ($When): $($dlu.state) -- $($dlu.detail)") $(if ($dlu.state -eq 'ok') { 'DarkGray' } else { 'Yellow' }) }
     } catch { Say "  pull job database user not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-sexies. WAKE-1 (3.1.26, framework SECURE-WEB-1 point 1) -- THE WAKE QUEUE + THE WAKE JOB ON EXISTING INSTALLS -----
+    # The queue 'pim-wake' in the install's storage account and the event-triggered job caj-pim-wake (the engine's image, as the
+    # engine identity -- written with its image here, so the job roll 2b finds it current), created / converged with this job's
+    # Contributor on the resource group. The ROLE grants on the queue are setup's / the Support app's (Deploy-PimWakeJob.ps1):
+    # a missing one is REPORTED, never granted here. pim.Settings 'WakeQueue' (what the Manager sends to) is recorded once the
+    # queue and the job are in place. Never fails the update.
+    try {
+        if (Get-Command Invoke-PimWakeConverge -ErrorAction SilentlyContinue) {
+            $wkAb = ''; try { $wkAb = Get-PimInstallName -Role asbuilt } catch { $wkAb = 'caj-pim-asbuilt' }
+            $wk = Invoke-PimWakeConverge -SubscriptionId $sub -ResourceGroup $rg -EngineJob $tickJob -ManagerApp $managerApp -AsBuiltJob $wkAb -Arm $armSeam -Store $storeSeam
+            foreach ($l in @($wk.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+            $fixByHand += [int]$wk.warnings
+            Say ("wake ($When): job $($wk.state), rights on the queue $($wk.rights)$(if ($wk.state -ne 'ok' -or $wk.rights -ne 'ok') { ' -- Commit / Run now wait for the next scheduled start until it is ok' })") $(if ($wk.state -eq 'ok' -and $wk.rights -eq 'ok') { 'DarkGray' } else { 'Yellow' })
+        }
+    } catch { Say "  wake queue / job not converged: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -536,6 +554,21 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($script:PimSkvResult.lines)) { Say ("secrets to Key Vault: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         foreach ($rb in @($script:PimSkvResult.rollback)) { Say ("secrets to Key Vault: rollback record (no values) " + ($rb | ConvertTo-Json -Depth 6 -Compress)) 'DarkGray' }
     } catch { Say "  secrets to Key Vault not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-quater. BUILT-IN-AUTH-1 (owner 2026-11-14) -- THE BUILT-IN SIGN-IN STANDARD, REPORTED ONLY --------------------
+    # The same standard the install writes (engine/_shared/PIM-BuiltinAuth.ps1): built-in authentication on with the federated
+    # credential (no client secret), the token store, the account picker and the 8-hour session; the Manager verifying the signed
+    # token; ONE container (no sign-in front); id-pim-web with Blob Data Contributor on pim-auth-tokens only and NO Key Vault role.
+    # ARM + Graph GET only: the updater NEVER writes a sign-in setting or a role (P9) -- a difference is a converge line + the setup
+    # step 'builtin-signin' (fixed by setup through the Support app). An install on the opt-in sign-in front is n/a (never moved back).
+    $script:PimBuiltinAuthResult = $null
+    try {
+        $baArm = { param($m, $p, $b) if ("$m" -ne 'GET') { throw "the built-in sign-in check is read only (refused $m)" }; Invoke-PimArm -Method GET -Path $p }
+        $baGraph = { param($m, $p, $b) if ("$m" -ne 'GET') { throw "the built-in sign-in check is read only (refused $m)" }; Invoke-PimGraph -Path ('/' + "$p".TrimStart('/')) }
+        $baTid = "$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()
+        $script:PimBuiltinAuthResult = Invoke-PimBuiltinAuthCheck -Arm $baArm -Graph $baGraph -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TenantId $baTid
+        foreach ($l in @($script:PimBuiltinAuthResult.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        if ("$($script:PimBuiltinAuthResult.state)" -eq 'missing') { $fixByHand++ }
+    } catch { Say "  built-in sign-in not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g. FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03) -- THE ONE-TIME STEPS, CHECKED ON EVERY RUN ----
     # READ ONLY (ARM GET + one SQL scalar): private network, the Jobs Operator role + SchedulerTickJobId, CR8 (registry admin
     # user, Key Vault purge protection, no SAS in the update source, SQL auditing), the front's key + schema + private vault,
@@ -567,8 +600,10 @@ function Invoke-PimUpdaterConvergeStep {
         # SEC-10 (step 2f-ter): the move's own fact (secretsToKeyVault = ok | missing | n/a | unknown | off + how + detail) -- the
         # setup step keyvault-secrets-only takes WHO fixes it from here (Get-PimSkvSetupStepState: rights missing = support-app)
         try { $skF = Get-PimSkvSetupFact -Result $script:PimSkvResult; foreach ($k in @($skF.Keys)) { $ssF[$k] = $skF[$k] } } catch { }
+        # BUILT-IN-AUTH-1 (step 2f-quater): the sign-in standard's fact (builtinSignin = ok | missing | n/a | unknown + detail) -> setup step builtin-signin
+        if ($script:PimBuiltinAuthResult) { $ssF['builtinSignin'] = "$($script:PimBuiltinAuthResult.state)"; $ssF['builtinSigninDetail'] = ConvertTo-PimSetupStepDetail -Text "$($script:PimBuiltinAuthResult.detail)" }
         $script:PimSetupFacts = $ssF
-        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail', 'identityNamesDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
+        $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail', 'identityNamesDetail', 'builtinSigninDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
     } catch { Say "  setup steps not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2g-bis. KV-POLICY-DENIED-PRIVATE / framework installer rule 11 -- A PRIVATE INSTALL'S KEY VAULT IS PRIVATE ------------

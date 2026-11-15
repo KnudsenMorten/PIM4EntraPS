@@ -56,12 +56,9 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'verify'               = 'Deployment health check'
     'licence'              = 'Your licence'
     'support-app-access'   = 'Invardia support access'
-    # GUIDED-INSTALL-FRONT (2026-10-21): the PIM Manager ends on the sign-in front, never on Easy Auth
-    'signin-front-vault'   = 'Key Vault for the sign-in'
-    'signin-front-state'   = 'Sign-in state in the database'
-    'signin-front-app'     = 'Sign-in application scope'
-    'signin-front-image'   = 'Sign-in front image'
-    'signin-front'         = 'Sign-in front for the PIM Manager'
+    # BUILT-IN-AUTH-1 (owner 2026-11-14): the PIM Manager ends on Microsoft's built-in sign-in (the 'easyauth' step); the five
+    # sign-in front steps are gone -- what stays is the install's own Key Vault (the place PIM's secrets go)
+    'install-keyvault'     = 'The installation''s Key Vault'
     'verify-install'       = 'End-of-install check'
     'health-check'         = 'Final health check'
     'completed'            = 'Installation complete'

@@ -83,7 +83,7 @@
       "azure": [
         { "role": "Reader", "scope": "resourceGroup", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "The Environment report reads the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) -- the PIM resource group only (PIM 100.22 b)" },
         { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the Manager image when the registry is reached with the managed identity" },
-        { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads ONLY the one secret PIM-EmergencyPasscode (the emergency passphrase hash), granted on that secret -- never the vault and never the SMTP relay password (SECURE-WEB-1: mail goes through the engine)" }
+        { "role": "Storage Blob Data Contributor", "scope": "storage", "required": false, "why": "Microsoft's built-in sign-in in front of the web app keeps its sign-in tokens in ONE blob container (pim-auth-tokens, the token store) -- that container only, never the storage account. The web app holds NO Key Vault role (SECURE-WEB-1, 3.1.26): the emergency passphrase check is kept in the PIM database" }
       ],
       "sql": [
         { "role": "pim_web", "required": true, "coveredBy": [ "db_datareader" ], "why": "Least-privilege web role (framework 12.23): its store, read the tenant registry, register managed tenants; no schema right; granted through the signed access procedure. A new install gets this role only; an install the security cut-over has not reached yet still works through db_datareader + db_datawriter" },

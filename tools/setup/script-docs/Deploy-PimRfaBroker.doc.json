@@ -2,7 +2,7 @@
   "script": "Deploy-PimRfaBroker.ps1",
   "product": "pim",
   "title": "Deploy the access-request (RFA) broker",
-  "purpose": "Deploys the public access-request (RFA) broker of PIM Manager Pro: its storage account and tables, its network, its Container Apps environment and app, the storage rights and Easy Auth; with the inputs given it also registers the API audience, the broker's mail sender and PIM's RFA settings. Plan only unless -Apply.",
+  "purpose": "Deploys the public access-request (RFA) broker of PIM Manager Pro: its storage account and tables, its network, its Container Apps environment and app, the storage rights and Microsoft's built-in sign-in; with the inputs given it also registers the API audience, the broker's mail sender and PIM's RFA settings. Plan only unless -Apply.",
   "whenToRun": "After the main installation, when the access-request portal (Pro add-on) is wanted. The broker is always public by design (an internal environment is refused); -ApiAllowedIps restricts it to known systems. Placement Shared puts it in its own subnet of the PIM VNet; Island in its own subscription. It is part of the PIM Manager release package, not a separate download: run it from the package folder that Install-Invardia (or the guided install) downloaded and verified (.\\tools\\setup\\Deploy-PimRfaBroker.ps1). When the store's SQL server is private, run it from inside the network so the settings step can reach it.",
   "standalone": false,
   "sourcePath": "tools/setup/Deploy-PimRfaBroker.ps1",

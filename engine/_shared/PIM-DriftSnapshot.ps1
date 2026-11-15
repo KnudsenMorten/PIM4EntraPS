@@ -523,6 +523,214 @@ function Add-PimDriftPayloadNames {
     }
 }
 
+if (-not (Get-Command Get-PimTrustCarryMaxAgeDays -ErrorAction SilentlyContinue)) {
+    function Get-PimTrustCarryMaxAgeDays { <# PURE. LITERAL. Framework TRUST-1 point 8 (the same value as PIM-JobLanes.ps1). #> return 7 }
+}
+
+function Get-PimDriftCarriedSet {
+    <#
+      PURE. TRUST-1 round 4 item 5: what the stored drift document holds from an EARLIER run (carried areas -- not compared this
+      run): @{ scopes = @{ name -> carriedFromUtc }; keys = <HashSet 'scope|key', case-insensitive>; groupIds = <HashSet> }.
+      Every action the Manager offers on drift (ignore, delete, group delete, apply) is refused for these -- in the API.
+    #>
+    param([AllowNull()][object]$Doc)
+    $scopes = @{}
+    $keys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $gids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    # Round 5 G2: a KEPT document whose newest run failed on every area (lastRun.trusted = false) ages too -- the areas its lastRun
+    # names STALE (DRIFT-SOURCE-STALE, compared longer ago than Get-PimTrustCarryMaxAgeDays) are refused like carried ones.
+    $lrStale = @{}
+    $lr = Get-PimDriftSnapshotField $Doc 'lastRun'
+    if ($null -ne $lr -and "$(Get-PimDriftSnapshotField $lr 'trusted')" -match '^(?i)false$') {
+        # round 6 F3 (decided: every action on data not read this run is refused): the areas the newest run could NOT compare
+        # (lastRun.failed) are refused AT ONCE, not only once they are stale; their date = when they were last compared
+        $prevAtL = "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $Doc 'refreshedUtc'))"
+        foreach ($fn in @(@(Get-PimDriftSnapshotField $lr 'failed') | Where-Object { "$_".Trim() })) { $lrStale["$fn"] = $prevAtL }
+        foreach ($x in @(@(Get-PimDriftSnapshotField $lr 'stale') | Where-Object { $null -ne $_ })) { $lrStale["$(Get-PimDriftSnapshotField $x 'scope')"] = "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $x 'sinceUtc'))" }
+    }
+    foreach ($s in @(@(Get-PimDriftSnapshotField $Doc 'scopes') | Where-Object { $null -ne $_ })) {
+        $name = "$(Get-PimDriftSnapshotField $s 'scope')"
+        if (-not [bool](Get-PimDriftSnapshotField $s 'carried') -and -not $lrStale.ContainsKey($name)) { continue }
+        $scopes[$name] = $(if ([bool](Get-PimDriftSnapshotField $s 'carried')) { "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $s 'carriedFromUtc'))" } else { $lrStale[$name] })
+        foreach ($it in @(@(Get-PimDriftSnapshotField $s 'items') | Where-Object { $null -ne $_ })) {
+            $k = "$(Get-PimDriftSnapshotField $it 'key')"; if ($k) { [void]$keys.Add("$name|$k") }
+            $gd = Get-PimDriftSnapshotField $it 'groupDelete'; $g = "$(Get-PimDriftSnapshotField $gd 'groupId')".Trim(); if ($g) { [void]$gids.Add($g) }
+            $rv = Get-PimDriftSnapshotField $it 'revoke'; $g2 = "$(Get-PimDriftSnapshotField $rv 'groupId')".Trim(); if ($g2) { [void]$gids.Add($g2) }
+        }
+    }
+    return @{ scopes = $scopes; keys = $keys; groupIds = $gids }
+}
+
+function Get-PimDriftActionRefusal {
+    <#
+      PURE. TRUST-1 round 4 item 5: the plain reason an action on drift is refused (409), or '' -- the scope is carried, the item
+      ('scope|key') is in a carried scope, or the group belongs to a carried item. -Set: Get-PimDriftCarriedSet.
+    #>
+    param([AllowNull()][hashtable]$Set, [string]$Scope = '', [string]$Key = '', [string]$GroupId = '', [string[]]$SelectKeys = @())
+    if ($null -eq $Set) { return '' }
+    $hit = ''
+    if ("$Scope".Trim() -and $Set.scopes.ContainsKey("$Scope".Trim())) { $hit = "$Scope".Trim() }
+    elseif ("$Scope".Trim() -and "$Key".Trim() -and $Set.keys.Contains("$("$Scope".Trim())|$("$Key".Trim())")) { $hit = "$Scope".Trim() }
+    elseif ("$GroupId".Trim() -and $Set.groupIds.Contains("$GroupId".Trim())) { $hit = 'the group' }
+    else { foreach ($sk in @($SelectKeys)) { if ("$sk".Trim() -and $Set.keys.Contains("$sk".Trim())) { $hit = ("$sk" -split '\|')[0]; break } } }
+    if (-not $hit) { return '' }
+    $when = if ($Set.scopes.ContainsKey($hit)) { " (last compared $($Set.scopes[$hit]))" } else { '' }
+    return "This item is not from today: $hit was not compared this run and is shown from the last complete check$when. Nothing was done -- act on it once the area is compared again."
+}
+
+function Test-PimDriftScopeFeatureOn {
+    <#
+      Framework TRUST-1 point 7, checked FIRST (round 3 item 6): is the scope's provider feature on for this install? $true for
+      a core scope (no feature key -- it runs on the engine's approved Graph rights, engine\_shared\PIM-RightsList.ps1), $false
+      when its feature is off or unlicensed, $true when it cannot be told (no provider registry / feature gate in this process).
+    #>
+    param([string]$Scope)
+    try {
+        if (-not (Get-Command Get-PimEngineProvider -ErrorAction SilentlyContinue)) { return $true }
+        $p = Get-PimEngineProvider -Scope $Scope
+        if ($null -eq $p -or -not "$($p.feature)".Trim()) { return $true }
+        if (-not (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue)) { return $true }
+        return [bool](Test-PimFeatureAvailable -Key "$($p.feature)" -Quiet)
+    } catch { return $true }
+}
+
+function Test-PimDriftScopeFeatureGated {
+    <#
+      TRUST-1 round 5 H5: is the scope BEHIND a feature switch (its provider names a feature key)? Only such a scope can be
+      "not part of this install" when it was never compared. $false for a core scope AND when it cannot be told (no provider
+      registry in this process) -- fail-closed: a core scope's error is always a failure this time.
+    #>
+    param([string]$Scope)
+    try {
+        if (-not (Get-Command Get-PimEngineProvider -ErrorAction SilentlyContinue)) { return $false }
+        $p = Get-PimEngineProvider -Scope $Scope
+        return [bool]($null -ne $p -and "$($p.feature)".Trim())
+    } catch { return $false }
+}
+
+function Get-PimDriftStoredRefusal {
+    <#
+      TRUST-1 round 5 G5 / H7: the 409 reason for an action on drift, from the STORED drift document (Get-PimDriftCarriedSet +
+      Get-PimDriftActionRefusal), or ''. FAIL-CLOSED: a document that could not be READ (a failed read -- never "nothing
+      stored") refuses the action: "could not check whether this item is current -- try again". -Read { -> document }: test seam.
+    #>
+    param([string]$Scope = '', [string]$Key = '', [string]$GroupId = '', [string[]]$SelectKeys = @(), [scriptblock]$Read = $null)
+    $doc = $null; $err = ''
+    try {
+        if ($Read) { $doc = & $Read }
+        else {
+            $doc = Get-PimTenantCacheEntry -Kind 'drift'
+            if ($null -eq $doc -and (Get-Command Get-PimTenantCacheReadError -ErrorAction SilentlyContinue)) { $err = "$(Get-PimTenantCacheReadError -Kind 'drift')".Trim() }
+        }
+    } catch { $err = "$($_.Exception.Message)" }
+    if ($err) { return "Could not check whether this item is current ($err) -- nothing was done. Try again." }
+    return (Get-PimDriftActionRefusal -Set (Get-PimDriftCarriedSet -Doc $doc) -Scope $Scope -Key $Key -GroupId $GroupId -SelectKeys $SelectKeys)
+}
+
+function Merge-PimDriftCarriedScopes {
+    <#
+      TRUST-1 (points 2, 7, 8; gap 4). Splits the document's scopes the way every job does:
+        absent by design  the scope's FEATURE is off for this install -- skippedFeature, or (checked FIRST, round 3 item 6) an
+                          erroring scope whose provider feature is off (-FeatureOn) -- or a scope that errors, was NEVER
+                          compared before and is not on the approved rights list (-Approved) -> scopesUnknown with the stable
+                          code DRIFT-SCOPE-NOT-PRESENT; it blocks nothing. Round 5 H5: "never compared" applies ONLY to a scope
+                          behind a feature switch (-Gated, Test-PimDriftScopeFeatureGated); a core scope errors = failed.
+        failed this time  any other error, or not compared for a data reason (ok, not checked, NO skippedFeature: a live read
+                          refused, unreadable bindings) -> its entry is replaced by the PREVIOUS document's entry of that scope
+                          when that one was compared or carried (carried = $true, carriedFromUtc = when it was last compared,
+                          carriedReason); none to carry = the entry stays (not checked, no counts).
+        stale             a carried scope older than Get-PimTrustCarryMaxAgeDays (point 8): still listed with its date (stale =
+                          $true), named in scopesStale with DRIFT-SOURCE-STALE; staleNew = it became stale on THIS run.
+      Every engine scope runs on the engine's approved Graph rights, so -Approved defaults to $true (an erroring core scope is
+      always failed this time); a scope behind a feature asks -FeatureOn (Test-PimDriftScopeFeatureOn).
+      Round 3 item 12: the counters are recomputed -- scopesChecked = compared THIS run, scopesCarried, scopesFailed = failed this
+      run, scopesNotChecked = every scope not compared this run; ok = nothing failed this run. Totals over compared + carried.
+      Changes -Doc in place; returns @{ failed = [string[]]; carried; unknown; stale; staleNew; reasons }.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Doc, [AllowNull()][object]$Previous = $null, [datetime]$NowUtc = [datetime]::UtcNow,
+          [scriptblock]$FeatureOn = $null, [scriptblock]$Approved = $null, [switch]$PreviousUnreadable, [scriptblock]$Gated = $null)
+    if (-not $FeatureOn) { $FeatureOn = { param($s) Test-PimDriftScopeFeatureOn -Scope $s } }
+    if (-not $Approved) { $Approved = { param($s) $true } }
+    if (-not $Gated) { $Gated = { param($s) Test-PimDriftScopeFeatureGated -Scope $s } }
+    $prevBy = @{}
+    $prevAt = "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $Previous 'refreshedUtc'))"
+    foreach ($ps in @(@(Get-PimDriftSnapshotField $Previous 'scopes') | Where-Object { $null -ne $_ })) {
+        if ([bool](Get-PimDriftSnapshotField $ps 'ok') -and [bool](Get-PimDriftSnapshotField $ps 'checked')) { $prevBy["$(Get-PimDriftSnapshotField $ps 'scope')"] = $ps }
+    }
+    $failed = [System.Collections.Generic.List[string]]::new(); $carried = [System.Collections.Generic.List[object]]::new()
+    $unknown = [System.Collections.Generic.List[object]]::new(); $reasons = [System.Collections.Generic.List[object]]::new()
+    $stale = [System.Collections.Generic.List[object]]::new(); $staleNew = [System.Collections.Generic.List[object]]::new()
+    $out = [System.Collections.Generic.List[object]]::new()
+    $maxDays = Get-PimTrustCarryMaxAgeDays
+    foreach ($sd in @($Doc['scopes'])) {
+        if ($null -eq $sd) { continue }
+        $name = "$(Get-PimDriftSnapshotField $sd 'scope')"
+        $ok = [bool](Get-PimDriftSnapshotField $sd 'ok'); $chk = [bool](Get-PimDriftSnapshotField $sd 'checked')
+        $skipF = "$(Get-PimDriftSnapshotField $sd 'skippedFeature')".Trim()
+        if (-not $ok -or (-not $chk -and -not $skipF)) {
+            $why = "$(Get-PimDriftSnapshotField $sd 'error')".Trim(); if (-not $why) { $why = "$(Get-PimDriftSnapshotField $sd 'notCheckedReason')".Trim() }
+            $readBefore = $prevBy.ContainsKey($name)
+            $fOn = [bool](& $FeatureOn $name)
+            # round 4 item 2 (Invardia): a scope NEVER compared before fails THIS time only on a real rights-gap signal -- an
+            # approved right refused (HTTP 401 / 403: DRIFT-RIGHT-MISSING, also a RIGHTS-LIVE-1 missing-right case); anything else
+            # (no licence, nothing discovered yet, a first-run error) is UNKNOWN and blocks nothing. A previous document that could
+            # not be READ is never "never compared" (-PreviousUnreadable).
+            # Round 5 H5: "never compared = unknown" holds ONLY for a scope behind a feature switch (-Gated); a CORE scope (no feature
+            # key, or it cannot be told) with ANY error is FAILED this time.
+            $rightsGap = ($why -match '(?i)\b40[13]\b|Forbidden|Unauthori[sz]ed|Authorization_RequestDenied|AuthorizationFailed|Insufficient privileges')
+            $gatedS = [bool](& $Gated $name)
+            $countsFailed = $fOn -and ($readBefore -or $PreviousUnreadable -or -not $gatedS -or ($rightsGap -and [bool](& $Approved $name)))
+            if (-not $countsFailed) {
+                $unknown.Add([ordered]@{ scope = $name; code = 'DRIFT-SCOPE-NOT-PRESENT'; reason = $(if (-not $fOn) { "the feature of this area is off for this install ($why)" } else { "never compared, no approved right refused ($why)" }) })
+                # round 4 item 10: an area the install does not have is not "not checked" -- it says skippedFeature, so the uplink's
+                # driftItems is not left out for good because of it
+                if (-not $fOn -and $sd -is [System.Collections.IDictionary]) { $sd['skippedFeature'] = 'off-for-this-install'; $sd['ok'] = $true; $sd['checked'] = $false; $sd['notCheckedReason'] = "the feature of this area is off for this install ($why)" }
+                elseif ($sd -is [System.Collections.IDictionary]) { $sd['skippedFeature'] = 'not-present'; $sd['ok'] = $true; $sd['checked'] = $false; $sd['notCheckedReason'] = "not part of this install's check yet ($why)" }
+                $out.Add($sd); continue
+            }
+            $code = if ($rightsGap -and -not $readBefore) { 'DRIFT-RIGHT-MISSING' } else { '' }
+            $failed.Add($name); $reasons.Add([ordered]@{ scope = $name; error = $why; code = $code })
+            if ($readBefore) {
+                $p = $prevBy[$name]; $c = [ordered]@{}
+                foreach ($pp in $p.PSObject.Properties) { $c[$pp.Name] = $pp.Value }
+                $from = "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $p 'carriedFromUtc'))"; if (-not $from) { $from = $prevAt }
+                $c['carried'] = $true; $c['carriedFromUtc'] = $from; $c['carriedReason'] = $why
+                $at = $null; try { $at = [datetime]::Parse($from, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $at = $null }
+                if ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalDays -gt $maxDays) {
+                    $c['stale'] = $true
+                    $sx = [ordered]@{ scope = $name; code = 'DRIFT-SOURCE-STALE'; sinceUtc = $from }
+                    $stale.Add($sx); if (-not [bool](Get-PimDriftSnapshotField $p 'stale')) { $staleNew.Add($sx) }
+                }
+                $out.Add($c); $carried.Add([ordered]@{ scope = $name; fromUtc = $from; stale = [bool]$c['stale'] })
+                continue
+            }
+        } elseif (-not $chk -and $skipF) {
+            $unknown.Add([ordered]@{ scope = $name; code = 'DRIFT-SCOPE-NOT-PRESENT'; reason = "$(Get-PimDriftSnapshotField $sd 'notCheckedReason')" })
+        }
+        $out.Add($sd)
+    }
+    $m = 0; $ch = 0; $x = 0; $w = 0; $ex = 0; $compared = 0
+    foreach ($sd in $out) {
+        if (-not ([bool](Get-PimDriftSnapshotField $sd 'ok') -and [bool](Get-PimDriftSnapshotField $sd 'checked'))) { continue }
+        if (-not [bool](Get-PimDriftSnapshotField $sd 'carried')) { $compared++ }
+        $m += [int](Get-PimDriftSnapshotField $sd 'missing'); $ch += [int](Get-PimDriftSnapshotField $sd 'changed'); $x += [int](Get-PimDriftSnapshotField $sd 'extra')
+        $w += [int](Get-PimDriftSnapshotField $sd 'warnings'); $ex += [int](Get-PimDriftSnapshotField $sd 'excluded')
+    }
+    $Doc['scopes'] = $out.ToArray()
+    $Doc['total'] = ($m + $ch + $x + $w)
+    $Doc['counts'] = [ordered]@{ missing = $m; changed = $ch; extra = $x; warnings = $w }
+    $Doc['excluded'] = $ex
+    $Doc['scopesChecked'] = $compared
+    $Doc['scopesNotChecked'] = $out.Count - $compared
+    $Doc['scopesFailed'] = $failed.Count
+    $Doc['ok'] = ($failed.Count -eq 0 -and $out.Count -gt 0)
+    $Doc['scopesCarried'] = $carried.ToArray()
+    $Doc['scopesUnknown'] = $unknown.ToArray()
+    $Doc['scopesStale'] = $stale.ToArray()
+    $Doc['scopesFailedThisRun'] = $failed.ToArray()
+    return @{ failed = $failed.ToArray(); carried = $carried.ToArray(); unknown = $unknown.ToArray(); stale = $stale.ToArray(); staleNew = $staleNew.ToArray(); reasons = $reasons.ToArray() }
+}
+
 # ===========================================================================
 # THE SCHEDULER JOB -- 'drift-snapshot'
 # ===========================================================================
@@ -532,8 +740,10 @@ function Invoke-PimDriftSnapshotJob {
       🔒 -WhatIf reads NOTHING and writes NOTHING.
       🔒 No SQL store -> REFUSED (unimplemented), never a memory-only write the Manager could never read.
       🔴 Every scope failing is STORED (the page shows why) and then THROWS so the run is recorded failed.
-         Some scopes failing is stored and reported ran=$true with the failed scopes named.
-      Drift found -> the 'drift' alert (debounced by the alerting layer), through whichever sender this process has.
+         Some scopes failing (or not checked for a data reason) is stored and reported ran=$true, warning=$true with
+         the scopes named (TRUST-1 gap 2).
+      Drift found in a FULLY CHECKED run -> the 'drift' alert (debounced by the alerting layer) + the Invardia alert;
+      a partial run sends neither (TRUST-1 gap 2).
     #>
     param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $type = $script:PimDriftSnapshotJobType
@@ -555,10 +765,49 @@ function Invoke-PimDriftSnapshotJob {
             detail = "unimplemented:$type (the engine core or PIM-Governance.ps1 is not loaded on this worker)" }
     }
 
+    # TRUST-1 gap 4: the stored document BEFORE this run -- a scope that fails this time keeps its last good result from it.
+    # Round 4 items 1 + 6: what was stored when this run STARTED (its refreshedUtc, for the compare-and-set), and a previous
+    # document that could not be READ (a failed read, never "nothing stored": every unread scope then counts as failed, and
+    # the stored document is NOT overwritten).
+    $startDoc = $null; if (Get-Command Get-PimTenantCacheDocStamp -ErrorAction SilentlyContinue) { $startDoc = Get-PimTenantCacheDocStamp -Kind $kind -Path '$.refreshedUtc' }
+    $prevDoc = $null; $prevUnreadable = $false
+    try { $prevDoc = Get-PimTenantCacheEntry -Kind $kind } catch { $prevDoc = $null; $prevUnreadable = $true }
+    if ($null -eq $prevDoc -and (Get-Command Get-PimTenantCacheReadError -ErrorAction SilentlyContinue) -and "$(Get-PimTenantCacheReadError -Kind $kind)".Trim()) { $prevUnreadable = $true }
+    if ($null -ne $startDoc -and "$($startDoc.error)".Trim()) { $prevUnreadable = $true }
     $doc = Invoke-PimDriftSnapshot -NowUtc $NowUtc
     $doc['source'] = 'scheduler'
     $doc['correlationId'] = "$($global:PIM_JobCorrelationId)"
-    $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
+    $mg = Merge-PimDriftCarriedScopes -Doc $doc -Previous $prevDoc -NowUtc $NowUtc -PreviousUnreadable:$prevUnreadable
+    # TRUST-1 point 8 + round 6 F6: EVERY stale area is handed to the register on every run -- the stall-report list decides
+    # "already asked for" (one request per area and since-date, kept 60 days sent or not), so a registration that failed on the
+    # day it became stale is made on the next run, and a kept document that is never rewritten still opens exactly one
+    foreach ($sx in @($mg.stale)) {
+        if (Get-Command Register-PimTrustStaleReport -ErrorAction SilentlyContinue) { try { [void](Register-PimTrustStaleReport -Job 'pim-drift-snapshot' -Part "$($sx.scope)" -Code 'DRIFT-SOURCE-STALE' -SinceUtc "$($sx.sinceUtc)" -NowUtc $NowUtc) } catch { } }
+    }
+    # round 4 items 6 + 12: NOT stored over the previous result while that one could not be read, or when EVERY scope failed this
+    # run (the previous result stays, its "as of" unchanged, with 'lastRun' saying this run failed); else stored only over the
+    # document this run STARTED with (round 4 item 1, second guard: a newer result stored meanwhile is kept).
+    # Round 5 G10: "every scope failed" counts the scopes this install HAS -- an absent one (scopesUnknown) is not a scope that
+    # could have been read.
+    $liveScopeN = @($doc.scopes).Count - @($mg.unknown).Count
+    $allFailedD = ($liveScopeN -gt 0 -and @($mg.failed).Count -ge $liveScopeN)
+    $where = ''
+    if ($prevUnreadable -or ($allFailedD -and $null -ne $prevDoc)) {
+        # Round 5 G2: the kept document AGES -- the areas carried past Get-PimTrustCarryMaxAgeDays are named stale on its lastRun
+        # (DRIFT-SOURCE-STALE: the Manager then refuses every action on them, Get-PimDriftCarriedSet; driftItems is left out while
+        # lastRun.trusted = false)
+        $lrD = [ordered]@{ utc = "$($doc.refreshedUtc)"; trusted = $false; failed = @($mg.failed); reason = $(if ($prevUnreadable) { 'the previous drift result could not be read' } else { 'every area failed this run' }) }
+        if (@($mg.stale).Count) { $lrD['stale'] = @($mg.stale) }
+        $mk = -1; if (-not $prevUnreadable -and (Get-Command Set-PimTenantCacheLastRun -ErrorAction SilentlyContinue)) { try { $mk = Set-PimTenantCacheLastRun -Kind $kind -Path '$.refreshedUtc' -Start $startDoc -LastRun $lrD } catch { $mk = -1 } }
+        $where = "not stored ($($lrD.reason)) -- the previous result is kept" + $(if ($mk -gt 0) { ', lastRun recorded on it' } else { '' })
+    } else {
+        $wrD = Set-PimTenantCacheEntryIfUnchanged -Kind $kind -Value $doc -Path '$.refreshedUtc' -Start $startDoc
+        if ($wrD.newer) {
+            return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$doc.total; newerKept = $true
+                detail = "$type`: a newer drift result was stored meanwhile -- kept (this run's result is not stored, nothing mailed)" }
+        }
+        $where = "$($wrD.where)"
+    }
     # Delegation overview (All privileged permissions) reads which live assignments are MANAGED from here (pim.TenantCache kind 'managed-live').
     if ($script:PimLastManagedLive) {
         $__mlStored = $false
@@ -572,6 +821,13 @@ function Invoke-PimDriftSnapshotJob {
     }
     $scopeDocs = @($doc.scopes)
     $failedNames = @($scopeDocs | Where-Object { -not $_.ok } | ForEach-Object { "$($_.scope)" })
+    # TRUST-1 (points 2, 3, 7; round 3 item 1): held PER SCOPE. A scope that FAILED THIS TIME (an error, or not compared for a
+    # data reason) keeps its last good result on the Drift page (carried, never actionable) and makes the run PARTIAL (a
+    # WARNING); the drift mail + the Invardia alert still go out for the scopes compared THIS run, and the mail names the
+    # held scopes and since when. driftItems on the uplink stays out until every scope is compared again (its SQL). A scope
+    # this install does not have (its feature off) is named UNKNOWN and blocks nothing.
+    $failedThisRun = @($mg.failed)
+    $fullyChecked = ($failedThisRun.Count -eq 0 -and $scopeDocs.Count -gt 0)
     # REQ-U wave 2: live workload warnings (orphan group / unmanaged binding / wrong permissions) are drift too.
     $sum = "{0} drift item(s) (missing={1} changed={2} extra={3} warnings={7}) across {4} scope(s) in {5}s -> {6}" -f `
         $doc.total, $doc.counts.missing, $doc.counts.changed, $doc.counts.extra, $scopeDocs.Count, $doc.durationSeconds, $where, [int]$doc.counts.warnings
@@ -579,14 +835,27 @@ function Invoke-PimDriftSnapshotJob {
     # §79.4: ignored findings are not mailed (the STORED document stays complete; the Manager filters it at read time).
     $__ign = @(Get-PimDriftIgnores)
     if ($__ign.Count) { $doc = Invoke-PimDriftIgnoreFilter -Doc $doc -Ignores $__ign; $scopeDocs = @($doc.scopes) }
-    if ([int]$doc.total -gt 0) {
+    # the scopes compared THIS run: only their items are mailed and counted for Invardia (a carried scope's items are old data)
+    $mailScopes = @($scopeDocs | Where-Object { $null -ne $_ -and [bool](Get-PimDriftSnapshotField $_ 'ok') -and [bool](Get-PimDriftSnapshotField $_ 'checked') -and -not [bool](Get-PimDriftSnapshotField $_ 'carried') })
+    $mc = [ordered]@{ missing = 0; changed = 0; extra = 0; warnings = 0 }
+    foreach ($ms in $mailScopes) { foreach ($k in @('missing', 'changed', 'extra', 'warnings')) { $mc[$k] = [int]$mc[$k] + [int](Get-PimDriftSnapshotField $ms $k) } }
+    $mailTotal = [int]$mc.missing + [int]$mc.changed + [int]$mc.extra + [int]$mc.warnings
+    $heldTxt = ''
+    if ($failedThisRun.Count) {
+        $cfrom = @{}; foreach ($c in @($mg.carried)) { $cfrom["$($c.scope)"] = "$($c.fromUtc)" }
+        $codeOf = @{}; foreach ($rr in @($mg.reasons)) { if ("$($rr.code)") { $codeOf["$($rr.scope)"] = "$($rr.code)" } }
+        $heldTxt = 'Not checked this run (their drift is held, not mailed): ' + (@($failedThisRun | ForEach-Object { "$_" + $(if ($codeOf.ContainsKey("$_")) { " [$($codeOf["$_"])]" } else { '' }) + $(if ($cfrom.ContainsKey("$_")) { " (last complete check $($cfrom["$_"]))" } else { ' (never checked)' }) }) -join ', ')
+        Write-Host "[$type] $heldTxt" -ForegroundColor DarkYellow
+    }
+    if ($mailTotal -gt 0) {
         $title = 'Configuration drift detected'
         # §79.3 (operator 2026-09-25: mails must carry "detailed information like configuration drift"): the counts, then
         # the items themselves -- area, type, what it is and, for a changed item, what differs (live -> desired). Capped;
         # the Drift page (the mail links to it) has the full list.
         $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
-        $detail = "missing={0} changed={1} extra={2} warnings={3}" -f $doc.counts.missing, $doc.counts.changed, $doc.counts.extra, [int]$doc.counts.warnings
-        $all = @(foreach ($sd in $scopeDocs) { foreach ($it in @($sd.items)) { if ($it -and "$($it.type)" -ne 'warning' -or ($it -and $it.counted)) { [pscustomobject]@{ scope = "$($sd.scope)"; type = "$($it.type)"; label = "$($it.label)"; detail = "$($it.detail)" } } } })
+        $detail = "missing={0} changed={1} extra={2} warnings={3}" -f $mc.missing, $mc.changed, $mc.extra, [int]$mc.warnings
+        if ($heldTxt) { $detail += '<br>' + (& $enc $heldTxt) }
+        $all = @(foreach ($sd in $mailScopes) { foreach ($it in @($sd.items)) { if ($it -and "$($it.type)" -ne 'warning' -or ($it -and $it.counted)) { [pscustomobject]@{ scope = "$($sd.scope)"; type = "$($it.type)"; label = "$($it.label)"; detail = "$($it.detail)" } } } })
         if ($all.Count) {
             $lines = @($all | Select-Object -First 15 | ForEach-Object {
                 '&bull; <b>' + (& $enc $_.scope) + '</b> [' + (& $enc $_.type) + '] ' + (& $enc $_.label) + $(if ($_.detail) { ' &mdash; <i>' + (& $enc $_.detail) + '</i>' } else { '' }) })
@@ -617,7 +886,7 @@ function Invoke-PimDriftSnapshotJob {
             # PIM 100.105: the alert table's rows -- the tenant differs from what PIM Manager defines; one row per item
             # (kind = missing / changed / extra / warning, name = area and item). $title / $detail stay as they were.
             $__words = @{ Who = 'Customer'; Status = 'Warning'
-                Problem = ("{0} item(s) in the tenant differ from what PIM Manager defines (configuration drift)" -f [int]$doc.total)
+                Problem = ("{0} item(s) in the tenant differ from what PIM Manager defines (configuration drift)" -f $mailTotal) + $(if ($heldTxt) { ". $heldTxt" } else { '' })
                 Todo = 'Open the Drift page: tick what should follow the definitions and press Apply now, or press Ignore for what is intended'
                 Findings = @($all | Select-Object -First 15 | ForEach-Object { @{ kind = $(switch ("$($_.type)") { 'missing' { 'Missing in the tenant'; break } 'changed' { 'Changed in the tenant'; break } 'extra' { 'Extra in the tenant'; break } default { 'Warning' } }); name = ("{0}: {1}" -f $_.scope, $_.label) + $(if ($_.detail) { " ($($_.detail))" } else { '' }) } }) }
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
@@ -627,29 +896,39 @@ function Invoke-PimDriftSnapshotJob {
                 $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' @__words }
                 [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0 @am)
             }
-            if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name 'DriftAlertState' -Value ([pscustomobject]@{ lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); cadence = $__cad; total = [int]$doc.total }) }
+            if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name 'DriftAlertState' -Value ([pscustomobject]@{ lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); cadence = $__cad; total = $mailTotal }) }
         } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" }
             # OPEN-17 / framework 8.19: the same finding for Invardia (pim.drift.found, warning), at the same point and cadence as
             # the mail -- COUNTS only, never an item; recorded for the next uplink cycle, best effort (never throws).
             try {
                 if (Get-Command Register-PimUplinkAlert -ErrorAction SilentlyContinue) {
-                    [void](Register-PimUplinkAlert -Event 'drift' -NowUtc $NowUtc -Measured @{ total = [long]$doc.total
-                        missing = [long]$doc.counts.missing; changed = [long]$doc.counts.changed; extra = [long]$doc.counts.extra })
+                    [void](Register-PimUplinkAlert -Event 'drift' -NowUtc $NowUtc -Measured @{ total = [long]$mailTotal
+                        missing = [long]$mc.missing; changed = [long]$mc.changed; extra = [long]$mc.extra })
                 }
             } catch { }
         }
     }
 
-    if ($scopeDocs.Count -gt 0 -and $failedNames.Count -eq $scopeDocs.Count) {
+    if ($allFailedD) {
         throw ("[$type] drift could not be computed for any scope; the failure was stored so the Drift page shows it. " +
-            (@($scopeDocs | ForEach-Object { "[$($_.scope)] $($_.error)" }) -join '  |  '))
+            (@($mg.reasons | ForEach-Object { "[$($_.scope)] $($_.error)" }) -join '  |  '))
     }
-    $partialTxt = if ($failedNames.Count) { " PARTIAL -- could not check: " + ($failedNames -join ', ') } else { '' }
+    $partialTxt = if ($failedThisRun.Count) { " PARTIAL -- could not check: " + (@($mg.reasons | ForEach-Object { "$($_.scope)" + $(if ("$($_.code)") { " [$($_.code)]" } else { '' }) }) -join ', ') } else { '' }
+    if (@($mg.carried).Count) { $partialTxt += " | last good result kept: " + (@($mg.carried | ForEach-Object { "$($_.scope) (of $($_.fromUtc))" }) -join ', ') }
+    if (@($mg.unknown).Count) { $partialTxt += " | UNKNOWN (not part of this install's check): " + (@($mg.unknown | ForEach-Object { "$($_.scope) [$($_.code)]" }) -join ', ') }
     # REQ-U: a skipped (gated) area is named too -- it was NOT checked, whatever the totals say.
     $skippedDocs = @($scopeDocs | Where-Object { $_.ok -and -not $_.checked })
     if ($skippedDocs.Count) { $partialTxt += " NOT CHECKED: " + (@($skippedDocs | ForEach-Object { "$($_.scope) ($($_.notCheckedReason))" }) -join '; ') }
-    return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$doc.total; scopesFailed = $failedNames.Count
+    $out = [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$doc.total; scopesFailed = $failedNames.Count
         detail = "$type`: $sum$partialTxt" }
+    # TRUST-1: a partial run is a WARNING run (amber); the held scopes' drift was not mailed / sent (round 3 item 11: warningSummary)
+    if (-not $fullyChecked -and $scopeDocs.Count -gt 0) {
+        $out | Add-Member -NotePropertyName 'warning' -NotePropertyValue $true -Force
+        $out | Add-Member -NotePropertyName 'trusted' -NotePropertyValue $false -Force
+        $out | Add-Member -NotePropertyName 'warningSummary' -NotePropertyValue ("drift partial: $heldTxt") -Force
+        $out.detail = "$($out.detail) | not every area was checked: $heldTxt"
+    }
+    return $out
 }
 
 function Register-PimDriftSnapshotHandler {
@@ -730,11 +1009,24 @@ function ConvertTo-PimDriftSnapshotView {
     $stale = ($null -ne $age) -and ($age -gt (2 * $CadenceMinutes * 60))
     $scopes = @(@(Get-PimDriftSnapshotField $Entry 'scopes') | Where-Object { $null -ne $_ })
     $flat = New-Object System.Collections.Generic.List[object]
+    # Round 5 G2: a kept document whose lastRun (every area failed) names areas STALE -- their items are shown as not from today
+    $lrSt = @{}; $lrStList = [System.Collections.Generic.List[object]]::new()
+    $lrV = Get-PimDriftSnapshotField $Entry 'lastRun'
+    $lrHeld = @{}
+    if ($null -ne $lrV -and "$(Get-PimDriftSnapshotField $lrV 'trusted')" -match '^(?i)false$') {
+        foreach ($x in @(@(Get-PimDriftSnapshotField $lrV 'stale') | Where-Object { $null -ne $_ })) { $lrSt["$(Get-PimDriftSnapshotField $x 'scope')"] = "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $x 'sinceUtc'))"; $lrStList.Add($x) }
+        # round 6 F3: an area the newest run could not compare is shown as not from today at once (stale only once lastRun says so)
+        foreach ($fn in @(@(Get-PimDriftSnapshotField $lrV 'failed') | Where-Object { "$_".Trim() })) { $lrHeld["$fn"] = "$refreshedIso" }
+    }
     foreach ($s in $scopes) {
+        $sName = "$(Get-PimDriftSnapshotField $s 'scope')"; $sHeld = $lrHeld.ContainsKey($sName) -or $lrSt.ContainsKey($sName); $sLr = $lrSt.ContainsKey($sName)
         foreach ($it in @(@(Get-PimDriftSnapshotField $s 'items') | Where-Object { $null -ne $_ })) {
-            $flat.Add([ordered]@{ scope = "$(Get-PimDriftSnapshotField $s 'scope')"; entity = "$(Get-PimDriftSnapshotField $s 'entity')"
+            $flat.Add([ordered]@{ scope = $sName; entity = "$(Get-PimDriftSnapshotField $s 'entity')"
                 type = "$(Get-PimDriftSnapshotField $it 'type')"; key = "$(Get-PimDriftSnapshotField $it 'key')"; label = "$(Get-PimDriftSnapshotField $it 'label')"
-                kind = "$(Get-PimDriftSnapshotField $it 'kind')" })   # REQ-U wave 2: a warning's kind (orphan-group / unmanaged-binding / wrong-permissions)
+                kind = "$(Get-PimDriftSnapshotField $it 'kind')"   # REQ-U wave 2: a warning's kind (orphan-group / unmanaged-binding / wrong-permissions)
+                # TRUST-1 point 2: an item of an area carried from its last complete read says so (shown, never actionable)
+                carried = ([bool](Get-PimDriftSnapshotField $s 'carried') -or $sHeld); stale = ([bool](Get-PimDriftSnapshotField $s 'stale') -or $sLr)
+                carriedFromUtc = $(if ($sHeld -and -not [bool](Get-PimDriftSnapshotField $s 'carried')) { $(if ($sLr) { $lrSt[$sName] } else { $lrHeld[$sName] }) } else { "$(ConvertTo-PimDriftIsoStamp (Get-PimDriftSnapshotField $s 'carriedFromUtc'))" }) })
         }
     }
     $asOf = if ($refreshed) { $refreshed.ToString('HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC' } else { "$refreshedIso" }
@@ -772,6 +1064,14 @@ function ConvertTo-PimDriftSnapshotView {
         scopesNotChecked = @($scopes | Where-Object {
             $ck = Get-PimDriftSnapshotField $_ 'checked'; $okS = Get-PimDriftSnapshotField $_ 'ok'
             ($null -ne $ck -and -not [bool]$ck) -or ($null -ne $okS -and -not [bool]$okS) -or "$(Get-PimDriftSnapshotField $_ 'skippedFeature')".Trim() }).Count
+        # TRUST-1: the areas carried from their last complete read (with since when), the areas not part of this install, and
+        # the areas that failed THIS run -- so the page can say "not checked since <date>, shown from the last complete read"
+        scopesCarried   = @(@(Get-PimDriftSnapshotField $Entry 'scopesCarried') | Where-Object { $null -ne $_ })
+        scopesUnknown   = @(@(Get-PimDriftSnapshotField $Entry 'scopesUnknown') | Where-Object { $null -ne $_ })
+        scopesFailedThisRun = @(@(Get-PimDriftSnapshotField $Entry 'scopesFailedThisRun') | Where-Object { "$_".Trim() })
+        # round 4 item 11: the areas not compared for more than a week (DRIFT-SOURCE-STALE, still listed with their date)
+        scopesStale     = @(@(@(Get-PimDriftSnapshotField $Entry 'scopesStale') | Where-Object { $null -ne $_ }) + @($lrStList.ToArray()))
+        lastRun         = (Get-PimDriftSnapshotField $Entry 'lastRun')
         scopes          = $scopes
         items           = @($flat.ToArray())
         source          = 'scheduler-snapshot'

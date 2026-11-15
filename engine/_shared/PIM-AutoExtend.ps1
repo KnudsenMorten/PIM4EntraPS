@@ -474,8 +474,8 @@ function Invoke-PimAutoExtendReportJob {
             PortalTab   = 'owner'
             TenantName  = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $stamp
             # PIM 100.105: the alert table's rows -- nothing is wrong and nothing has to be done (the owner acts only to STOP
-            # an extension), so the status is the plain "Warning", not "Needs customer's action"
-            AlertWho = 'Customer'; AlertStatus = 'Warning'
+            # an extension), so the status is "Information" (MAIL-SEV-1), not "Needs customer's action"
+            AlertWho = 'Customer'; AlertStatus = 'Information'
             AlertProblem = ("{0} permission(s) in {1} end soon and will be extended automatically" -f $g.Count, $(if ($dept) { $dept } else { 'your department' }))
             AlertTodo = 'Nothing to do if they should be extended; to let one end, open the link and choose Deny'
             AlertFindings = @($g.Group | Select-Object -First 40 | ForEach-Object { @{ kind = 'Will be extended'; name = (& $findingName $_) } })
@@ -493,8 +493,8 @@ function Invoke-PimAutoExtendReportJob {
         }
         # Alerting event 'expiring-access' (its on/off and recipients are on the Alerting page), linking the owner page.
         if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
-            # PIM 100.105: the alert table's rows, one row per permission (grouped by department)
-            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status 'Warning' `
+            # PIM 100.105: the alert table's rows, one row per permission (grouped by department); MAIL-SEV-1: Information
+            $am = @{}; if (Get-Command Get-PimAlertMailArgs -ErrorAction SilentlyContinue) { $am = Get-PimAlertMailArgs -Command 'Send-PimJobAlertViaNotify' -Who 'Customer' -Status 'Information' `
                 -Problem ("{0} permission(s) end in the coming month and will be extended automatically" -f @($items).Count) `
                 -Todo 'Nothing to do if they should be extended; to let one end, choose Deny on the upcoming-extension page' `
                 -Findings @($items | Select-Object -First 80 | ForEach-Object { @{ kind = $(if ($_.department) { "$($_.department)" } else { 'No department' }); name = (& $findingName $_) } }) }

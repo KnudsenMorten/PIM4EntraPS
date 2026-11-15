@@ -88,6 +88,16 @@ function Get-PimSkvReaderRoles {
     #>
     return @('engine', 'updater', 'asbuilt', 'downlink')
 }
+function Get-PimSkvAppSecretRoles {
+    <#
+      PURE. LITERAL. SECURE-WEB-1 F1 a (Invardia decision 2026-11-14, permanent): the roles whose secrets STAY app secrets by
+      design -- the internet-facing Manager ('web'). The plan gives such an app / job the state 'n/a' (Get-PimSkvAppSecretReason),
+      never 'refused': it is not a gap, so it never keeps the setup step 'keyvault-secrets-only' open and no "MOVE" line is
+      printed for it.
+    #>
+    return @('web')
+}
+function Get-PimSkvAppSecretReason { <# PURE. LITERAL. The reason of the by-design state. #> return "SECURE-WEB-1: the Manager's secrets stay app secrets" }
 
 # ---------------------------------------------------------------------------------------------------------- small pure
 function Get-PimSkvField {
@@ -256,7 +266,8 @@ function Get-PimSkvResourcePlan {
                  -> a NEW app / job secret (keyVaultUrl) and the env entry becomes a secretRef to it
         kept     secrets that are already Key Vault references
       -Kind app|job, -VaultUri (https://<vault>.vault.azure.net/). -Only (resource names) limits the plan; a resource not in it
-      is 'skipped'. State: move | nothing-to-do | refused | not-pim | skipped.
+      is 'skipped'. State: move | nothing-to-do | refused | n/a (SECURE-WEB-1: the Manager's secrets stay app secrets, by
+      design) | not-pim | skipped.
     #>
     param([Parameter(Mandatory)][object]$Resource, [Parameter(Mandatory)][ValidateSet('app', 'job')][string]$Kind, [Parameter(Mandatory)][string]$VaultUri,
           [AllowEmptyCollection()][string[]]$Only = @())
@@ -273,6 +284,9 @@ function Get-PimSkvResourcePlan {
     foreach ($s in $secs) {
         $sn = "$(Get-PimSkvField $s 'name')"
         if ("$(Get-PimSkvField $s 'keyVaultUrl')".Trim()) { $kept.Add($sn); continue }
+        # BUILT-IN-AUTH-1: the web identity's CLIENT id for the platform sign-in -- an identifier, NOT a secret: it stays an app
+        # setting (moving it would need the internet-facing web identity to read the vault, SECURE-WEB-1 F1 a)
+        if ("$sn" -ieq 'override-use-mi-fic-assertion-client-id') { $kept.Add($sn); continue }
         $vs = ConvertTo-PimSkvVaultSecretName -Resource $name -Secret $sn
         $secList.Add([pscustomobject]@{ source = 'secret'; acaSecret = $sn; vaultSecret = $vs; vaultUrl = "$vu/secrets/$vs"; previous = 'value' })
     }
@@ -298,6 +312,10 @@ function Get-PimSkvResourcePlan {
     if (@($Only).Count -and -not @($Only | Where-Object { "$_".Trim() -ieq $name }).Count) { $plan.state = 'skipped'; $plan.reason = 'not named in -Only'; return [pscustomobject]$plan }
     if (-not $idn.role) { $plan.state = 'not-pim'; $plan.reason = $idn.reason; return [pscustomobject]$plan }
     if (-not ($secList.Count + $envList.Count)) { $plan.state = 'nothing-to-do'; $plan.reason = 'every secret is a Key Vault reference; no plain secret in its settings'; return [pscustomobject]$plan }
+    if (@(Get-PimSkvAppSecretRoles) -contains $idn.role) {
+        # SECURE-WEB-1 F1 a (3.1.26): BY DESIGN, not a gap -- its own state, never 'refused' / missing / support-app
+        $plan.state = 'n/a'; $plan.reason = (Get-PimSkvAppSecretReason); return [pscustomobject]$plan
+    }
     if (@(Get-PimSkvReaderRoles) -notcontains $idn.role) {
         $plan.state = 'refused'; $plan.reason = "role '$($idn.role)' is not an approved reader of Key Vault secrets (Get-PimSkvReaderRoles / the rights list) -- a new reader is a rights decision"; return [pscustomobject]$plan
     }
@@ -344,7 +362,7 @@ function Get-PimSkvPlan {
           # the updater job (default: the job whose role is updater and that wears id-pim-updater)
           [switch]$WithWriter, [AllowEmptyString()][string]$WriterJob = '')
     $v = Get-PimSkvVaultChoice -Vaults @($Install.vaults) -VaultName $VaultName
-    $plan = [ordered]@{ subscriptionId = $SubscriptionId; resourceGroup = $ResourceGroup; vault = $v; refusal = ''; resources = @(); grants = @(); writer = $null; counts = @{ secrets = 0; grants = 0; switches = 0; refused = 0 } }
+    $plan = [ordered]@{ subscriptionId = $SubscriptionId; resourceGroup = $ResourceGroup; vault = $v; refusal = ''; resources = @(); grants = @(); writer = $null; counts = @{ secrets = 0; grants = 0; switches = 0; refused = 0; stay = 0 } }
     if (-not $v.ok) { $plan.refusal = $v.reason; return $plan }
     $scope = Assert-PimSkvVaultScope -Scope (Get-PimSkvVaultScope -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VaultName $v.name) -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VaultName $v.name
     if ("$($v.id)".Trim() -and "$($v.id)".Trim() -ine $scope) { $plan.refusal = "the vault's id '$($v.id)' is not $scope -- refusing"; return $plan }
@@ -368,7 +386,9 @@ function Get-PimSkvPlan {
     if (-not $WithWriter) { $plan.writer = $null }
     $mv = @($plan.resources | Where-Object { $_.state -eq 'move' })
     $plan.counts = @{ secrets = (@($mv | ForEach-Object { @($_.secrets).Count + @($_.envs).Count }) | Measure-Object -Sum).Sum; grants = @(@($plan.grants) + @($plan.writer) | Where-Object { $_ -and -not $_.exists -and -not $_.reason }).Count
-                      switches = $mv.Count; refused = @($plan.resources | Where-Object { $_.state -eq 'refused' }).Count }
+                      switches = $mv.Count; refused = @($plan.resources | Where-Object { $_.state -eq 'refused' }).Count
+                      # SECURE-WEB-1: the plain secrets that STAY app secrets by design (the 'n/a' resources)
+                      stay = [int](@($plan.resources | Where-Object { $_.state -eq 'n/a' } | ForEach-Object { @($_.secrets).Count + @($_.envs).Count }) | Measure-Object -Sum).Sum }
     if ($null -eq $plan.counts.secrets) { $plan.counts.secrets = 0 }
     return $plan
 }
@@ -424,9 +444,16 @@ function Format-PimSkvPlanLines {
     foreach ($r in @($Plan.resources)) {
         if ($r.state -in @('not-pim', 'skipped')) { $L.Add("[$($r.kind)] $($r.name): $($r.state) -- $($r.reason)"); continue }
         $L.Add("[$($r.kind)] $($r.name) (role $($r.role)$(if ($r.identityName) { ", reads as $($r.identityName)" })): $($r.state)$(if ($r.reason) { ' -- ' + $r.reason })")
-        if ($r.state -ne 'move' -and $r.state -ne 'refused') { continue }
-        foreach ($s in @($r.secrets)) { $L.Add("    $(if ($r.state -eq 'move') { $w })MOVE secret $($s.acaSecret) (a value in the $($r.kind) definition) -> vault secret $($s.vaultSecret) -> keyVaultUrl $($s.vaultUrl) + identity $($r.identityName)") }
-        foreach ($e in @($r.envs)) { $L.Add("    $(if ($r.state -eq 'move') { $w })MOVE env $($e.container)/$($e.env) (a plain value) -> vault secret $($e.vaultSecret) -> new $($r.kind) secret $($e.acaSecret) (keyVaultUrl + identity $($r.identityName)); the env entry becomes secretRef $($e.acaSecret)") }
+        if ($r.state -notin @('move', 'refused', 'n/a')) { continue }
+        if ($r.state -ne 'move') {
+            # 3.1.26: a resource that does not move prints NO "MOVE" line -- only what stays where it is (names only)
+            foreach ($s in @($r.secrets)) { $L.Add("    stays: secret $($s.acaSecret) (a value in the $($r.kind) definition)") }
+            foreach ($e in @($r.envs)) { $L.Add("    stays: env $($e.container)/$($e.env) (a plain value)") }
+            foreach ($k in @($r.kept)) { $L.Add("    kept: secret $k is already a Key Vault reference") }
+            continue
+        }
+        foreach ($s in @($r.secrets)) { $L.Add("    $($w)MOVE secret $($s.acaSecret) (a value in the $($r.kind) definition) -> vault secret $($s.vaultSecret) -> keyVaultUrl $($s.vaultUrl) + identity $($r.identityName)") }
+        foreach ($e in @($r.envs)) { $L.Add("    $($w)MOVE env $($e.container)/$($e.env) (a plain value) -> vault secret $($e.vaultSecret) -> new $($r.kind) secret $($e.acaSecret) (keyVaultUrl + identity $($r.identityName)); the env entry becomes secretRef $($e.acaSecret)") }
         foreach ($k in @($r.kept)) { $L.Add("    kept: secret $k is already a Key Vault reference") }
         if ($r.state -eq 'move') {
             $eff = $r.effect
@@ -445,7 +472,7 @@ function Format-PimSkvPlanLines {
         else { $L.Add("$($w)GRANT $($wg.roleName) ($($wg.roleId)) to $($wg.identityName) (the updater job $($wg.job), principal $($wg.principalId)) at $($wg.scope) (resource scope: the vault only) -- it writes the secrets in its update run") }
     }
     $c = $Plan.counts
-    $L.Add("summary: $($c.secrets) secret(s) to move, $($c.grants) role assignment(s) to add, $($c.switches) app / job definition(s) to switch, $($c.refused) refused")
+    $L.Add("summary: $($c.secrets) secret(s) to move, $($c.grants) role assignment(s) to add, $($c.switches) app / job definition(s) to switch, $($c.refused) refused$(if ([int]$c.stay) { ", $($c.stay) stay app secrets by design (SECURE-WEB-1)" })")
     return @($L.ToArray())
 }
 
@@ -870,7 +897,7 @@ function Invoke-PimSkvUpdaterStep {
           [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [int]$IdleWaitMinutes = (Get-PimSkvIdleWaitMinutes),
           [int]$ReadBackTries = 12, [int]$ReadBackWaitSeconds = 10, [int]$SwitchTries = 4, [int]$SwitchWaitSeconds = 60)
     $out = [ordered]@{ enabled = $true; state = 'unknown'; how = 'updater'; detail = ''; lines = ([System.Collections.Generic.List[object]]::new())
-                       moved = 0; deferred = 0; failed = 0; skipped = 0; rollback = ([System.Collections.Generic.List[object]]::new()) }
+                       moved = 0; deferred = 0; failed = 0; skipped = 0; stay = 0; rollback = ([System.Collections.Generic.List[object]]::new()) }
     $cmd = Get-PimSkvGrantCommand -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
     if (-not (Test-PimSkvUpdaterEnabled -Value $Switch)) {
         $out.enabled = $false; $out.state = 'off'; $out.detail = "switched off ($(Get-PimSkvUpdaterSwitchName)=$("$Switch".Trim())) -- nothing read, nothing moved"
@@ -896,10 +923,16 @@ function Invoke-PimSkvUpdaterStep {
     }
     $mv = @($plan.resources | Where-Object { $_.state -eq 'move' }); $ref = @($plan.resources | Where-Object { $_.state -eq 'refused' })
     foreach ($r in $ref) { $out.lines.Add([pscustomobject]@{ level = 'warn'; text = "$($r.name): not moved -- $($r.reason)" }) }
+    # SECURE-WEB-1 F1 a (3.1.26): the Manager's secrets stay app secrets BY DESIGN -- said (info), never counted as open
+    $na = @($plan.resources | Where-Object { $_.state -eq 'n/a' })
+    foreach ($r in $na) { $out.lines.Add([pscustomobject]@{ level = 'info'; text = "$($r.name): $($r.reason)" }) }
+    $out['stay'] = [int]$plan.counts.stay
+    $naTxt = $(if ($na.Count) { "n/a -- $(Get-PimSkvAppSecretReason) ($((@($na | ForEach-Object { $_.name })) -join ', '))" } else { '' })
     $pim = @($plan.resources | Where-Object { $_.state -ne 'not-pim' })
     if (-not $mv.Count) {
         if ($ref.Count) { $out.state = 'missing'; $out.how = 'support-app'; $out.detail = "$($ref.Count) app / job(s) hold secrets outside Key Vault that the updater may not move: $((@($ref | ForEach-Object { $_.name })) -join ', ')" }
         elseif (-not $pim.Count) { $out.state = 'n/a'; $out.detail = 'no PIM app or job in the resource group' }
+        elseif ($na.Count) { $out.state = 'n/a'; $out.detail = "$naTxt; every other secret of the PIM apps / jobs is a Key Vault reference" }
         else { $out.state = 'ok'; $out.detail = "every secret of the $($pim.Count) PIM app(s) / job(s) is a Key Vault reference" }
         $out.lines.Add([pscustomobject]@{ level = $(if ($out.state -eq 'missing') { 'warn' } else { 'info' }); text = $out.detail }); return $out
     }
@@ -928,7 +961,7 @@ function Invoke-PimSkvUpdaterStep {
         else { $out['failed'] = [int]$out['failed'] + 1; $out.lines.Add([pscustomobject]@{ level = 'warn'; text = "$($r.name): NOT moved ($rrState) -- $($rr['error'])" }) }
     }
     $open = $out.skipped + $out.deferred + $out.failed + $ref.Count
-    if (-not $open) { $out.state = 'ok'; $out.detail = "moved: $($out.moved) app / job(s) now read their secrets as Key Vault references" }
+    if (-not $open) { $out.state = 'ok'; $out.detail = "moved: $($out.moved) app / job(s) now read their secrets as Key Vault references$(if ($naTxt) { "; $naTxt" })" }
     else {
         $out.state = 'missing'; $out.how = $(if ($out.skipped -or $ref.Count) { 'support-app' } else { 'updater' })
         $out.detail = "moved $($out.moved); open: $($out.skipped) without the reader right, $($out.deferred) deferred, $($out.failed) failed, $($ref.Count) refused$(if ($out.how -eq 'support-app') { " -- the Support app: $cmd" } else { ' -- the next update run tries again' })"
@@ -943,10 +976,13 @@ function Get-PimSkvSetupFact {
       unknown | off; secretsToKeyVaultHow = updater | support-app; secretsToKeyVaultDetail (<= 200 characters, scrubbed).
     #>
     param([AllowNull()]$Result)
-    if ($null -eq $Result) { return [ordered]@{ secretsToKeyVault = 'unknown'; secretsToKeyVaultHow = 'updater'; secretsToKeyVaultDetail = 'the step did not run' } }
+    # secretsToKeyVaultStay (3.1.26, SECURE-WEB-1): how many plain secrets STAY app secrets by design (the Manager's) -- the
+    # setup step keyvault-secrets-only does not count those as open
+    if ($null -eq $Result) { return [ordered]@{ secretsToKeyVault = 'unknown'; secretsToKeyVaultHow = 'updater'; secretsToKeyVaultDetail = 'the step did not run'; secretsToKeyVaultStay = 0 } }
     $d = Protect-PimSkvText -Text "$($Result.detail)"
     if ($d.Length -gt 200) { $d = $d.Substring(0, 197) + '...' }
-    return [ordered]@{ secretsToKeyVault = "$($Result.state)"; secretsToKeyVaultHow = "$($Result.how)"; secretsToKeyVaultDetail = $d }
+    $sy = 0; try { $sy = [int]$Result.stay } catch { $sy = 0 }
+    return [ordered]@{ secretsToKeyVault = "$($Result.state)"; secretsToKeyVaultHow = "$($Result.how)"; secretsToKeyVaultDetail = $d; secretsToKeyVaultStay = $sy }
 }
 
 function Get-PimSkvSetupStepState {
@@ -959,6 +995,7 @@ function Get-PimSkvSetupStepState {
     $s = "$(if ($Facts -is [System.Collections.IDictionary]) { $Facts['secretsToKeyVault'] } elseif ($Facts) { $Facts.secretsToKeyVault })".Trim()
     $h = "$(if ($Facts -is [System.Collections.IDictionary]) { $Facts['secretsToKeyVaultHow'] } elseif ($Facts) { $Facts.secretsToKeyVaultHow })".Trim()
     $d = "$(if ($Facts -is [System.Collections.IDictionary]) { $Facts['secretsToKeyVaultDetail'] } elseif ($Facts) { $Facts.secretsToKeyVaultDetail })".Trim()
+    # 'n/a' also = SECURE-WEB-1 (3.1.26): only the Manager's by-design app secrets remain -- not open
     switch ($s) {
         'ok'      { return @{ state = 'ok'; how = 'updater'; detail = $d } }
         'n/a'     { return @{ state = 'n/a'; how = 'updater'; detail = $d } }
