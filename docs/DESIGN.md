@@ -10464,9 +10464,86 @@ product stays out of the public profile until it is put on that list.
 **Applications on the Manager API (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** A script or service calls the page's own routes under
 `/api/app/` with a token for its own Entra application. The Manager accepts only applications a SuperAdmin has listed
 (with a second SuperAdmin's approval), each with the Reader or Admin role, and only on the routes and lists opened to
-applications; everything else is refused. An application reads, stages changes and runs jobs; committing a change is a
-person's step, so the commit audit names the application that staged it and the person who committed it. Every
-application call is audited. The page's own sign-in for people, and the MCP (people only), are unchanged.
+applications; everything else is refused. Every application call is audited. The page's own sign-in for people, and the
+MCP (people only), are unchanged.
+
+**Three tiers (SETTINGS-API-1, 3.1.31; framework §12.31; owner 2026-11-16 "it should be possible to manage settings using
+code, not only gui", wizard "All but security controls").** What an application may do is ONE literal tier map in code
+(`Get-PimManagerAppTierMap`, `Get-PimManagerAppEntityTierMap` in engine/_shared/PIM-ManagerApiApps.ps1) -- not a setting,
+and no route changes it. A route or entity that is not in the map is treated as the strictest applicable tier (tier 2
+when it is about people or access, else tier 3) and is never open to an application.
+- **Tier 1 -- settings.** An Admin application changes the settings that are not security controls, and commits the
+  tier-1 entity (administrative units), through the page's own handler and the SAME commit path and guards as a person: a
+  mass change is held for a SuperAdmin, and an application can never approve (its role stays Admin; only the handler's own
+  SuperAdmin gate of a tier-1 setting route is met). Owner 2026-11-16 ("goal is to adjust and baseline customers", "so i can
+  script 10+ things"): every tier-1 setting has a DIRECTION RULE (`Get-PimManagerAppSettingDirectionMap`, one literal entry
+  per setting) -- a change that enables, adds or tightens applies; a WEAKENING (a protection or feature off, MFA / approval
+  off, a longer limit, a shorter retention, an alert recipient removed) is HELD 409 `weakening-held` for a SuperAdmin, who
+  makes it in the page; anything no rule covers is held. Tier 1 now includes feature flags and feature settings, the AI
+  chat, auto-extend, group retirement, operational policy, policy template defaults and rules, permission packs, governance
+  preview, alerting, audit and configuration-backup retention, auto-offboarding, reconcile removal, email controls, mail
+  notifications, drift settings, portal branding, job schedule, mail and naming. The commit audit names the application as
+  the committer (`api.app.commit`, `app:<appId>`; `api.app.call` carries its name). Settings export / import as ONE JSON:
+  `GET /api/app/settings/export` (no secret value; person-only settings read-only and named) and
+  `POST /api/app/settings/import[?preview=1]` (a per-setting diff; a person-only setting that would change = 403 with the
+  list; a weakening = 409 with the list; nothing written; a withheld secret keeps the stored one). A ONE-TIME baseline
+  (owner "it is onetime") is the example client's multi-change mode: one file of settings and permission packs, a list of
+  environments, a preview, then -Apply once, a per-change result table.
+- **Tier 2 -- grants** (admin accounts, the groups that carry roles, every assignment, access packages; PEOPLE-API-APPROVAL-1,
+  owner "Code + approver"). An Admin application PROPOSES (`POST /api/app/approvals/app-submit/<entity>`) into the
+  approval queue -- ALWAYS, whatever the Governance preview Approvals switch says (owner "Queue always on for app
+  proposals"; the switch keeps governing people's own requests). A signed-in person (Admin / SuperAdmin) who is not the
+  maker approves under Approvals > "Proposals from applications" (`/api/app-proposals`), and the change is saved at once
+  through the normal commit and its guards as that person. Maker and approver are always distinct principals: an
+  application never approves or executes, self-approval never applies, the application's id is the maker. A row changed
+  since the proposal is stale (nothing saved).
+- **Tier 3 -- person only** (`Get-PimManagerAppPersonOnlyRoutes`, a reason per route): API-application enrolment,
+  break-glass, licence and edition, approvers, every second-person rule (self-approval, second approver, guard release, the
+  maker / checker switch in feature gates), the support connection, the admin domain, department owners (sign-in and
+  departments), demo mode, request-for-access settings, the deployment scenario, SupportFixMode, the hybrid worker, the
+  tier map and the lists themselves. Account-Definitions-Companies (company contacts sign in to the review portal) is a
+  tier-3 entity.
+
+**The Support role (SUPPORT-FIX-API-1, framework §12.30; SUPPORT-DIRECT-GRANT-1, owner "Support applies directly").** A third
+application role, never SuperAdmin, for the one Invardia Support app of the tenant. It reads jobs, the configuration and
+the engine failures, and has two writes, both on a support ticket (the reason carries `SUP-YYYY-NNNNN`, else 400):
+`POST /api/app/support/fix` applies only a fix the support fix catalog holds and the failure catalog offers for that failure
+(remove the row, make an assignment Eligible, and -- owner "Support creates them on a ticket" -- `create-defender-role`), and
+`POST /api/app/support/change` commits a tier-1 or tier-2 change directly. Both run through the normal commit path and
+guards (Support ranks Admin for that one commit only). Compensating controls: every change is mailed to the install's alert
+recipients (no opt-out), audited `support.change` with the application and the ticket, and limited to 25 tier-2 rows per
+hour per install (more is held for a SuperAdmin). Tier 3 stays refused. The same ticket + fix sent again answers "already
+applied" and writes nothing (Invardia's backend applies catalogued fixes automatically when a ticket opens).
+**SupportFixMode** (owner "On by default" / "maybe 1 will enforce approve"): `auto` (default) applies as above; `approve`
+turns every Support call into a proposal in the approval queue with the ticket ("queued for your approval (SupportFixMode =
+approve)"), decided by an Admin or SuperAdmin of the install; the mail says it is waiting. The setting is person only.
+**The one Defender exception:** "PIM never creates a Defender role" stays true for the engine's own runs. The Support fix
+`create-defender-role`, offered only for DEFENDER-ROLE-MISSING, queues ONE engine action that creates exactly the name and
+the permissions PIM's definition lists, with the managed-role marker, as the ENGINE identity (never the Support app's
+token). A Defender refusal (e.g. Data Operations without Sentinel) is reported plainly in the queue entry and the audit;
+nothing else is created.
+**Enrolment exception:** a person-added application needs a second SuperAdmin; the Support app does not, because the
+updater enrols it as the product's own step -- exactly one service principal tagged `InvardiaSupport`, registered in this
+tenant, with the narrow Support role only (none = information, two or foreign = refused, never Admin). The updater holds no
+app-role-assignment right: it only lists the app in PIM's own store and reads back whether the Entra app role is assigned.
+Support is ON BY DEFAULT: the missing role assignment is the setup step "Invardia support fixes: run
+Set-PimManagerApiAuth.ps1 -SupportApp once". An Admin application is only ever listed by a person.
+
+**Token hardening (framework §12.31, rules 2 / 4; owner 2026-11-16 "Strict everywhere at once").** From 3.1.31 every
+`/api/app/*` token must carry `idtyp=app` (no per-install switch) and its `tid` must be the install tenant (besides the
+issuer); a delegated token stays refused. `Set-PimManagerApiAuth.ps1 -Apply` configures the `idtyp` optional claim; the
+updater reads it back and reports the setup step "API applications: run Set-PimManagerApiAuth.ps1" when it is missing.
+Installs that use API applications re-run the setup command once after 3.1.31; until then their scripts are refused.
+Rule 5 (`appRoleAssignmentRequired`) is DEFERRED (owner "Skip that rule for now"): the Manager sign-in and the API share one
+app registration, so requiring an assignment would lock people out; a separate API app is the future fix.
+
+**Adversarial review (framework §12.32 API-SECURITY-REVIEW-1).** `tests/Test-PimApiSecurityReview.ps1` holds one named attack
+per checklist item (T1-T32) against the real code paths; a red item blocks ring 0. What the code does for it: an
+application's request body is read by the gate before any handler -- a declared length, at most 1 MB (413), JSON only (400)
+-- and the handler parses that same text; refusals carry fixed bodies (no reason, route or application in them); no CORS
+header is ever sent; a Support body has a strict schema (an unknown field is refused). The support ticket: PIM accepts only
+the `SUP-YYYY-NNNNN` format and records it on every Support change; that the ticket belongs to this install is guaranteed by
+the Invardia backend, which is the only holder of the Support app's credential.
 
 ### 18.12 Export every view, hidden names on the Dashboard, impact counters, demo dataset
 

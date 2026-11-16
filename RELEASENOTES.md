@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.32 -- 2026-11-16
+
+- The REST application API (/api/app/*) is closed by default on every installation and answers 404 until the installation is deliberately opened; the Manager pages, sign-in and the person-only assistant are unchanged.
+
+## 3.1.31 -- 2026-11-16
+
+- Approved applications can manage settings and commit changes through the same checks as a person (weakening held for a SuperAdmin; security controls person-only), propose admin and role changes for a person to approve, and Invardia support can apply the catalogued fix for a known failure on a ticket; application tokens must be app tokens of this tenant; Invoke-PimManagerApi.ps1 applies a one-time set of settings and permission packs.
+
 ## 3.1.30 -- 2026-11-16
 
 - Each engine run judges the Defender XDR prerequisites from the live Defender roles it already read, so assignments a new version allows are made on the first run, and the prerequisite check runs once right after an update.

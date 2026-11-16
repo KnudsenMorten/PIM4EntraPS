@@ -61,7 +61,7 @@ $script:PimApiRefPublicRoutes = @(
     'GET /api/access-reviews', 'POST /api/access-reviews/decision', 'GET /api/access-reviews/evidence', 'GET /api/access-reviews/overdue',
     'POST /api/access-reviews/reminders',
     'GET /api/account-states', 'GET /api/active-assignments', 'GET /api/admin-accounts', 'GET /api/admin-templates', 'GET /api/alerts',
-    'GET /api/approvals', 'POST /api/approvals', 'POST /api/approvals/decide',
+    'GET /api/approvals', 'POST /api/approvals', 'POST /api/approvals/decide', 'POST /api/approvals/app-submit/{p1}',   # SETTINGS-API-1 / PEOPLE-API-APPROVAL-1: a script proposes, a person approves
     'GET /api/asbuilt', 'GET /api/asbuilt/pdf', 'GET /api/attention', 'GET /api/audit', 'GET /api/audit/export',
     'POST /api/autoextend/decide', 'GET /api/autoextend/upcoming',
     'GET /api/commit-history', 'GET /api/commit-history/{p1}', 'GET /api/commit-status/{p1}', 'GET /api/commits',

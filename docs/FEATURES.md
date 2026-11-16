@@ -845,9 +845,27 @@ deployment is a supported choice) and no credentials lying around.
 - **Scripts and services use the Manager API — only the applications you list (Pro).** ✅ 2026-11-01 — A script or a
   service works with the PIM Manager through its own Entra application. No application is accepted until a SuperAdmin
   adds it on **Manager access & roles › API applications** and a second SuperAdmin approves. Each application gets the
-  Reader or Admin role. An application reads, prepares changes and runs jobs; a person always saves the change, and
-  the audit trail shows the application that prepared it and the person who saved it. Changes that create accounts or
-  grant access are never open to an application. Setup: `Set-PimManagerApiAuth.ps1` (it shows its plan first).
+  Reader or Admin role. Setup: `Set-PimManagerApiAuth.ps1` (it shows its plan first).
+- **Manage settings with code, not only in the page (Pro).** 🟡 3.1.31 — An application with the Admin role changes your
+  settings and saves them through the same checks as a person. Switching something on, adding to it or making it stricter
+  is saved at once; switching a protection off, lowering a requirement or shortening a retention waits for a SuperAdmin.
+  An application never approves. Export every setting as one JSON file and import it again (secret values are never in
+  the file). Set up a new environment in one go: one file with your settings and the permission packs to switch on, a
+  preview first, then apply once, with a result per change (`Invoke-PimManagerApi.ps1`). Some settings stay with people:
+  who signs in and approves, break-glass accounts, licence and edition, which applications may use the API and the
+  second-person rules. From 3.1.31 the Manager accepts only application sign-ins that say they are an application: if you
+  already use API applications, run `Set-PimManagerApiAuth.ps1 -Apply` once after the update, or your scripts are refused.
+- **Scripts propose changes to admins and their roles (Pro).** 🟡 3.1.31 — Scripts can propose changes to admins and their
+  roles; a person with the Approver role approves each one, and it is then saved through the same checks as a change made
+  in the page. Proposals always show on the Approvals page. The audit trail shows the application that proposed it and the
+  person who approved it.
+- **Invardia support fixes known problems automatically (Pro).** 🟡 3.1.31 — Invardia support fixes known problems
+  automatically; you can choose to approve each fix first (Settings › Manager access & roles › Support access). Invardia
+  support can also make the change you ask for on a support ticket. Your admins get a mail for every such change. Each
+  change carries the ticket number, goes through the same checks as your own changes and is shown in the audit trail.
+  When a Defender XDR role that your PIM definition names is missing, support can create it on a ticket with exactly the
+  permissions your definition lists. Support never changes your security settings. Support is on by default; your admin
+  runs `Set-PimManagerApiAuth.ps1 -SupportApp` once to let it in.
 
 ## 10. Delegation model
 - **Existing accounts get delegations only.** ✅ 2026-11-12 — An administrator of the type "Existing account (office user)" receives PIM delegations, and nothing else: PIM Manager never creates, renames, changes, disables or deletes the account, and the hybrid worker never touches it in Active Directory. PIM Manager also never changes any account it did not create itself.
@@ -2374,8 +2392,8 @@ On top of the free edition, a Pro licence adds:
 - the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
 - the **chat in the Manager** — ask questions and have changes prepared, answered by your own Azure OpenAI deployment under
   the person's own role;
-- **API applications** — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a
-  person saves every change they prepare;
+- **API applications** — scripts and services use the PIM Manager API with their own application, as Reader or Admin: they
+  manage settings with code, and propose changes to admins and their roles that a person approves;
 - the **API and MCP reference** in the portal — every route and assistant tool of the version you run, for your role;
 - **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
   just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.

@@ -1,5 +1,32 @@
 # What's new in PIM Manager
 
+## 3.1.32 · 2026-11-16 · Security
+
+The application API for scripts and services is closed by default.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Application API closed by default** - The API that scripts and services use is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages, sign-in and the assistant are not affected.
+
+## 3.1.31 · 2026-11-16 · Feature update
+
+Scripts can now manage PIM Manager settings and propose changes, Invardia support can fix known problems for you, and one file can set up a new install.
+
+### New features
+
+- **Manage settings from scripts** - An approved application can change settings and commit changes through the same checks as a person. Turning something on applies at once; switching a protection off waits for a SuperAdmin. Who signs in, approves and acts stays with people.
+- **Scripts propose, people approve** - An application can propose changes to administrators and their roles. Each proposal waits in Proposals from applications until an Admin or SuperAdmin approves it.
+- **Invardia support fixes known problems** - When a run fails for a known reason, Invardia support can apply the fix PIM Manager itself offers, on a support ticket, and your admins get a mail. You can choose to approve each fix first.
+- **One file to set up an install** - A published example script applies a set of settings and permission packs from one file, with a preview first.
+
+### Fixes
+
+- **Stricter application sign-in** - Application tokens must state that they are application tokens and come from your own tenant. Scripts that already use the API need the API setup command run once.
+
 ## 3.1.30 · 2026-11-16 · Fix-only
 
 Defender XDR assignments no longer wait for the daily prerequisite check after an update.

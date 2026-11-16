@@ -102,6 +102,7 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 . (Join-Path $solRoot 'engine\_shared\PIM-RunningImages.ps1')    # SEC-LANE-1: the images the install runs NOW (digest + .NET) -> heartbeat Update.runningImages
 . (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
+. (Join-Path $solRoot 'engine\_shared\PIM-ManagerApiApps.ps1')   # SUPPORT-FIX-API-1 (framework 12.30 / 12.31): enrol the tagged support app (role Support) + READ the API app hardening (step 2d-api)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 # 100.61: the image the as-built converge (2e) left caj-pim-asbuilt on THIS run ('' = it did not converge the job) -- the job
@@ -251,6 +252,26 @@ function Invoke-PimUpdaterConvergeStep {
         Say ("engine permissions ($When): $($ep.headline)") $(switch ($ep.state) { 'missing' { 'Yellow' } 'unknown' { 'Yellow' } default { 'DarkGray' } })
         $script:PimEnginePermissionCheck = $ep.record
     } catch { Say "  engine permissions not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-api. SUPPORT-FIX-API-1 (framework 12.30) + SETTINGS-API-1 hardening (12.31 rules 2 / 4 / 5) ------------------
+    # ENROL the one service principal tagged InvardiaSupport in PIM's OWN listed-applications store with the PIM role Support
+    # (never Admin / Reader; more than one tagged = refused; none = information), READ BACK. Then READ (GET only) the API
+    # application's idtyp claim, its assignment-required flag and the support app's Entra app-role assignment, and store them
+    # (ManagerApiHardening). The updater holds no AppRoleAssignment right and never assigns an app role or writes a manifest:
+    # a missing item is a setup step with the command a customer admin runs (Set-PimManagerApiAuth.ps1). Never fails the update.
+    try {
+        if ("$csSize".Trim() -and (Get-Command Invoke-PimManagerApiHardeningCheck -ErrorAction SilentlyContinue)) {
+            $apiAud = ''
+            try {
+                $apiCa = Invoke-PimArm -Method GET -ApiVersion $script:PimAcaApi -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/containerApps/$managerApp"
+                foreach ($apiC in @($apiCa.properties.template.containers)) { foreach ($apiE in @($apiC.env)) { if ("$($apiE.name)" -eq 'PIM_API_APP_AUDIENCE' -and "$($apiE.value)".Trim()) { $apiAud = "$($apiE.value)" } } }
+            } catch { $apiAud = '' }
+            $apiId = ''; $apiM = [regex]::Match("$apiAud", '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'); if ($apiM.Success) { $apiId = $apiM.Value }
+            $apiGraph = { param($p) Invoke-PimGraph -Path ('/' + "$p".TrimStart('/')) }
+            $apiTid = "$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()
+            $apiHd = Invoke-PimManagerApiHardeningCheck -ConnectionString "$csSize" -Graph $apiGraph -TenantId $apiTid -ApiAppId $apiId
+            foreach ($l in @($apiHd.lines)) { Say ("  " + $l) $(if ("$l" -match 'refused|FAILED|not done') { 'Yellow' } else { 'DarkGray' }) }
+        }
+    } catch { Say "  support app enrolment / API hardening not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d-bis. CR5 step 1 (framework §12.11c item 6, PIM 100.149) -- THE INSTALL RECORD ------------------------------------
     # pim.Settings 'InstallNames' = the names THIS install runs with, from what the updater was deployed with (its variables)
     # and the as-built job's name. Existing installs record TODAY's names -- nothing is renamed; every reader

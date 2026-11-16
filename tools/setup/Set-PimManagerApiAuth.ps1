@@ -38,6 +38,13 @@ param(
     [string]$ManagerApp = 'ca-pim-manager',
     # optional: the calling application's client id -- it gets the application role in Entra ID (step 5)
     [string]$ClientAppId = '',
+    # framework 12.30: a customer admin enables SUPPORT ACCESS -- the one service principal tagged 'InvardiaSupport' in this
+    # tenant gets the application role (the updater only lists it in PIM with the role Support and reads this back; it never
+    # assigns an Entra app role itself)
+    [switch]$SupportApp,
+    # framework 12.31 rule 5 (appRoleAssignmentRequired) is DEFERRED (owner 2026-11-16 "Skip that rule for now"): the Manager's
+    # sign-in and its API share ONE app registration, so requiring an assignment would lock people out. A separate API app is
+    # the future fix. This script never switches it on.
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
@@ -93,6 +100,40 @@ function Get-PimManagerApiAuthPlan {
     return [pscustomobject]@{ steps = @($steps); ok = $ok; reason = $why; roleId = $roleId; audiences = $aud; envValue = $envValue; frontBearerPaths = $bp
         licence = $script:PimApiProNote
         patch = [ordered]@{ identifierUris = @($uris); appRoles = @($roles) } }
+}
+
+function Get-PimManagerApiHardeningPlan {
+    <#
+      PURE. framework 12.31 rule 2 (idtyp) + rule 5 (assignment required): from the Manager's application (optionalClaims) and
+      its service principal (appRoleAssignmentRequired) -> @{ steps; optionalClaims (the merged patch) }. From 3.1.31 both are
+      required ("Strict everywhere at once"): an application token without idtyp=app is refused.
+    #>
+    param([Parameter(Mandatory)][object]$App, [AllowNull()][object]$ServicePrincipal)
+    $steps = New-Object System.Collections.Generic.List[string]
+    $oc = $App.optionalClaims
+    $at = @(if ($oc -and $oc.accessToken) { @($oc.accessToken) | Where-Object { $_ } })
+    if (-not @($at | Where-Object { "$($_.name)" -eq 'idtyp' }).Count) {
+        $steps.Add('idtyp-claim') | Out-Null
+        $at = @($at) + [pscustomobject][ordered]@{ name = 'idtyp'; source = $null; essential = $false; additionalProperties = @() }
+    }
+    $merged = [ordered]@{
+        idToken = @(if ($oc -and $oc.idToken) { @($oc.idToken) })
+        accessToken = @($at)
+        saml2Token = @(if ($oc -and $oc.saml2Token) { @($oc.saml2Token) })
+    }
+    return [pscustomobject]@{ steps = @($steps); optionalClaims = $merged }
+}
+
+function Select-PimManagerApiSupportApp {
+    # PURE. framework 12.30: exactly ONE service principal tagged InvardiaSupport, registered in THIS tenant -> it; else a refusal.
+    param([object[]]$Found = @(), [string]$TenantId = '')
+    $f = @(@($Found) | Where-Object { $_ -and "$($_.appId)".Trim() })
+    if ($f.Count -eq 0) { return [pscustomobject]@{ ok = $false; app = $null; reason = "no service principal is tagged 'InvardiaSupport' in this tenant -- set up the Invardia Support app first" } }
+    if ($f.Count -gt 1) { return [pscustomobject]@{ ok = $false; app = $null; reason = "$($f.Count) service principals are tagged 'InvardiaSupport' -- refusing; there must be exactly one" } }
+    if ("$TenantId".Trim() -and "$($f[0].appOwnerOrganizationId)".Trim() -and "$($f[0].appOwnerOrganizationId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) {
+        return [pscustomobject]@{ ok = $false; app = $null; reason = "the tagged application $($f[0].appId) is registered in another tenant -- refusing" }
+    }
+    return [pscustomobject]@{ ok = $true; app = $f[0]; reason = '' }
 }
 
 function Get-PimManagerApiTokenExample {
@@ -158,15 +199,31 @@ $plan = Get-PimManagerApiAuthPlan -App $app -Auth $auth -NewRoleId ([guid]::NewG
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
 Write-Host "    PRO: $($plan.licence)" -ForegroundColor Yellow
 if (-not $plan.ok) { throw $plan.reason }
+if ($SupportApp) {
+    # framework 12.30: support access is enabled by a PERSON here (never by the updater): the one tagged support app gets the role
+    $supSel = Select-PimManagerApiSupportApp -TenantId $TenantId -Found @(Invoke-PimSetupGraph -Path "/servicePrincipals?`$filter=tags/any(t:t eq 'InvardiaSupport')&`$select=id,appId,displayName,appOwnerOrganizationId" -All)
+    if (-not $supSel.ok) { throw $supSel.reason }
+    if ("$ClientAppId".Trim() -and "$ClientAppId".Trim().ToLowerInvariant() -ne "$($supSel.app.appId)".ToLowerInvariant()) { throw '-SupportApp and -ClientAppId name different applications -- run them one at a time' }
+    $ClientAppId = "$($supSel.app.appId)"
+    Write-Host "    support access: the Invardia Support app $ClientAppId ($($supSel.app.displayName)) gets the role '$($script:PimApiRoleValue)'; PIM lists it with the role Support at its next update" -ForegroundColor Cyan
+}
+# framework 12.31 rule 2: the idtyp claim on the API application (rule 5, assignment required, is deferred -- see the param block)
+$apiSp = Get-PimGraphServicePrincipal -Id $appId
+$hard = Get-PimManagerApiHardeningPlan -App $app -ServicePrincipal $apiSp
+if (@($hard.steps).Count) { Write-Host "    hardening to do: $(@($hard.steps) -join ', ') (from 3.1.31 application calls are refused until this is done)" -ForegroundColor Cyan }
 $needGrant = [bool]"$ClientAppId".Trim()
 if (-not $Apply) {
-    if ($plan.steps.Count -or $needGrant) { Write-Host ('    PLAN ONLY -- re-run with -Apply.' + $(if ($needGrant) { " (-ClientAppId: the role '$($script:PimApiRoleValue)' would be given to $ClientAppId)" } else { '' })) -ForegroundColor Yellow }
+    if ($plan.steps.Count -or $needGrant -or @($hard.steps).Count) { Write-Host ('    PLAN ONLY -- re-run with -Apply.' + $(if ($needGrant) { " (-ClientAppId: the role '$($script:PimApiRoleValue)' would be given to $ClientAppId)" } else { '' })) -ForegroundColor Yellow }
     Write-Host ''; Write-Host (Get-PimManagerApiTokenExample -TenantId $TenantId -ApiAppId $appId) -ForegroundColor DarkGray
     return $plan
 }
 
 if (@($plan.steps | Where-Object { $_ -in @('identifier-uri', 'app-role') }).Count) {
     [void](Invoke-PimSetupGraph -Method PATCH -Path "/applications/$($app.id)" -Body ([ordered]@{ identifierUris = @($plan.patch.identifierUris); appRoles = @($plan.patch.appRoles) }))
+}
+if (@($hard.steps) -contains 'idtyp-claim') {
+    [void](Invoke-PimSetupGraph -Method PATCH -Path "/applications/$($app.id)" -Body ([ordered]@{ optionalClaims = $hard.optionalClaims }))
+    Write-Host '    the API application now sends the idtyp claim (PIM requires idtyp=app once its next update reads this back)' -ForegroundColor Green
 }
 if ($plan.steps -contains 'audiences') {
     [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate {
@@ -199,6 +256,8 @@ $a2 = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $Re
 $ca2 = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
 $after = Get-PimManagerApiAuthPlan -App $app2 -Auth $(if ($a2) { $a2.properties } else { $null }) -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @((Get-PimManagerApiManagerContainer $ca2).env) -FrontEnv (Get-PimManagerApiFrontEnv $ca2)
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
+$hard2 = Get-PimManagerApiHardeningPlan -App $app2 -ServicePrincipal (Get-PimGraphServicePrincipal -Id $appId)
+if (@($hard2.steps).Count) { throw "read-back: hardening still to do: $(@($hard2.steps) -join ', ')" }
 Write-Host "==> done. Next: a SuperAdmin lists the application in PIM Manager (Settings > API applications) and a second SuperAdmin approves it." -ForegroundColor Green
 Write-Host ''; Write-Host (Get-PimManagerApiTokenExample -TenantId $TenantId -ApiAppId $appId) -ForegroundColor DarkGray
 return $after

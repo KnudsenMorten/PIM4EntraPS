@@ -3216,12 +3216,32 @@
       "confirmOff": false,
       "info": {
         "what": "The scripts and services that may use the PIM Manager API with their own application identity, each with the role it gets: Reader or Admin. Part of PIM Manager Pro. A change is not applied directly: it becomes a request that a different SuperAdmin approves within 72 hours, and every step is written to the audit trail.",
-        "enabled": "When an application is on the list, it can call the parts of the API that are open to applications, with the role it is given here. Every call is written to the audit trail with the application and its role. An application can prepare a change but never save it: a person signed in to PIM Manager reviews and saves it, and the audit trail shows both. Emergency access, settings, approval decisions and other sensitive actions are never open to an application, whatever its role: they stay with people signed in to PIM Manager.",
+        "enabled": "When an application is on the list, it can call the parts of the API that are open to applications, with the role it is given here. Every call is written to the audit trail with the application and its role. An Admin application can change settings: switching something on or making it stricter is saved at once, while switching a protection off, lowering a requirement or shortening a retention waits for a SuperAdmin. Changes to admins and their roles are only proposed: a person approves each one. Emergency access, who signs in and approves, break-glass accounts, licence and the second-person rules are never open to an application, whatever its role: they stay with people signed in to PIM Manager.",
         "disabled": "When the list is empty (the default), no application can use the API. People signed in to PIM Manager are not affected.",
         "risk": "An application on the list acts without a person. Whoever holds its credential can do what its role allows, so give it the lowest role that does the job, keep its certificate safe, and take it off the list when it is no longer used. Reversible through a new approved request.",
         "requires": "SuperAdmin to request a change, and a second, different SuperAdmin to approve it (the same SuperAdmin only when self-approval is on). The PIM Manager is prepared once for application sign-in by your administrator. An application can never be SuperAdmin. A Pro licence: without one, no application can use the API and this list cannot be read or changed. People signed in to PIM Manager are not affected.",
         "recommended": "Leave the list empty unless a script or a service really needs the API. Prefer Reader; give Admin only to an application that must prepare changes or start a job.",
         "docUrl": "https://invardia.com/docs/pim/settings/ManagerApiApps/"
+      }
+    },
+    {
+      "key": "SupportFixMode",
+      "label": "Fixes by Invardia support",
+      "where": "Manager access & roles > Support access",
+      "route": "/api/settings/support-fix-mode",
+      "type": "choice",
+      "default": "Apply automatically",
+      "feature": "",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "How fixes that Invardia support makes on a support ticket are applied: automatically (the default), or only after an Admin or SuperAdmin of this environment approves each one.",
+        "enabled": "Apply automatically: a known problem is fixed as soon as Invardia support takes it on a ticket. Every fix carries the ticket number, goes through the same checks as your own changes, is written to the audit trail, and your admins get a mail for it.",
+        "disabled": "Wait for our approval: every fix Invardia support prepares waits on the Approvals page until an Admin or SuperAdmin of this environment approves or rejects it. Your admins get a mail that it is waiting.",
+        "risk": "Automatic fixes are applied without a person of yours looking first; they are limited to the published fix catalog and to a set number of changes per hour, and they never change your security settings. Waiting for approval means a fix you asked for is applied only after one of your admins approves it.",
+        "requires": "SuperAdmin, signed in to PIM Manager. An application can never change this setting.",
+        "recommended": "Apply automatically, unless your change process requires a person of yours to approve every change.",
+        "docUrl": "https://invardia.com/docs/pim/settings/SupportFixMode/"
       }
     },
     {

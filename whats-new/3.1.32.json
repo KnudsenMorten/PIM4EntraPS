@@ -1,0 +1,4 @@
+{"version":"3.1.32","date":"2026-11-16","type":"security",
+ "summary":"The application API for scripts and services is closed by default.",
+ "new":[],
+ "fixes":[{"title":"Application API closed by default","text":"The API that scripts and services use is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages, sign-in and the assistant are not affected."}]}

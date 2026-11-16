@@ -2050,6 +2050,7 @@
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="manageraccessBody">
       <div id="setAccessHost"><div style="color:#57606a;font-size:12px;">Loading access &amp; roles&hellip;</div></div>
       <div id="setApiAppsHost" style="margin-top:12px;"></div>
+      <div id="setSupportFixHost" style="margin-top:12px;"></div>
     </div>
   </div>
   <div id="emergencyTab" class="tab-panel">
@@ -3683,7 +3684,7 @@
     if (name === 'adminimport') renderAdminImportPage();   // operator 2026-10-06: under Admin accounts, SuperAdmin only
     if (name === 'commithistory') renderCommitHistoryPage();   // CONFIG-1.2 / §96.2: commit history + undo
     if (name === 'envreport') renderEnvReportPage(false);   // §12.8 ENV-REPORT-1: the environment report
-    if (name === 'manageraccess') { renderSettingsAccessSection(document.getElementById('setAccessHost')); renderSettingsApiAppsSection(document.getElementById('setApiAppsHost')); }
+    if (name === 'manageraccess') { renderSettingsAccessSection(document.getElementById('setAccessHost')); renderSettingsApiAppsSection(document.getElementById('setApiAppsHost')); renderSettingsSupportFixSection(document.getElementById('setSupportFixHost')); }
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
@@ -11287,6 +11288,64 @@
       }
     };
   }
+  // PEOPLE-API-APPROVAL-1 (owner 2026-11-16 "Queue always on for app proposals"): changes that scripts and Invardia support
+  // PROPOSE. Shown and decided here whatever the Governance preview switch says; an Admin or SuperAdmin approves or rejects
+  // (never the application itself); an approved one is saved through the normal commit and its guards.
+  async function renderAppProposals(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null;
+    try { d = await api('GET', '/api/app-proposals'); } catch (e) { host.innerHTML = stateError('Could not load the proposals from applications', e.message); return; }
+    const list = (d && Array.isArray(d.proposals)) ? d.proposals : [];
+    const pend = list.filter(p => p.status === 'Pending' || p.status === 'Approved');
+    let h = '<div class="set-card"><h3 style="margin:0 0 6px 0;font-size:14px;">Proposals from applications</h3>' +
+      '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">Changes that scripts or Invardia support proposed. Nothing is saved until an Admin or SuperAdmin approves it.</div>';
+    if (!pend.length) h += '<div style="font-size:12px;color:#57606a;">No proposal is waiting.</div>';
+    pend.forEach(p => {
+      h += '<div class="appPropItem" style="border:1px solid #d0d7de;border-radius:6px;padding:8px;margin-bottom:8px;">' +
+        '<div style="font-size:13px;"><b>' + esc(p.base || '') + '</b> &mdash; ' + esc(String(p.itemCount || 0)) + ' change(s) from <b>' + esc(p.makerName || p.maker || '') + '</b>' +
+        (p.ticket ? ' (ticket ' + esc(p.ticket) + ')' : '') + ' &mdash; ' + esc(p.status) + '</div>' +
+        '<div style="font-size:12px;color:#57606a;">' + esc(p.justification || '') + '</div>' +
+        '<ul style="margin:4px 0 6px 18px;padding:0;font-size:12px;">' + (p.items || []).slice(0, 50).map(x => '<li>' + esc(String(x)) + '</li>').join('') + '</ul>';
+      if (d.canDecide) {
+        if (p.status === 'Pending') h += '<button class="appPropBtn" data-id="' + esc(p.id) + '" data-d="approve">Approve</button> <button class="appPropBtn" data-id="' + esc(p.id) + '" data-d="deny">Reject</button>';
+        else h += '<button class="appPropBtn" data-id="' + esc(p.id) + '" data-d="execute">Save it now</button>';
+      }
+      h += ' <span class="appPropMsg" data-id="' + esc(p.id) + '" style="font-size:12px;"></span></div>';
+    });
+    host.innerHTML = h + '</div>';
+    host.querySelectorAll('.appPropBtn').forEach(b => b.onclick = async () => {
+      const id = b.dataset.id, dd = b.dataset.d;
+      const msg = host.querySelector('.appPropMsg[data-id="' + id + '"]');
+      try {
+        const r = dd === 'execute' ? await api('POST', '/api/app-proposals/execute', { id }) : await api('POST', '/api/app-proposals/decide', { id, decision: dd });
+        if (msg) { msg.textContent = (r && (r.reason || r.status)) || 'done'; msg.style.color = '#1a7f37'; }
+        setTimeout(() => renderAppProposals(host), 1200);
+      } catch (e) { if (msg) { msg.textContent = 'Not done: ' + e.message; msg.style.color = '#cf222e'; } }
+    });
+  }
+
+  // owner 2026-11-16: how Invardia support fixes are applied (SupportFixMode) -- a SuperAdmin decides; everyone else reads it.
+  async function renderSettingsSupportFixSection(host) {
+    if (!host) return;
+    let d = null;
+    try { d = await api('GET', '/api/settings/support-fix-mode'); } catch (e) { host.innerHTML = ''; return; }
+    const mode = (d && d.mode) === 'approve' ? 'approve' : 'auto';
+    const dis = (d && d.canWrite) ? '' : ' disabled';
+    host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 6px 0;font-size:14px;">Support access</h3>' +
+      '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">Invardia support fixes known problems on a support ticket. Your admins get a mail for every fix.</div>' +
+      '<label style="font-size:13px;">Fixes by Invardia support' + settingInfoBtn('SupportFixMode') + ': <select id="setSupportFixMode"' + dis + '>' +
+      '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>apply automatically (default)</option>' +
+      '<option value="approve"' + (mode === 'approve' ? ' selected' : '') + '>wait for our approval</option></select></label>' +
+      ' <span id="setSupportFixMsg" style="font-size:12px;"></span></div>';
+    const sel = document.getElementById('setSupportFixMode');
+    if (sel && d && d.canWrite) sel.onchange = async () => {
+      const m = document.getElementById('setSupportFixMsg');
+      try { await api('PUT', '/api/settings/support-fix-mode', { mode: sel.value }); if (m) { m.textContent = 'Saved.'; m.style.color = '#1a7f37'; } }
+      catch (e) { if (m) { m.textContent = 'Not saved: ' + e.message; m.style.color = '#cf222e'; } }
+    };
+  }
+
   async function renderApprovals() {
     const body = document.getElementById('apprBody');
     if (!body) return;
@@ -11299,7 +11358,10 @@
     if (isGovernancePreviewDisabled('approvals')) {
       pimMenuBadge('apprPendBadge', { actions: 0 });
       // APPR-POLICY-ALWAYS-ON: the banner is scoped to the offboarding & revoke queue -- policy approvals above stay on.
-      body.innerHTML = governancePreviewBanner('The offboarding & revoke queue below is a preview, off: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once. Policy change approvals (above) are not part of this preview and are always on.');
+      body.innerHTML = governancePreviewBanner('The offboarding & revoke queue below is a preview, off: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once. Policy change approvals (above) are not part of this preview and are always on.') +
+        '<div id="apprAppProposalsHost" style="margin-top:12px;"></div>';
+      // owner 2026-11-16 "Queue always on for app proposals": proposals from applications are shown and decided whatever the switch says
+      if (isServer) renderAppProposals(document.getElementById('apprAppProposalsHost'));
       return;
     }
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the approval queue needs the server.</div>'; return; }

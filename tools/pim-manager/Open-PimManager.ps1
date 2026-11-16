@@ -473,6 +473,7 @@ if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
 $_writeGuardLib = Join-Path $solutionRoot 'engine\_shared\PIM-ManagerWriteGuards.ps1'
 . $_writeGuardLib
 . (Join-Path $PSScriptRoot '_revaudit.ps1')   # lane revaudit (100.122 F4): who may revoke what -- POST /api/revoke and POST /api/queue/commit call it; a missing file stops the Manager (fail closed)
+. (Join-Path $PSScriptRoot '_appapi.ps1')     # SETTINGS-API-1 / PEOPLE-API-APPROVAL-1 / SUPPORT-FIX-API-1 (framework 12.30 / 12.31): what an API application does beyond the page handlers; a missing file stops the Manager (fail closed)
 . (Join-Path $PSScriptRoot '_approvers.ps1')  # CODE REVIEW 2 (owner decision 58): who may APPROVE an offboarding / account delete / bulk revoke -- Test-PimApprovalApproverAllowed; a missing file stops the Manager (fail closed)
 
 # Alert FEED + recorded-send proof (engine/_shared/PIM-AlertFeed.ps1, REQUIREMENTS
@@ -1067,7 +1068,15 @@ function Get-PimManagerApiAppAuthConfig {
     $aud = @("$env:PIM_API_APP_AUDIENCE" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
     $iss = @(if ($tid -and (Get-Command Get-PimHostedDefaultIssuers -ErrorAction SilentlyContinue)) { Get-PimHostedDefaultIssuers -TenantId $tid })
-    return @{ audiences = $aud; issuers = $iss }
+    # framework 12.31 rule 4: the install tenant is pinned on the token's tid too. Rule 2 (idtyp=app) is required for every
+    # application token from 3.1.31 (owner 2026-11-16 "Strict everywhere at once") -- inside Resolve-PimManagerAppBearer.
+    return @{ audiences = $aud; issuers = $iss; tenantId = $tid }
+}
+
+function Test-PimManagerAppApiOpen {
+    # API-DOOR-1 (framework 12.35): is the REST application API (/api/app/*) deliberately OPENED on this install? Only the
+    # literal PIM_API_APPS_OPEN = 1 / true / yes / on opens it; unset or anything else = CLOSED (the default, every ring).
+    return [bool]("$env:PIM_API_APPS_OPEN".Trim() -match '^(?i)(1|true|yes|on)$')
 }
 
 function Invoke-PimManagerAppSignIn {
@@ -1087,12 +1096,20 @@ function Invoke-PimManagerAppSignIn {
     $script:CurrentRequestPrincipal = $null; $script:CurrentRequestApp = $null; $script:CurrentRequestOid = ''
     $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
     $global:PIM_SignedRequestCapture = $null
+    # API-DOOR-1 (framework 12.35 "closed by default at every ring"; owner go 2026-11-16 via Invardia: turn the REST app API
+    # OFF, he is not confident with it right now). The WHOLE /api/app/* surface answers 404 -- before the licence, the list,
+    # the signing keys or any token is read -- unless this install was DELIBERATELY opened (Test-PimManagerAppApiOpen:
+    # PIM_API_APPS_OPEN = 1 on ca-pim-manager, set only by a person/owner step; nothing in PIM sets it). New installs = closed.
+    if (-not (Test-PimManagerAppApiOpen)) {
+        Write-JsonResponse -Response $Response -Status 404 -Body @{ error = 'not found' }
+        return [pscustomobject]@{ handled = $true; ok = $false; status = 404; path = $Path }
+    }
     # EDITION-API (owner 2026-11-01): script / service access is Pro ('api.applications'). Without the licence EVERY call
     # here is refused (403, the Pro answer, audited license.refused) before the list, the signing keys or any token is read.
     if (-not (Test-PimManagerProFeature -Key 'api.applications' -Response $Response)) { return [pscustomobject]@{ handled = $true; ok = $false; status = 403; path = $Path } }
     $refuse = {
         param([int]$st, [string]$why)
-        $b = switch ($st) { 401 { @{ error = 'unauthorized' } } 403 { @{ error = 'forbidden'; detail = 'this request is not open to this application' } } 404 { @{ error = 'not found' } } default { @{ error = 'unavailable' } } }
+        $b = switch ($st) { 400 { @{ error = 'bad request' } } 401 { @{ error = 'unauthorized' } } 403 { @{ error = 'forbidden'; detail = 'this request is not open to this application' } } 404 { @{ error = 'not found' } } 411 { @{ error = 'length required' } } 413 { @{ error = 'too large' } } default { @{ error = 'unavailable' } } }
         if ($st -eq 401) { try { $Response.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { } }
         Write-JsonResponse -Response $Response -Status $st -Body $b
         return [pscustomobject]@{ handled = $true; ok = $false; status = $st; path = $Path }
@@ -1109,7 +1126,7 @@ function Invoke-PimManagerAppSignIn {
     # the signing keys are fetched only when there is something to check: no list = refused before any token is read
     $jw = $null
     if ($apps.Count -and $ah -match '^\s*Bearer\s+\S' -and $cfg.audiences.Count -and $cfg.issuers.Count) { $jw = Get-PimEntraJwks }
-    $d = Resolve-PimManagerAppRequest -Method $Method -Path $Path -Authorization $ah -Apps $apps -Jwks $jw -ExpectedIssuers $cfg.issuers -ExpectedAudiences $cfg.audiences
+    $d = Resolve-PimManagerAppRequest -Method $Method -Path $Path -Authorization $ah -Apps $apps -Jwks $jw -ExpectedIssuers $cfg.issuers -ExpectedAudiences $cfg.audiences -ExpectedTenantId "$($cfg.tenantId)"
     if (-not $d.ok) {
         Write-Host ("  [api-app] REFUSED {0} {1} ({2}){3} -- {4}" -f $Method, $Path, $d.status, $(if ($d.appId) { " app $($d.appId)" } else { '' }), $d.reason) -ForegroundColor Red
         if ($d.audit -and $d.appId) {
@@ -1120,7 +1137,49 @@ function Invoke-PimManagerAppSignIn {
         }
         return (& $refuse ([int]$d.status) "$($d.reason)")
     }
-    $script:CurrentRequestApp = @{ appId = "$($d.appId)"; name = "$($d.name)"; role = "$($d.role)"; method = $Method; route = "$($d.path)" }
+    # SETTINGS-API-1 (12.31): settingsRoute = this route is a tier-1 SETTING an Admin application may change (its handler's
+    # SuperAdmin gate is met on THIS route only, Test-PimManagerRoleAtLeast); kind / tier = the tier map's entry.
+    # framework 12.32 API-SECURITY-REVIEW-1 (T28 / T29): an application's body is read HERE, before any handler -- at most
+    # 1 MB (a declared length is required; more = 413), and it must be JSON (else 400). Fixed answers, nothing echoed back.
+    # The handler's Read-RequestJson then parses this same text (Get-PimManagerAppBodyText).
+    $script:CurrentRequestAppBodyText = $null
+    if ($Request.HasEntityBody) {
+        $cap = Get-PimManagerAppBodyLimit
+        if ($Request.ContentLength64 -lt 0) { return (& $refuse 411 'no content length') }
+        if ($Request.ContentLength64 -gt $cap) { return (& $refuse 413 'body too large') }
+        $bt = ''
+        try {
+            $buf = New-Object byte[] ([int]$Request.ContentLength64); $off = 0
+            while ($off -lt $buf.Length) { $n = $Request.InputStream.Read($buf, $off, $buf.Length - $off); if ($n -le 0) { break }; $off += $n }
+            $bt = $Request.ContentEncoding.GetString($buf, 0, $off)
+        } catch { return (& $refuse 400 'body unreadable') }
+        if ("$bt".Trim()) {
+            $okJson = $true
+            try { $null = ConvertFrom-PimSharedPendingJson -Json $bt } catch { $okJson = $false }
+            if (-not $okJson -or "$bt".Trim() -notmatch '^[\[{]') { return (& $refuse 400 'not JSON') }
+        }
+        $script:CurrentRequestAppBodyText = $bt
+    }
+    # SETTINGS-API-1 reclassification (owner 2026-11-16 "goal is to adjust and baseline customers"): a tier-1 SETTING change by an
+    # application is judged by the literal direction map BEFORE the handler runs -- enabling / tightening applies; a WEAKENING
+    # (a protection off, a retention lower, MFA / approval off, a longer limit) is HELD for a SuperAdmin (409, nothing written,
+    # audited). The import judges each setting itself (Invoke-PimManagerAppSettingsImport).
+    if ($d.settings -and $Method -ne 'GET' -and "$($d.path)" -ne '/api/settings/import') {
+        $dirEntry = @(Get-PimManagerAppSettingDirectionMap | Where-Object { "$($d.path)" -cmatch $_.route })[0]
+        $dirBody = $null; if ("$script:CurrentRequestAppBodyText".Trim()) { $dirBody = ConvertFrom-PimSharedPendingJson -Json "$script:CurrentRequestAppBodyText" }
+        $dirCur = $null; if ($dirEntry -and "$($dirEntry.setting)" -and (Get-Command Get-PimManagerSetting -ErrorAction SilentlyContinue)) { try { $dirCur = Get-PimManagerSetting -Name "$($dirEntry.setting)" } catch { $dirCur = $null } }
+        $dir = Test-PimManagerAppSettingDirection -Route "$($d.path)" -Body $dirBody -Current $dirCur -Entry $dirEntry
+        if ($dir.held) {
+            $script:CurrentRequestApp = @{ appId = "$($d.appId)"; name = "$($d.name)"; role = "$($d.role)" }
+            try { Write-PimManagerAuditEvent -Action 'api.app.setting.held' -Target ("{0} {1}" -f $Method, $d.path) -Result 'held' -After ([ordered]@{ appId = "$($d.appId)"; name = "$($d.name)"; route = "$($d.path)"; reasons = @($dir.reasons) }) } catch { }
+            $script:CurrentRequestApp = $null
+            Write-JsonResponse -Response $Response -Status 409 -Body ([ordered]@{ ok = $false; gate = 'weakening-held'; superAdminRequired = $true; held = @($dir.reasons)
+                error = 'Held: this change weakens a protection, so a SuperAdmin makes it in PIM Manager. Nothing was saved.' })
+            return [pscustomobject]@{ handled = $true; ok = $false; status = 409; path = $Path }
+        }
+    }
+    $script:CurrentRequestApp = @{ appId = "$($d.appId)"; name = "$($d.name)"; role = "$($d.role)"; method = $Method; route = "$($d.path)"
+                                   settingsRoute = [bool]$d.settings; kind = "$($d.kind)"; tier = [int]$d.tier; supportCommit = $false }
     $script:CurrentRequestPrincipal = "app:$($d.appId)"
     return [pscustomobject]@{ handled = $true; ok = $true; status = 200; path = "$($d.path)" }
 }
@@ -1129,7 +1188,7 @@ function Write-PimManagerAppCallAudit {
     # Every application call that was let in is audited after it ran: the app id, its listed role, the route and the answer.
     param([int]$Status = 0)
     $a = $script:CurrentRequestApp
-    if (-not $a -or "$($a.role)" -notin @('Reader', 'Admin')) { return }
+    if (-not $a -or "$($a.role)" -notin @('Reader', 'Admin', 'Support')) { return }
     $res = if ($Status -ge 200 -and $Status -lt 400) { 'ok' } elseif ($Status -in @(401, 403)) { 'denied' } else { 'failed' }
     try { Write-PimManagerAuditEvent -Action 'api.app.call' -Target ("{0} {1}" -f $a.method, $a.route) -Result $res -After ([ordered]@{ appId = "$($a.appId)"; name = "$($a.name)"; role = "$($a.role)"; method = "$($a.method)"; route = "$($a.route)"; status = $Status; via = 'api-app' }) }
     catch { Write-Warning "[api-app] audit not written: $($_.Exception.Message)" }
@@ -1494,6 +1553,12 @@ function Get-PimManagerRole {
     # an application more. Capped again: anything but Reader / Admin is no role at all (an application is never SuperAdmin).
     if ($script:CurrentRequestApp) {
         $ar = "$($script:CurrentRequestApp.role)"
+        # SUPPORT-FIX-API-1 (12.30): the Support role ranks as Reader on every route -- and as Admin ONLY while its own
+        # support route runs the commit (supportCommit, set and cleared by Invoke-PimManagerSupportCommit). Never SuperAdmin.
+        if ($ar -ceq 'Support') {
+            $sr = if ($script:CurrentRequestApp.supportCommit -eq $true) { 'Admin' } else { 'Reader' }
+            return @{ role = $sr; identity = "app:$($script:CurrentRequestApp.appId)"; source = 'api application (Invardia Support, enrolled by the updater)'; app = $true; appRole = 'Support' }
+        }
         if ($ar -notin @('Reader', 'Admin')) { return @{ role = 'None'; identity = "app:$($script:CurrentRequestApp.appId)"; source = 'api application without a valid role (refused)'; app = $true } }
         return @{ role = $ar; identity = "app:$($script:CurrentRequestApp.appId)"; source = 'api application (Settings > API applications)'; app = $true }
     }
@@ -1703,6 +1768,10 @@ function Test-PimManagerRoleAtLeast {
     # §98: Demo ranks as Reader -- a demo viewer passes exactly the gates a Reader passes, and every write is refused
     # before its handler anyway (Invoke-PimManagerDemoGate).
     $rank = @{ Reader = 0; Delegated = 0; Demo = 0; Admin = 1; SuperAdmin = 2 }
+    # SETTINGS-API-1 (framework 12.31, owner 2026-11-16 "All but security controls"): an ADMIN application on a TIER-1 SETTING
+    # route (settingsRoute, decided by the literal tier map for THIS request) meets the handler's SuperAdmin gate -- only that
+    # gate: its role stays Admin everywhere else (Get-PimManagerRole), so it never approves a guard, a restore or a request.
+    if ($Minimum -eq 'SuperAdmin' -and $script:CurrentRequestApp -and "$($script:CurrentRequestApp.role)" -ceq 'Admin' -and $script:CurrentRequestApp.settingsRoute -eq $true) { return $true }
     $rank[(Get-PimManagerRole).role] -ge $rank[$Minimum]
 }
 
@@ -11894,6 +11963,11 @@ function Read-RequestJson {
         if ([string]::IsNullOrWhiteSpace($mj)) { return $null }
         return (ConvertFrom-PimSharedPendingJson -Json $mj)
     }
+    # framework 12.32: an APPLICATION's body was read (size-capped, JSON-checked) by the gate -- parse that same text
+    if ($script:CurrentRequestApp -and $null -ne $script:CurrentRequestAppBodyText) {
+        if ([string]::IsNullOrWhiteSpace("$script:CurrentRequestAppBodyText")) { return $null }
+        return (ConvertFrom-PimSharedPendingJson -Json "$script:CurrentRequestAppBodyText")
+    }
     if (-not $Request.HasEntityBody) { return $null }
     $reader = New-Object System.IO.StreamReader($Request.InputStream, $Request.ContentEncoding)
     try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
@@ -15152,6 +15226,9 @@ function Invoke-PimManagerPostRouteApprovalsDecide {
     param($path, $req, $resp, $method = 'POST')
 
             $script:lastHeartbeat = Get-Date
+            # PEOPLE-API-APPROVAL-1 / framework 12.31: an APPLICATION never approves or denies (maker and approver are always
+            # distinct principals). The tier map keeps this route off every application allow-list; this is the second wall.
+            if ($script:CurrentRequestApp) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'An application can never approve or deny a request.' }; return 403 }
             if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to approve or deny a request.' }
@@ -15206,7 +15283,33 @@ function Invoke-PimManagerPostRouteApprovalsDecide {
                     } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; reason = "the admin rows could not be read ($($_.Exception.Message)) -- nothing was approved" }; return 500 }
                     if (-not $adRow) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; reason = "'$($adReq.target)' is not a managed admin account any more -- nothing was approved" }; return 409 }
                 }
+                # PEOPLE-API-APPROVAL-1: an application's PROPOSED change -- a signed-in person (Admin / SuperAdmin) who is not
+                # the maker approves; self-approval never applies. Approved, it is saved at once through the normal commit path
+                # as that person, every guard included (Invoke-PimManagerAppChangeExecute); a held commit stays Approved and is
+                # retried with POST /api/approvals/execute.
+                $acReq = $null
+                if ($apprReq -and (Test-PimManagerAppChangeRequest -Request $apprReq)) {
+                    $selfOk = $false
+                    if ($decision -eq 'approve') {
+                        $acRole = Get-PimManagerRole
+                        $acChk = Test-PimManagerAppChangeApprover -Request $apprReq -Identity "$me" -Role "$($acRole.role)" -IsApp ([bool]$script:CurrentRequestApp)
+                        if (-not $acChk.allowed) {
+                            Write-PimManagerAuditEvent -Action 'approval.request.refused' -Target "$($apprReq.target)" -After @{ id = "$($apprReq.id)"; approver = "$me"; action = 'app-change'; reason = "$($acChk.reason)" } -Result 'denied'
+                            Write-JsonResponse -Response $resp -Status ([int]$acChk.status) -Body @{ ok = $false; error = "$($acChk.reason)"; reason = "$($acChk.reason)" }
+                            return [int]$acChk.status
+                        }
+                        $acReq = $apprReq
+                    }
+                }
                 $res = Set-PimApprovalDecision -Id $apprId -Approver "$me" -Decision $decision -Note $note -AllowSelfApprove $selfOk
+                if ($res.ok -and $acReq -and $decision -eq 'approve') {
+                    Write-PimManagerAuditEvent -Action 'approval.request.approved' -Target "$($res.request.target)" -After @{ id = "$($res.request.id)"; approver = "$me"; maker = "$($res.request.requestor)"; action = 'app-change' }
+                    $acEx = Invoke-PimManagerAppChangeExecute -Id "$($res.request.id)" -GuardApproval $null
+                    $acOut = $null; try { $acOut = $acEx.bodyText | ConvertFrom-Json } catch { $acOut = $null }
+                    Write-JsonResponse -Response $resp -Status $(if ([int]$acEx.status -eq 200) { 200 } else { [int]$acEx.status }) -Body ([ordered]@{ ok = ([int]$acEx.status -eq 200); id = "$($res.request.id)"; status = $(if ([int]$acEx.status -eq 200) { 'Executed' } else { 'Approved' })
+                        reason = $(if ([int]$acEx.status -eq 200) { 'approved and saved through the normal commit' } else { 'approved, but the commit did not save it (see commit) -- answer the guard or retry with Execute' }); commit = $acOut })
+                    return $(if ([int]$acEx.status -eq 200) { 200 } else { [int]$acEx.status })
+                }
                 if ($res.ok -and $adReq -and "$($adReq.action)" -ieq 'admin-delete' -and $decision -eq 'approve' -and $adRow) {
                     $adDo = Invoke-PimManagerAdminDelete -Upn "$($adRow.UserPrincipalName)" -By "$me" -ApprovedBy "$me" -RequestedBy "$($adReq.requestor)" -RequestId $apprId `
                                 -Justification "$($adReq.justification)" -AdminRow $adRow -Delegations @(Get-PimManagerAdminDelegationRows -Upn "$($adRow.UserPrincipalName)" -UserName "$($adRow.UserName)" -Rows @($adAsg))
@@ -16110,6 +16213,9 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             }
+            # SETTINGS-API-1 (12.31): an Admin APPLICATION commits a tier-1 entity through this SAME path (its pre-checks:
+            # Invoke-PimManagerAppCommit -- a baseRowsHash, no approval / restore claim, audited with the app).
+            if ($method -eq 'PUT' -and $script:CurrentRequestApp) { return (Invoke-PimManagerAppCommit -Base $base -Spec $spec -Response $resp -Body (Read-RequestJson -Request $req)) }
             if ($method -eq 'PUT') {
                 # REQ 93: the commit is ONE function now -- the page and the MCP commit tool run the SAME code and gates.
                 return (Invoke-PimManagerCsvPut -base $base -spec $spec -resp $resp -PutBody (Read-RequestJson -Request $req))
@@ -16119,6 +16225,38 @@ function Handle-Request {
                 return 405
             }
         }
+
+        # ---- PEOPLE-API-APPROVAL-1 (owner 2026-11-16 "Code + approver"): an Admin APPLICATION proposes a tier-2 change; it goes
+        # into the approval queue and a PERSON approves it (POST /api/approvals/decide), which saves it through the normal commit.
+        # Reached only as /api/app/approvals/app-submit/<entity> (the tier map); a person's call is refused in the function.
+        if ($path -match '^/api/approvals/app-submit/([\w\.-]+)$' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            return (Invoke-PimManagerAppSubmit -Base $Matches[1] -Request $req -Response $resp)
+        }
+        # ---- SUPPORT-FIX-API-1 (framework 12.30) + SUPPORT-DIRECT-GRANT-1: the Support role's two writes, on a ticket ---------
+        # owner 2026-11-16 "Queue always on for app proposals": a PERSON lists / decides / retries application proposals here,
+        # whatever the Governance preview Approvals switch says (tier 3: never an application).
+        if ($path -eq '/api/app-proposals' -and $method -eq 'GET') { return (Invoke-PimManagerAppProposalsRoute -Mode 'list' -Request $req -Response $resp) }
+        if ($path -eq '/api/app-proposals/decide' -and $method -eq 'POST') { return (Invoke-PimManagerAppProposalsRoute -Mode 'decide' -Request $req -Response $resp) }
+        if ($path -eq '/api/app-proposals/execute' -and $method -eq 'POST') { return (Invoke-PimManagerAppProposalsRoute -Mode 'execute' -Request $req -Response $resp) }
+        # owner 2026-11-16 "maybe 1 will enforce approve": SupportFixMode = auto (default) | approve. GET any role; PUT SuperAdmin
+        # (person only, tier 3 "who may act without approval"), audited.
+        if ($path -eq '/api/settings/support-fix-mode' -and $method -eq 'GET') {
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ mode = (Get-PimManagerSupportFixMode); canWrite = [bool](-not $script:CurrentRequestApp -and (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) })
+            return 200
+        }
+        if ($path -eq '/api/settings/support-fix-mode' -and $method -eq 'PUT') {
+            if ($script:CurrentRequestApp -or -not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'A SuperAdmin (a person) sets how Invardia support fixes are applied.' }; return 403 }
+            $sfm = "$((Read-RequestJson -Request $req).mode)".Trim().ToLowerInvariant()
+            if ($sfm -notin @('auto', 'approve')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "mode must be 'auto' or 'approve'" }; return 400 }
+            $sfmOld = Get-PimManagerSupportFixMode
+            Set-PimManagerSetting -Name 'SupportFixMode' -Value $sfm
+            Write-PimManagerAuditEvent -Action 'settings.support-fix-mode.save' -Target 'settings:SupportFixMode' -Before @{ mode = $sfmOld } -After @{ mode = $sfm } -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; mode = (Get-PimManagerSupportFixMode) })
+            return 200
+        }
+        if ($path -eq '/api/support/fix' -and $method -eq 'POST') { return (Invoke-PimManagerSupportRoute -Mode 'fix' -Request $req -Response $resp) }
+        if ($path -eq '/api/support/change' -and $method -eq 'POST') { return (Invoke-PimManagerSupportRoute -Mode 'change' -Request $req -Response $resp) }
 
         # ---- §79.13 SHARED PENDING CHANGES ----------------------------------------------------------------------------
         # GET  /api/pending              every staged change of every administrator (Reader+). Clears first what the
@@ -16741,6 +16879,11 @@ function Handle-Request {
         # dryRun=true returns the plan (current -> new per setting); dryRun=false writes ONLY the settings named in
         # 'apply' that the plan shows as new/changed, each audited. Tenant-specific settings are never in the catalog.
         # -------------------------------------------------------------------
+        # SETTINGS-API-1: an APPLICATION exports (Reader+) / imports (Admin) through its own functions -- every setting a person
+        # sees, never a secret value, person-only settings read-only and refused on import (403 + the list). A person's export /
+        # import below is unchanged.
+        if ($script:CurrentRequestApp -and $path -eq '/api/settings/export' -and $method -eq 'GET') { return (Invoke-PimManagerAppSettingsExport -Request $req -Response $resp) }
+        if ($script:CurrentRequestApp -and $path -eq '/api/settings/import' -and $method -eq 'POST') { return (Invoke-PimManagerAppSettingsImport -Request $req -Response $resp) }
         if ($path -eq '/api/settings/export' -and $method -eq 'GET') {
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to export settings.' }; return 403 }
             if (-not (Get-Command New-PimSettingsExport -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'settings copy library (PIM-SettingsTransfer.ps1) is not loaded in this Manager' }; return 501 }
@@ -16991,6 +17134,18 @@ function Handle-Request {
                             }
                         } elseif ("$dimStored".Trim()) {
                             $h['DirectGroupDimension'] = $dimStored     # kept in the store, ignored by every reader
+                        }
+                        # SETTINGS-API-1 (12.31): the admin account DOMAIN inside naming is person-only (the domain admins sign in
+                        # with). An application's naming save may not change it: refused 403, nothing saved.
+                        if ($script:CurrentRequestApp) {
+                            $sfxKey = @($h.Keys | Where-Object { "$_" -eq 'AdminAccountUpnSuffix' }) | Select-Object -First 1
+                            $sfxOld = ''; try { if ($curNaming -and $curNaming.PSObject.Properties['AdminAccountUpnSuffix']) { $sfxOld = "$($curNaming.AdminAccountUpnSuffix)" } } catch { }
+                            if ($sfxKey -and "$($h[$sfxKey])".Trim().ToLowerInvariant() -ne "$sfxOld".Trim().ToLowerInvariant()) {
+                                Write-PimManagerAuditEvent -Action 'settings.naming.save' -Target 'settings:naming' -After @{ refused = 'AdminAccountUpnSuffix'; via = 'api-app' } -Result 'denied'
+                                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'The admin account domain is person-only: an application cannot change it. Nothing was saved.'; personOnly = @('AdminAccountUpnSuffix') }
+                                return 403
+                            }
+                            if (-not $sfxKey -and "$sfxOld".Trim()) { $h['AdminAccountUpnSuffix'] = $sfxOld }   # an application's save never blanks it
                         }
                         # 🔴 NAME-1 (owner-approved 2026-10-09): a BLANK name pattern (or one the save drops) is refused HERE,
                         # server-side -- it used to be stored, and every engine run then stopped at preflight.
@@ -17676,6 +17831,7 @@ function Handle-Request {
         # can never run twice. A blocked execution returns 409 with the gate that refused it.
         if ($path -eq '/api/approvals/execute' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
+            if ($script:CurrentRequestApp) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'An application can never execute a request.' }; return 403 }
             if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to execute an approved offboard.' }
@@ -17689,6 +17845,15 @@ function Handle-Request {
             $apprId      = "$($body.id)".Trim()
             $confirmBulk = [bool]($body.confirmBulk)
             if (-not $apprId) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id is required' }; return 400 }
+            # PEOPLE-API-APPROVAL-1: an APPROVED application proposal is (re)tried through the normal commit as this person; the
+            # person's own SuperAdmin answer to a guard rides as guardApproval, exactly as in the page's commit.
+            $acTry = $null; try { $acTry = @(@(Get-PimApprovalRequests) | Where-Object { "$($_.id)" -eq $apprId }) | Select-Object -First 1 } catch { $acTry = $null }
+            if ($acTry -and (Test-PimManagerAppChangeRequest -Request $acTry)) {
+                $acGa = if ($body -and $body.PSObject.Properties['guardApproval']) { $body.guardApproval } else { $null }
+                $acEx = Invoke-PimManagerAppChangeExecute -Id $apprId -GuardApproval $acGa
+                Copy-PimManagerCapturedResponse -Response $resp -Status ([int]$acEx.status) -BodyText "$($acEx.bodyText)"
+                return [int]$acEx.status
+            }
             try {
                 # Resolve the desired set so the DisableGuard composite is positively
                 # satisfied for a real, deliberate single-target offboard (the breaker

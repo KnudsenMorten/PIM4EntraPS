@@ -817,6 +817,15 @@ function Get-PimFailureCatalogCodes {
     return @(@($script:PimFailureRules | ForEach-Object { "$($_.code)" }) + 'UNCLASSIFIED')
 }
 
+function Get-PimFailureCatalogFixes {
+    <# PURE. SUPPORT-FIX-API-1 (framework 12.30): the fixes the catalog OFFERS for one code (@{ id; kind; label }), @() when none. #>
+    param([string]$Code)
+    $c = "$Code".Trim().ToUpperInvariant()
+    $rule = @($script:PimFailureRules | Where-Object { "$($_.code)" -eq $c }) | Select-Object -First 1
+    if (-not $rule) { return @() }
+    return @(@($rule.fixes) | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; kind = "$($_.kind)"; label = "$($_.label)" } })
+}
+
 function Get-PimFailureFixKind {
     <#
       PURE. 100.34: a catalog code -> 'customer-config' | 'product-defect'. A rule's severity data / policy / environment is

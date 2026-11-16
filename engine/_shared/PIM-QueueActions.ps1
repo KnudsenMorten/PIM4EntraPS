@@ -84,7 +84,55 @@ function Get-PimQueueActionCatalog {
         @{ type='notify-mail'
            description='Send a mail the web app raised (an alert, a notice) through the engine''s mail sender, once'
            verifiable=$false }
+        # owner 2026-11-16 "Support creates them on a ticket" (SUPPORT-FIX-API-1, framework 12.30): the ONE exception to "PIM
+        # never creates a Defender role" -- queued only by the Support fix 'create-defender-role' for a DEFENDER-ROLE-MISSING
+        # failure; the engine creates it as ITS OWN identity (Invoke-PimQueueDefenderRoleCreate). The engine's runs never do.
+        @{ type='defender-role-create'
+           description='Create ONE missing Defender XDR custom role with exactly the name and permissions PIM''s definition lists (a Support fix on a ticket; verified by reading the role back)'
+           verifiable=$true }
     ) | ForEach-Object { [pscustomobject]$_ }
+}
+
+function Invoke-PimQueueDefenderRoleCreate {
+    <#
+      The ENGINE half of the Support fix 'create-defender-role'. Creates ONE Defender XDR custom role with EXACTLY the payload's
+      name + permissions (allowedResourceActions) and PIM's managed-role description marker -- nothing else -- then reads it back.
+        a role of that name already exists      -> ok, nothing created (idempotent)
+        Defender refuses (e.g. Data Operations without Sentinel: "not a valid permission for storage") -> terminal, the refusal
+                                                   in plain words (Get-PimDefenderRoleWriteErrorText), nothing created
+        a successful POST answered with an insecure redirect (measured live) -> read back by name
+      -Graph: test seam param($Method, $Path, $Body) (Graph BETA). Returns the queue's @{ ok; terminal; verification; detail }.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [scriptblock]$Graph)
+    $g = { param($n) if ($Payload -is [System.Collections.IDictionary]) { $Payload[$n] } elseif ($Payload.PSObject.Properties[$n]) { $Payload.$n } else { $null } }
+    $no = { param($why) [pscustomobject]@{ ok = $false; terminal = $true; verification = 'none'; detail = "defender-role-create NOT done -- nothing was created: $why" } }
+    $name = "$(& $g 'name')".Trim()
+    $acts = @(@(& $g 'actions') | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $ticket = "$(& $g 'ticket')".Trim()
+    if (-not $name -or $name -match '\{|\}') { return (& $no 'the role name is missing') }
+    if (-not $acts.Count) { return (& $no 'no permissions are listed') }
+    $badA = @($acts | Where-Object { $_ -notmatch '^microsoft\.xdr/[A-Za-z0-9_\-\*/\.]+$' })
+    if ($badA.Count) { return (& $no "not Defender XDR permissions: $($badA -join ', ')") }
+    if ($ticket -notmatch '^SUP-\d{4}-\d{5}$') { return (& $no 'the request carries no support ticket id') }
+    $marker = if (Get-Command Get-PimDefenderManagedRoleDescription -ErrorAction SilentlyContinue) { Get-PimDefenderManagedRoleDescription } else { 'Managed by PIM4EntraPS: the custom Defender XDR role of the permission group of the same name.' }
+    $call = if ($Graph) { $Graph } else { { param($m, $p, $b) if ($m -eq 'GET') { Invoke-PimGraph -Beta -All -Path $p } else { Invoke-PimGraph -Beta -Method $m -Path $p -Body $b } } }
+    $findByName = { @(@(& $call 'GET' '/roleManagement/defender/roleDefinitions' $null) | Where-Object { $_ -and "$($_.displayName)" -ieq $name }) }
+    $existing = @(); try { $existing = @(& $findByName) } catch { return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = "defender-role-create: the Defender XDR roles could not be read ($($_.Exception.Message)) -- retried, nothing created" } }
+    if ($existing.Count) { return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "the Defender XDR role '$name' already exists -- nothing created (ticket $ticket)" } }
+    $body = [ordered]@{ displayName = $name; description = $marker; rolePermissions = @([ordered]@{ allowedResourceActions = @($acts) }) }
+    $redirected = $false
+    try { [void](& $call 'POST' '/roleManagement/defender/roleDefinitions' $body) }
+    catch {
+        $m = "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })"
+        if ($m -match '(?i)insecure redirection') { $redirected = $true }
+        else {
+            $plain = if (Get-Command Get-PimDefenderRoleWriteErrorText -ErrorAction SilentlyContinue) { Get-PimDefenderRoleWriteErrorText -Name $name -Actions @($acts) -Message $m } else { "Defender XDR refused to create the role '$name': $m" }
+            return (& $no $plain)
+        }
+    }
+    $back = @(); for ($i = 0; $i -lt 4 -and -not $back.Count; $i++) { if ($i) { Start-Sleep -Seconds 3 }; try { $back = @(& $findByName) } catch { $back = @() } }
+    if (-not $back.Count) { return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'indeterminate'; detail = "defender-role-create: the role '$name' was sent$(if ($redirected) { ' (answered with a redirect)' }) but is not there on read-back -- not retried (ticket $ticket)" } }
+    return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "the Defender XDR role '$name' was created by the engine with exactly [$($acts -join '; ')] (ticket $ticket; read back)" }
 }
 
 function Get-PimQueueActionType {
@@ -719,6 +767,8 @@ function Invoke-PimQueueAction {
     }
     # SECURE-WEB-1 (3.1.26): a mail the web app raised -- no directory call, so none of the directory guards below apply.
     if ($type -eq 'notify-mail') { return (Invoke-PimQueueNotifyMail -Payload $p) }
+    # owner 2026-11-16: the Support fix 'create-defender-role' -- a Defender role, no principal, so none of the guards below apply
+    if ($type -eq 'defender-role-create') { return (Invoke-PimQueueDefenderRoleCreate -Payload $p) }   # Graph BETA as the engine identity
 
     # REQ-Y (operator 2026-09-19: "revoke is pro", hard): a queued revoke of a current delegation needs a Pro licence at
     # EXECUTION too (the Manager refuses to queue one without it; this covers an entry queued before). Refused before any

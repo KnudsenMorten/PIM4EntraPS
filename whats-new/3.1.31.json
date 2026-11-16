@@ -1,0 +1,7 @@
+{"version":"3.1.31","date":"2026-11-16","type":"feature",
+ "summary":"Scripts can now manage PIM Manager settings and propose changes, Invardia support can fix known problems for you, and one file can set up a new install.",
+ "new":[{"title":"Manage settings from scripts","text":"An approved application can change settings and commit changes through the same checks as a person. Turning something on applies at once; switching a protection off waits for a SuperAdmin. Who signs in, approves and acts stays with people."},
+        {"title":"Scripts propose, people approve","text":"An application can propose changes to administrators and their roles. Each proposal waits in Proposals from applications until an Admin or SuperAdmin approves it."},
+        {"title":"Invardia support fixes known problems","text":"When a run fails for a known reason, Invardia support can apply the fix PIM Manager itself offers, on a support ticket, and your admins get a mail. You can choose to approve each fix first."},
+        {"title":"One file to set up an install","text":"A published example script applies a set of settings and permission packs from one file, with a preview first."}],
+ "fixes":[{"title":"Stricter application sign-in","text":"Application tokens must state that they are application tokens and come from your own tenant. Scripts that already use the API need the API setup command run once."}]}
