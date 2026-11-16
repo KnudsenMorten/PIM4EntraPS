@@ -1,5 +1,29 @@
 # What's new in PIM Manager
 
+## 3.1.41 · 2026-11-17 · Fix-only
+
+An update now always finishes its own database changes, even when a PIM job was running at the time.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Database changes always finish after an update** - When a running PIM job held back the database step of an update, the step is now retried until it runs. Before, a new list could stay missing until a later update.
+
+## 3.1.40 · 2026-11-16 · Security
+
+The web app no longer reads your directory itself. People and groups come from PIM's own store, filled by the engine.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **No directory reads from the web app** - The PIM Manager web app no longer calls Microsoft Graph. People and groups come from PIM's own store, which the engine fills. A name not found yet is looked up by the engine within a minute.
+
 ## 3.1.39 · 2026-11-16 · Security
 
 Each update now checks that the web app's identity holds only the rights it needs, and reports anything extra.

@@ -11387,7 +11387,9 @@
       const pattern = (document.getElementById('setDeptImportPat').value || 'ORG-*').trim();
       msg.textContent = 'Importing…'; msg.style.color = '#57606a';
       try {
-        const r = await api('POST', '/api/settings/departments/import', { pattern });
+        // GRAPH-PICKER: the engine reads the Entra groups first (202 lookupPending) -- asked again while it does
+        const r = await pimLookupRetry(() => api('POST', '/api/settings/departments/import', { pattern }), (t) => { msg.textContent = t + '…'; }, 15);
+        if (r && r.lookupPending) { msg.textContent = PIM_LOOKUP_STILL; return; }
         if (r.settings) SETTINGS_DATA = r.settings;
         const sm = r.summary || {};
         msg.textContent = `Imported ✓ created ${sm.created || 0}, updated ${sm.updated || 0}, skipped ${sm.skipped || 0}`;
@@ -17362,8 +17364,10 @@
     if (s1.errors) return s1;
     say('Checking the mailbox...');
     let used;
-    try { used = await api('POST', '/api/settings/mail/mailbox/use', {}); }
+    // GRAPH-PICKER: a mailbox the engine has not stored yet is looked up first (202 lookupPending) -- asked again, calmly
+    try { used = await pimLookupRetry(() => api('POST', '/api/settings/mail/mailbox/use', {}), say); }
     catch (e) { const b = e && e.body; return { errors: (b && b.errors) ? b.errors : { _: 'Not saved: ' + gsErrText(e) } }; }
+    if (used && used.lookupPending) return { errors: { _: PIM_LOOKUP_STILL } };
     if (m && used) { m.sender = used.sender; m.mode = 'sharedMailbox'; }
     say('Sending a test mail...');
     let t = null, tErr = '';
@@ -18667,7 +18671,9 @@
           const pattern = gsVal(x.form, 'deptPattern') || 'ORG-*';
           x.say('Importing...');
           try {
-            const r = await api('POST', '/api/settings/departments/import', { pattern: pattern });
+            // GRAPH-PICKER: the engine reads the Entra groups first (202 lookupPending) -- asked again while it does
+            const r = await pimLookupRetry(() => api('POST', '/api/settings/departments/import', { pattern: pattern }), (t) => x.say(t + '...'), 15);
+            if (r && r.lookupPending) { x.say(PIM_LOOKUP_STILL); return; }
             if (r && r.settings) SETTINGS_DATA = r.settings;
             const sm = (r && r.summary) || {};
             sharedToast('Imported from Entra: ' + (sm.created || 0) + ' created, ' + (sm.updated || 0) + ' updated, ' + (sm.skipped || 0) + ' skipped.');
@@ -19155,12 +19161,19 @@
   async function actGroupSource(q) {
     if (!isServer) return { items: [], error: 'static mode -- the directory needs the server' };
     let r = null;
-    try { r = await api('GET', '/api/directory/groups?q=' + encodeURIComponent(q) + '&top=25', undefined, { timeoutMs: 20000 }); }
+    try {
+      // GRAPH-PICKER: nothing stored for this name yet = the engine looks it up; ask again a few times (calm, no error)
+      const call = () => api('GET', '/api/directory/groups?q=' + encodeURIComponent(q) + '&top=25', undefined, { timeoutMs: 20000 });
+      r = await call();
+      if (r && r.lookupPending && !((r.groups || []).length)) r = await pimLookupRetry(call, null, 5);
+    }
     catch (e) { return { items: [], error: String(e && e.message ? e.message : e) }; }
     const gs = (r && r.groups) || [];
     gs.forEach(g => { ACT.groups[String(g.id).toLowerCase()] = g; });
-    return { items: gs.map(g => ({ value: g.id, label: g.displayName || g.id, sub: (g.kind || 'group') + ' group', type: 'group' })),
-      note: (r && r.truncated) ? 'more groups match -- keep typing to narrow' : ((r && r.matchMode === 'startswith') ? 'prefix match only' : '') };
+    return { items: gs.map(g => ({ value: g.id, label: g.displayName || g.id, sub: g.kind ? g.kind + ' group' : 'group', type: 'group' })),
+      note: (r && r.truncated) ? 'more groups match -- keep typing to narrow' :
+            ((r && r.lookupPending) ? (gs.length ? 'PIM is looking up more groups -- type again in a moment' : PIM_LOOKUP_STILL) :
+            ((r && r.matchMode === 'startswith') ? 'prefix match only' : '')) };
   }
   // The deployment-group picker for one channel (Intune + Edge steps): search by name, pick, saved at once (PIM's own
   // setting, audited). Deployment only -- it never decides who may sign in.
@@ -19174,7 +19187,9 @@
   }
   async function actSaveTarget(ch, target) {
     const body = {}; body[ch] = target;
-    const r = await api('PUT', '/api/settings/activator-targets', body);
+    // GRAPH-PICKER: a group the engine has not stored yet is looked up first (202 lookupPending) -- the save is asked again
+    const r = await pimLookupRetry(() => api('PUT', '/api/settings/activator-targets', body));
+    if (r && r.lookupPending) throw new Error(PIM_LOOKUP_STILL);
     if (ACT.d) ACT.d.targets = r.targets;
     ACT.d = null;               // the commands come from the server: read them again
     ACT.built = null;
@@ -19863,7 +19878,10 @@
       // search that sits on "Searching..." for two minutes is indistinguishable from a hang. The
       // operator reported exactly that while the server log showed the request answered 200.
       // 20s is far longer than a directory query needs and short enough to tell the truth.
-      r = await api('GET', '/api/directory/people?q=' + encodeURIComponent(q) + '&top=25', undefined, { timeoutMs: 20000 });
+      // GRAPH-PICKER: nothing stored for this name yet = the engine looks it up; ask again a few times (calm, no error)
+      const call = () => api('GET', '/api/directory/people?q=' + encodeURIComponent(q) + '&top=25', undefined, { timeoutMs: 20000 });
+      r = await call();
+      if (r && r.lookupPending && !((r.people || []).length)) r = await pimLookupRetry(call, null, 5);
     } catch (e) {
       // api() throws the {error,hint} body as a string. Surface it verbatim: the endpoint
       // deliberately distinguishes "the lookup did not run" from "no matches", and collapsing
@@ -19881,7 +19899,8 @@
         type:  (p.accountEnabled === false) ? 'disabled' : 'person'
       })),
       note: (r && r.truncated) ? 'more matches exist -- keep typing to narrow' :
-            ((r && r.matchMode === 'startswith') ? 'prefix match only -- a surname may not match' : '')
+            ((r && r.lookupPending) ? ((people.length ? 'PIM is looking up more names -- type again in a moment' : PIM_LOOKUP_STILL)) :
+            ((r && r.matchMode === 'startswith') ? 'prefix match only -- a surname may not match' : ''))
     };
   }
   function pimAttachPeopleCombo(input) {
@@ -22710,6 +22729,22 @@
     } catch (_) { /* a banner must never be the thing that breaks the page */ }
   }
 
+  // GRAPH-PICKER (owner 2026-11-16): the web app reads the directory from PIM's SQL only. A name the engine has not stored
+  // yet answers { lookupPending: true } while the engine looks it up (about a minute). Ask again every 6 s, at most `tries`
+  // times; onWait(text) shows the calm waiting line. The last answer is returned (still pending = the caller says so).
+  const PIM_LOOKUP_STILL = 'PIM is still looking this up in the directory -- try again in a minute.';
+  async function pimLookupRetry(fn, onWait, tries) {
+    const n = tries || 6;
+    let r = null;
+    for (let i = 0; i < n; i++) {
+      r = await fn();
+      if (!(r && r.lookupPending)) return r;
+      if (i === n - 1) break;
+      if (onWait) { try { onWait((r && r.message) || 'Looking it up in the directory…'); } catch (_) {} }
+      await new Promise(res => setTimeout(res, 6000));
+    }
+    return r;
+  }
   async function api(method, path, body, opts2) {
     if (!isServer) throw new Error('static mode -- API not available');
     // SIGNIN-RENEW-2 (b): the renewal failed -- no API call leaves this page (no poller, no timer) until the person acts.
@@ -32869,7 +32904,8 @@
     if (!wid || !isServer) return;
     if (wlRoleCache[k] && (wlRoleCache[k].items || wlRoleCache[k].loading || wlRoleCache[k].error)) return;
     wlRoleCache[k] = { items: null, loading: true, error: '' };
-    api('GET', '/api/workload-roles?id=' + encodeURIComponent(wid) + (res ? '&resource=' + encodeURIComponent(res) : '')).then(r => {
+    // GRAPH-PICKER: an application's roles the engine has not read yet answer lookupPending -- asked again a few times
+    pimLookupRetry(() => api('GET', '/api/workload-roles?id=' + encodeURIComponent(wid) + (res ? '&resource=' + encodeURIComponent(res) : '')), null, 6).then(r => {
       const __list = ((r && (r.roles || r.value)) || []);
       const __amb = pimWorkloadAmbiguousNames(__list);
       wlRoleCache[k].items = __list.map(x => {
@@ -33665,8 +33701,9 @@
                   if (!pimLooksLikeUpn(u)) { exRes.textContent = 'Enter the exact sign-in name (UPN) first.'; return; }
                   exRes.textContent = 'Looking up ' + u + '…';
                   let r = null;
-                  try { r = await api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(u), undefined, { timeoutMs: 20000 }); }
+                  try { r = await pimLookupRetry(() => api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(u), undefined, { timeoutMs: 20000 }), (t) => { exRes.textContent = t + '…'; }); }
                   catch (e) { exRes.textContent = String(e && e.message ? e.message : e); return; }
+                  if (r && r.lookupPending) { exRes.textContent = PIM_LOOKUP_STILL; return; }
                   if (!r || !r.found) { exRes.textContent = (r && r.error) || ('no account with this UPN -- PIM never creates an existing-account.'); return; }
                   exRes.textContent = 'Found: ' + (r.displayName || u) + ' (' + (r.source || 'not known') + '). ' + (r.note || 'PIM changes nothing on this account and the hybrid worker never touches it.');
                 };
@@ -34160,7 +34197,9 @@
         // (office user: delegations only). Exists and PIM's = said: it is adopted, not created.
         if (isServer && s.adminType !== 'external-guest') {
           let chk = null;
-          try { chk = await api('GET', '/api/admin-accounts/upn-check?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 }); } catch (_) { chk = null; }
+          try { chk = await pimLookupRetry(() => api('GET', '/api/admin-accounts/upn-check?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 })); } catch (_) { chk = null; }
+          // GRAPH-PICKER: never stage on a guess -- the engine is still looking the name up
+          if (chk && chk.verdict === 'pending') throw new Error(PIM_LOOKUP_STILL);
           if (chk && chk.verdict === 'blocked') {
             if (window.confirm(chk.message + '\n\nUse ' + upn + ' as an existing account (office user) instead?')) {
               s.adminType = 'existing-account'; s.existingUpn = upn;
@@ -34223,8 +34262,9 @@
     if (!pimLooksLikeUpn(upn)) throw new Error('Enter the existing user’s exact sign-in name (UPN), e.g. jdoe@contoso.example.');
     let found = null;
     if (isServer) {
-      try { found = await api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 }); }
+      try { found = await pimLookupRetry(() => api('GET', '/api/admin-accounts/existing-lookup?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 })); }
       catch (e) { throw new Error(String(e && e.message ? e.message : e) || ("'" + upn + "': no account with this UPN -- PIM never creates an existing-account.")); }
+      if (found && found.lookupPending) throw new Error(PIM_LOOKUP_STILL);
       if (!found || !found.found) throw new Error((found && found.error) || ("'" + upn + "': no account with this UPN -- PIM never creates an existing-account."));
       // say what was found (synced from AD or cloud) -- PIM changes nothing on it, the hybrid worker never touches it
       if (typeof sharedToast === 'function') { try { sharedToast('Existing account ' + upn + ' (' + (found.displayName || upn) + ', ' + (found.source || 'not known') + '): delegations only -- PIM changes nothing on the account and the hybrid worker never touches it.'); } catch (_) {} }

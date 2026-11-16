@@ -867,6 +867,17 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     # file). Never fails the open: a store that cannot take the tables keeps the one-document snapshot, and says so.
     $aaDdl = Initialize-PimSqlActiveAssignmentRows -ConnectionString $ConnectionString
     if (-not $aaDdl.ok) { Write-Warning "[store] pim.ActiveAssignmentRows could not be created: $($aaDdl.error) -- the active-assignments snapshot stays one document in pim.TenantCache" }
+    # GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16): the directory the web app reads (pim.DirectoryPrincipal, written
+    # by the engine) + the targeted-collect requests (pim.DirectoryLookupRequest). Created HERE, by the schema step -- the web
+    # app holds no DDL right. Never fails the open: without them the pickers say the directory is not available.
+    if (-not (Get-Command Get-PimDirectoryPrincipalDdl -ErrorAction SilentlyContinue)) {
+        $__dirPLib = Join-Path $PSScriptRoot 'PIM-DirectoryPrincipals.ps1'
+        if (Test-Path -LiteralPath $__dirPLib) { . $__dirPLib }
+    }
+    if (Get-Command Get-PimDirectoryPrincipalDdl -ErrorAction SilentlyContinue) {
+        try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimDirectoryPrincipalDdl)) }
+        catch { Write-Warning "[store] pim.DirectoryPrincipal / pim.DirectoryLookupRequest could not be created: $($_.Exception.Message) -- the pickers say the directory is not available until the next update" }
+    }
     # Framework §12.23 run 2 prerequisite (PIM 100.156): the publish job's control view (REQ-Y licence row) was refreshed
     # by the MANAGER at every start -- a CREATE OR ALTER VIEW the web app may not run once it has no DDL right. The schema
     # step (the updater, before every roll) refreshes it now; a store without the view is left alone (the refresh SQL

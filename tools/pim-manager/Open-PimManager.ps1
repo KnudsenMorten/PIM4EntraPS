@@ -186,6 +186,11 @@ if (Test-Path -LiteralPath $_sessionRevokeLib) { . $_sessionRevokeLib }
 # The data source every people-picker in the Manager needs and none of them had.
 $_dirSearchLib = Join-Path $solutionRoot 'engine\_shared\PIM-DirectorySearch.ps1'
 if (Test-Path -LiteralPath $_dirSearchLib) { . $_dirSearchLib }
+# GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16): the directory the web app reads -- pim.DirectoryPrincipal, written by
+# the ENGINE -- and the targeted-collect request (pim.DirectoryLookupRequest). A missing file stops the Manager (fail closed):
+# without it every picker would have no source at all.
+$_dirPrincipalsLib = Join-Path $solutionRoot 'engine\_shared\PIM-DirectoryPrincipals.ps1'
+. $_dirPrincipalsLib
 
 # Delegation Map risk overlay + search-result builder (engine/_shared/PIM-MapRisk.ps1,
 # REQUIREMENTS §28 [M8]) -- pure functions over the SAME graph model the Map
@@ -5628,10 +5633,12 @@ function Invoke-PimManagerAccessObjectIdBackfill {
     #>
     param([switch]$Force)
     $out = [ordered]@{ ran = $false; bound = @(); error = '' }
-    if (-not $script:PimHosted -or -not "$($script:PimSqlCs)".Trim() -or -not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $out }
+    if (-not $script:PimHosted -or -not "$($script:PimSqlCs)".Trim() -or -not (Get-Command Resolve-PimManagerDirectoryPrincipal -ErrorAction SilentlyContinue)) { return $out }
     $now = [datetime]::UtcNow
-    if (-not $Force -and $script:PimAccessOidBackfillAt -and ($now - $script:PimAccessOidBackfillAt).TotalMinutes -lt 60) { return $out }
-    $script:PimAccessOidBackfillAt = $now
+    # GRAPH-PICKER: a run that asked the engine for names reads again 3 minutes later (the collect takes about a minute)
+    $due = ($script:PimAccessOidBackfillAt -and ($now - $script:PimAccessOidBackfillAt).TotalMinutes -lt 60) -and -not ($script:PimAccessOidRetryAt -is [datetime] -and $now -ge $script:PimAccessOidRetryAt)
+    if (-not $Force -and $due) { return $out }
+    $script:PimAccessOidBackfillAt = $now; $script:PimAccessOidRetryAt = $null
     try {
         # identities the directory did not resolve are not asked again for a day (a mail alias, a removed user)
         if (-not ($script:PimAccessOidMiss -is [hashtable])) { $script:PimAccessOidMiss = @{} }
@@ -5639,21 +5646,19 @@ function Invoke-PimManagerAccessObjectIdBackfill {
             Where-Object { -not $script:PimAccessOidMiss.ContainsKey($_) -or ($now - $script:PimAccessOidMiss[$_]).TotalHours -ge 24 })
         if (-not $targets.Count) { return $out }
         $out.ran = $true
-        # the request loop is single-threaded: 15 names per directory call, at most 4 calls per run (the rest next hour)
+        # GRAPH-PICKER: read from PIM's SQL (the engine stores every account named in ManagerAccess); at most 60 per run
         $targets = @($targets | Select-Object -First 60)
         $found = @{}
-        for ($i = 0; $i -lt $targets.Count; $i += 15) {
-            $chunk = @($targets[$i..([Math]::Min($i + 14, $targets.Count - 1))])
-            $inList = ($chunk | ForEach-Object { "'" + "$_".Replace("'", "''") + "'" }) -join ','
-            try {
-                $f = [uri]::EscapeDataString("userPrincipalName in ($inList)")
-                foreach ($u in @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName&`$top=999").value | Where-Object { $_ })) {
-                    $k = "$($u.userPrincipalName)".Trim().ToLowerInvariant()
-                    if ($k -and "$($u.id)".Trim()) { $found[$k] = @{ id = "$($u.id)".Trim(); upn = "$($u.userPrincipalName)".Trim() } }
-                }
-                # a name the directory answered for but did not return = a miss (a failed call is retried next hour)
-                foreach ($t in $chunk) { if (-not $found.ContainsKey($t)) { $script:PimAccessOidMiss[$t] = $now } }
-            } catch { Write-Verbose "object id lookup: $($_.Exception.Message)" }
+        foreach ($t in $targets) {
+            $r = Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'upn' -Key $t
+            if ("$($r.state)" -eq 'found') {
+                $u = @($r.principals)[0]; $k = "$($u.userPrincipalName)".Trim().ToLowerInvariant()
+                if ($k -and "$($u.id)".Trim()) { $found[$k] = @{ id = "$($u.id)".Trim(); upn = "$($u.userPrincipalName)".Trim() } }
+            }
+            # the engine looked it up and the directory has none = a miss (asked again in a day); a pending / unreadable
+            # lookup is read again in 3 minutes
+            elseif ("$($r.state)" -in @('notfound', 'invalid')) { $script:PimAccessOidMiss[$t] = $now }
+            else { $script:PimAccessOidRetryAt = $now.AddMinutes(3) }
         }
         if (-not $found.Count) { return $out }
         $fresh = @(Get-PimManagerAccessEntries)
@@ -5685,15 +5690,14 @@ function Resolve-PimManagerRecipientUpns {
     #>
     param([string[]]$Addresses = @())
     $out = @{}
-    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $out }
+    if (-not (Get-Command Resolve-PimManagerDirectoryPrincipal -ErrorAction SilentlyContinue)) { return $out }
     foreach ($a in @($Addresses | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[^@\s;,'']+@[^@\s;,'']+\.[^@\s;,'']+$' } | Select-Object -Unique)) {
         try {
-            # WEB-GRAPH-MIN-1 (3.0.69): basic profile only (User.ReadBasic.All) -- mail or userPrincipalName; proxyAddresses is
-            # NOT in the basic profile, so an alias-only address is left out (the caller then uses the address as before).
-            $al = $a.Replace("'", "''")
-            $f = [uri]::EscapeDataString("mail eq '$al' or userPrincipalName eq '$al'")
-            $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail").value | Where-Object { $_ })
-            if ($hits.Count -eq 1 -and "$($hits[0].userPrincipalName)".Trim()) { $out[$a.ToLowerInvariant()] = @{ upn = "$($hits[0].userPrincipalName)".Trim() } }
+            # GRAPH-PICKER: PIM's SQL (the engine stores the accounts PIM's settings name) -- mail OR userPrincipalName,
+            # exactly one user. Not stored yet = the engine is asked; the address is used as before until it answers.
+            $r = Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'mail' -Key $a
+            $hits = @(@($r.principals) | Where-Object { $_ })
+            if ("$($r.state)" -eq 'found' -and $hits.Count -eq 1 -and "$($hits[0].userPrincipalName)".Trim()) { $out[$a.ToLowerInvariant()] = @{ upn = "$($hits[0].userPrincipalName)".Trim() } }
         } catch { Write-Verbose "recipient UPN lookup for ${a}: $($_.Exception.Message)" }
     }
     return $out
@@ -6140,10 +6144,13 @@ function Invoke-PimManagerExistingAccountLookup {
     # $script:PimExistingAccountLookupGraph { param($path) -> user object or throw }.
     param([AllowEmptyString()][string]$Upn)
     if (-not (Get-Command Find-PimExistingAccount -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ found = $false; upn = $Upn; displayName = ''; error = 'the existing-account library is not loaded' } }
-    # Basic profile only (WEB-GRAPH-MIN-1: the web app holds User.ReadBasic.All) -- the read itself is GET /users/<upn>.
-    $g = if ($script:PimExistingAccountLookupGraph -is [scriptblock]) { $script:PimExistingAccountLookupGraph } else { { param($p) Invoke-PimGraph -Path $p } }
-    if (-not ($script:PimExistingAccountLookupGraph -is [scriptblock]) -and -not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ found = $false; upn = $Upn; displayName = ''; error = 'this Manager has no connection to Microsoft Entra ID to read the account' } }
+    # GRAPH-PICKER (owner 2026-11-16): the reader is PIM's SQL (Read-PimManagerDirectoryUserByPath -- the engine's record; an
+    # account not stored yet is looked up by the engine and the answer is "looking it up"), never Graph from the web app.
+    $g = if ($script:PimExistingAccountLookupGraph -is [scriptblock]) { $script:PimExistingAccountLookupGraph } else { { param($p) Read-PimManagerDirectoryUserByPath -Path $p } }
     $f = Find-PimExistingAccount -Upn $Upn -Graph $g -Select 'id,userPrincipalName,displayName'
+    $pendTxt = if (Get-Command Get-PimDirectoryLookupPendingText -ErrorAction SilentlyContinue) { Get-PimDirectoryLookupPendingText } else { 'PIM is looking this up in the directory' }
+    $f | Add-Member -NotePropertyName lookupPending -NotePropertyValue ([bool]("$($f.error)".IndexOf($pendTxt) -ge 0)) -Force
+    if ($f.lookupPending) { $f.error = $pendTxt }
     # EXISTING-ACCOUNT-NO-HYBRID (owner 2026-11-12: "they can live both in AD and cloud"): where the account lives, read
     # best-effort in a SECOND exact read (onPremisesSyncEnabled is not in the basic profile; a refusal = 'not known').
     $src = 'not known'
@@ -6170,6 +6177,8 @@ function Get-PimManagerAdminUpnCheck {
     $u = "$Upn".Trim()
     $o = [ordered]@{ upn = $u; exists = $false; pims = $null; source = ''; displayName = ''; verdict = 'unknown'; message = '' }
     $f = Invoke-PimManagerExistingAccountLookup -Upn $u
+    # GRAPH-PICKER: the engine is looking the account up -- the page asks again (never "create" on a guess)
+    if (-not $f.found -and $f.PSObject.Properties['lookupPending'] -and $f.lookupPending) { $o.verdict = 'pending'; $o['lookupPending'] = $true; $o.message = "$($f.error)"; return [pscustomobject]$o }
     if (-not $f.found) {
         if ("$($f.error)".Trim()) { $o.message = "the account could not be checked: $($f.error)"; return [pscustomobject]$o }
         $o.verdict = 'create'; $o.message = "no account named $u exists -- PIM creates it."; return [pscustomobject]$o
@@ -12028,6 +12037,189 @@ function Request-PimManagerEngineTenantCache {
         detail = $(if ($started) { 'queued -- the engine reads the tenant now; done in about a minute' } else { "queued -- the engine reads the tenant on its next run$(if ($k -and "$($k.detail)".Trim()) { " ($($k.detail))" })" }) }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16 "yes extend the rule to pim too"): the web app reads the directory
+# from PIM's SQL ONLY (pim.DirectoryPrincipal, written by the engine -- engine/_shared/PIM-DirectoryPrincipals.ps1). A key not
+# stored yet = ONE targeted collect: a validated request row + the engine woken (trigger 'tenant-cache' scope
+# 'directory-lookup' + the wake queue; the wake message stays a job NAME). The page then shows "looking it up..." and asks
+# again. Zero Graph calls from this process (tests/Test-PimWebNoGraph.ps1; Invoke-PimRest refuses them at run time).
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimManagerDirectoryStoreCs { try { return "$(Get-PimManagerStoreCs)".Trim() } catch { return '' } }
+
+function Request-PimManagerDirectoryLookup {
+    <#
+      Ask the ENGINE for ONE targeted collect (Add-PimDirectoryLookupRequest validates the key, dedupes, rate-limits in SQL).
+      This process caps itself at 20 new requests a minute and wakes the engine at most every 15 s. Returns @{ ok; outcome;
+      id; reason } (outcome queued | deduped | answered | rate-limited | refused | error). Never throws.
+      Seams (tests): -Add { param($kind, $keyType, $key, $by) }, -Kick { param($reason) }.
+    #>
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$KeyType, [Parameter(Mandatory)][AllowEmptyString()][string]$Key,
+          [scriptblock]$Add, [scriptblock]$Kick, [datetime]$NowUtc = [datetime]::UtcNow)
+    $recent = @(@($script:PimDirLookupTimes) | Where-Object { $_ -is [datetime] -and ($NowUtc - $_).TotalSeconds -lt 60 })
+    if ($recent.Count -ge 20) { $script:PimDirLookupTimes = $recent; return [pscustomobject]@{ ok = $false; outcome = 'rate-limited'; id = $null; reason = 'too many directory lookups this minute -- try again in a minute' } }
+    $by = 'PIM Manager'; try { $a = "$(Get-PimManagerActorName)".Trim(); if ($a) { $by = $a } } catch { }
+    if (-not $Add) { $Add = { param($k, $t, $v, $b) Add-PimDirectoryLookupRequest -ConnectionString (Get-PimManagerDirectoryStoreCs) -Kind $k -KeyType $t -Key $v -RequestedBy $b } }
+    $r = $null
+    try { $r = & $Add $Kind $KeyType $Key $by } catch { $r = [pscustomobject]@{ ok = $false; outcome = 'error'; id = $null; reason = (("$($_.Exception.Message)") -split "`n")[0] } }
+    if ($null -eq $r) { $r = [pscustomobject]@{ ok = $false; outcome = 'error'; id = $null; reason = 'no answer from the store' } }
+    $script:PimDirLookupTimes = if ("$($r.outcome)" -eq 'queued') { @($recent) + @($NowUtc) } else { $recent }
+    if ("$($r.outcome)" -in @('queued', 'deduped') -and (-not ($script:PimDirLookupKickAt -is [datetime]) -or ($NowUtc - $script:PimDirLookupKickAt).TotalSeconds -ge 15)) {
+        $script:PimDirLookupKickAt = $NowUtc
+        if (-not $Kick) { $Kick = { param($why) Request-PimManagerEngineTenantCache -Scope 'directory-lookup' -Reason $why } }
+        try { [void](& $Kick "directory-lookup:$Kind") } catch { }
+    }
+    return $r
+}
+
+function Resolve-PimManagerDirectoryPrincipal {
+    <#
+      The stored principal(s) for ONE key, from PIM's SQL; nothing stored = one targeted collect asked of the engine.
+      Returns @{ state; principals; detail; lookupPending }:
+        found        stored (principals = every match; a record older than -MaxAgeHours is collected again and still used
+                     unless -Fresh, then it is 'pending')
+        notfound     the engine looked it up within -NotFoundFreshMinutes and the directory had none (an answer, not a guess)
+        pending      asked (or already being looked up) -- detail = "PIM is looking this up in the directory ..."
+        invalid      the key itself is refused (detail says why)
+        unavailable  no store, or the request could not be made (detail says why)
+      Seams (tests): -Read { param($kind, $keyType, $key) -> principals }, -State { ... -> lookup state }, -Request { ... -> request answer }.
+    #>
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$KeyType, [Parameter(Mandatory)][AllowEmptyString()][string]$Key,
+          [int]$NotFoundFreshMinutes = 30, [int]$MaxAgeHours = 0, [switch]$Fresh, [scriptblock]$Read, [scriptblock]$State, [scriptblock]$Request)
+    $o = [ordered]@{ state = 'unavailable'; principals = @(); detail = ''; lookupPending = $false }
+    $v = Test-PimDirectoryLookupKey -Kind $Kind -KeyType $KeyType -Key $Key
+    if (-not $v.ok) { $o.state = 'invalid'; $o.detail = $v.reason; return [pscustomobject]$o }
+    $cs = Get-PimManagerDirectoryStoreCs
+    if ((-not $Read -or -not $State) -and -not $cs) { $o.detail = 'no SQL store is wired in this Manager -- the directory cannot be read'; return [pscustomobject]$o }
+    if (-not $Read)    { $Read    = { param($k, $t, $x) Get-PimDirectoryPrincipal -ConnectionString $cs -Kind $k -KeyType $t -Key $x } }
+    if (-not $State)   { $State   = { param($k, $t, $x) Get-PimDirectoryLookupState -ConnectionString $cs -Kind $k -KeyType $t -Key $x } }
+    if (-not $Request) { $Request = { param($k, $t, $x) Request-PimManagerDirectoryLookup -Kind $k -KeyType $t -Key $x } }
+    $p = @()
+    try { $p = @(& $Read $v.kind $v.keyType $v.key | Where-Object { $_ }) }
+    catch { $o.detail = "the directory record could not be read: $((("$($_.Exception.Message)") -split "`n")[0])"; return [pscustomobject]$o }
+    $stale = $false
+    if ($p.Count -and $MaxAgeHours -gt 0) {
+        $old = @($p | Where-Object { -not "$($_.collectedUtc)".Trim() -or ([datetime]::UtcNow - ([datetime]"$($_.collectedUtc)").ToUniversalTime()).TotalHours -gt $MaxAgeHours })
+        $stale = ($old.Count -gt 0)
+    }
+    if ($p.Count -and -not $stale) { $o.state = 'found'; $o.principals = $p; return [pscustomobject]$o }
+    $st = $null; try { $st = & $State $v.kind $v.keyType $v.key } catch { $st = $null }
+    if (-not $stale -and $st -and "$($st.status)" -eq 'notfound' -and $null -ne $st.ageMinutes -and [double]$st.ageMinutes -le $NotFoundFreshMinutes) {
+        $o.state = 'notfound'; $o.detail = Get-PimDirectoryLookupNotFoundText; return [pscustomobject]$o
+    }
+    $rq = $null
+    if ($st -and "$($st.status)" -eq 'pending') { $rq = [pscustomobject]@{ ok = $true; outcome = 'deduped'; reason = '' } }
+    else { try { $rq = & $Request $v.kind $v.keyType $v.key } catch { $rq = [pscustomobject]@{ ok = $false; outcome = 'error'; reason = "$($_.Exception.Message)" } } }
+    if ($stale -and -not $Fresh) { $o.state = 'found'; $o.principals = $p; return [pscustomobject]$o }   # used meanwhile; the collect refreshes it
+    if ($rq -and $rq.ok -and "$($rq.outcome)" -eq 'answered') { $o.state = 'notfound'; $o.detail = Get-PimDirectoryLookupNotFoundText; return [pscustomobject]$o }
+    if ($rq -and $rq.ok) { $o.state = 'pending'; $o.lookupPending = $true; $o.detail = Get-PimDirectoryLookupPendingText; return [pscustomobject]$o }
+    $o.detail = "the directory lookup could not be asked: $(if ($rq) { "$($rq.reason)" } else { 'no answer' })"
+    return [pscustomobject]$o
+}
+
+function Invoke-PimManagerDirectorySearch {
+    <#
+      GET /api/directory/people + /api/directory/groups: the picker's search over PIM's SQL (Search-PimDirectoryPrincipals --
+      a contains-match on name / UPN / mail of what the ENGINE stored). When SQL holds less than a page for the term and the
+      engine has not answered it within 10 minutes, ONE prefix lookup is asked of the engine and the answer says so
+      (lookupPending = true, "Looking it up ..."); the page asks again a few times. No store = 503 'directory-unavailable'
+      (never an empty list that reads as "nobody"). Returns @{ status; body }. Seams: -Search / -State / -Request.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('user', 'group')][string]$Kind, [Parameter(Mandatory)][string]$Term, [int]$Top = 25,
+          [scriptblock]$Search, [scriptblock]$State, [scriptblock]$Request)
+    $listName = if ($Kind -eq 'user') { 'people' } else { 'groups' }
+    $cs = Get-PimManagerDirectoryStoreCs
+    $unavail = { param($why) @{ status = 503; body = @{ error = "the directory could not be searched: $why"; code = 'directory-unavailable'; hint = 'This is NOT "no matches" -- the lookup did not run.' } } }
+    if (-not $Search -and -not $cs) { return (& $unavail 'no SQL store is wired in this Manager') }
+    if (-not $Search)  { $Search  = { param($k, $t, $n) Search-PimDirectoryPrincipals -ConnectionString $cs -Kind $k -Term $t -Top $n } }
+    if (-not $State)   { $State   = { param($k, $t) Get-PimDirectoryLookupState -ConnectionString $cs -Kind $k -KeyType 'prefix' -Key $t } }
+    if (-not $Request) { $Request = { param($k, $t) Request-PimManagerDirectoryLookup -Kind $k -KeyType 'prefix' -Key $t } }
+    $rows = @()
+    try { $rows = @(& $Search $Kind $Term $Top | Where-Object { $_ }) } catch { return (& $unavail ((("$($_.Exception.Message)") -split "`n")[0])) }
+    $shaped = if ($Kind -eq 'user') { @($rows | ForEach-Object { ConvertTo-PimDirectoryPerson -User $_ } | Where-Object { $null -ne $_ }) }
+              else { @($rows | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; displayName = "$($_.displayName)"; kind = $(if ($_.detail -and $_.detail.PSObject.Properties['kind']) { "$($_.detail.kind)" } else { '' }); description = '' } }) }
+    $page = Select-PimDirectoryPeoplePage -People $shaped -Top $Top
+    $pending = $false
+    if (-not $page.truncated) {
+        $st = $null; try { $st = & $State $Kind $Term } catch { $st = $null }
+        if ($st -and "$($st.status)" -eq 'pending') { $pending = $true }
+        elseif (-not ($st -and "$($st.status)" -in @('done', 'notfound') -and $null -ne $st.ageMinutes -and [double]$st.ageMinutes -le 10)) {
+            if ((Test-PimDirectoryLookupKey -Kind $Kind -KeyType 'prefix' -Key $Term).ok) {
+                $rq = $null; try { $rq = & $Request $Kind $Term } catch { $rq = $null }
+                if ($rq -and $rq.ok -and "$($rq.outcome)" -in @('queued', 'deduped')) { $pending = $true }
+            }
+        }
+    }
+    $body = [ordered]@{ query = $Term; matchMode = 'stored'; count = @($page.people).Count; truncated = [bool]$page.truncated
+        note = $(if ($pending) { 'Looking it up in the directory -- more names may appear in a moment.' } else { '' }); lookupPending = $pending }
+    $body[$listName] = @($page.people)
+    return @{ status = 200; body = $body }
+}
+
+function Get-PimManagerDepartmentGroupsRead {
+    <#
+      Department import (GRAPH-PICKER): the Entra groups for -Pattern as the ENGINE read them (pim.TenantCache 'department-groups'
+      { pattern; groups; readUtc }). Ready = that pattern, read after this Manager asked (or within 15 minutes when it did not
+      ask). Otherwise the engine is asked ONCE per pattern per 5 minutes (the pattern is the stored DepartmentImportPattern the
+      engine reads). Returns @{ ready; groups; message }. Seams: -Read { -> entry }, -Ask { param($pattern) }.
+    #>
+    param([Parameter(Mandatory)][string]$Pattern, [scriptblock]$Read, [scriptblock]$Ask, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Read) { $Read = { Get-PimTenantCacheEntry -Kind 'department-groups' } }
+    if (-not $Ask)  { $Ask  = { param($p) Set-PimManagerSetting -Name 'DepartmentImportPattern' -Value $p; Request-PimManagerEngineTenantCache -Scope 'department-import' -Reason 'department-import' } }
+    if (-not ($script:PimDeptImportAsked -is [hashtable])) { $script:PimDeptImportAsked = @{} }
+    $e = $null; try { $e = & $Read } catch { $e = $null }
+    $readAt = $null; if ($e -and "$($e.readUtc)".Trim()) { try { $readAt = ([datetime]"$($e.readUtc)").ToUniversalTime() } catch { $readAt = $null } }
+    $asked = $script:PimDeptImportAsked[$Pattern]
+    if ($e -and "$($e.pattern)" -ceq $Pattern -and $readAt -and (($asked -is [datetime] -and $readAt -ge $asked.AddSeconds(-5)) -or (-not ($asked -is [datetime]) -and ($NowUtc - $readAt).TotalMinutes -le 15))) {
+        $script:PimDeptImportAsked.Remove($Pattern)
+        return [pscustomobject]@{ ready = $true; groups = @(@($e.groups) | Where-Object { $_ }); message = '' }
+    }
+    if (-not ($asked -is [datetime]) -or ($NowUtc - $asked).TotalMinutes -ge 5) {
+        $script:PimDeptImportAsked[$Pattern] = $NowUtc
+        try { [void](& $Ask $Pattern) } catch { return [pscustomobject]@{ ready = $false; groups = @(); message = "the engine could not be asked to read the groups: $($_.Exception.Message)" } }
+    }
+    return [pscustomobject]@{ ready = $false; groups = @(); message = "PIM is reading the Entra groups that match '$Pattern' -- this takes about a minute" }
+}
+
+function Test-PimManagerConnectorIsGraph {
+    # PURE. Does this workload connector call Microsoft Graph (its auth, or its API base URL)? Those run in the ENGINE only.
+    param([AllowNull()][object]$Connector)
+    if ($null -eq $Connector) { return $false }
+    $auth = "$($Connector.auth)".Trim()
+    $base = ''; try { $base = "$($Connector.api.baseUrl)" } catch { $base = '' }
+    return ($auth -ieq 'graph' -or $base -match '(?i)graph\.microsoft\.com')
+}
+
+function Get-PimManagerStoredUserId {
+    <# The object id PIM's SQL holds for -Upn (lower-case); '-' when the engine looked it up and the directory has no such
+       account; '' when it is not known yet (a lookup is asked -- the queued engine action then resolves the UPN itself). #>
+    param([Parameter(Mandatory)][string]$Upn, [scriptblock]$Resolve)
+    $r = $null
+    try { $r = if ($Resolve) { & $Resolve $Upn } else { Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'upn' -Key "$Upn".Trim() } } catch { return '' }
+    $hits = @(@($r.principals) | Where-Object { $_ })
+    if ("$($r.state)" -eq 'found' -and $hits.Count -eq 1) { return "$($hits[0].id)".Trim().ToLowerInvariant() }
+    if ("$($r.state)" -eq 'notfound') { return '-' }
+    return ''
+}
+
+function Read-PimManagerDirectoryUserByPath {
+    <#
+      The SQL reader handed to Find-PimExistingAccount (-Graph): it answers its one path shape, '/users/<escaped UPN>?$select=...',
+      with the STORED user in Graph's shape (id, userPrincipalName, displayName, mail, onPremisesSyncEnabled). Not stored:
+      "404 Request_ResourceNotFound" when the engine looked it up and found none; otherwise it throws the pending / unavailable
+      text (Find-PimExistingAccount reports it as "could not be read: ..."). Never Graph.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [scriptblock]$Resolve)
+    $m = [regex]::Match("$Path", '^/users/([^/?]+)')
+    if (-not $m.Success) { throw "the directory reader answers /users/<upn> only, not '$Path'" }
+    $upn = [uri]::UnescapeDataString($m.Groups[1].Value)
+    $r = if ($Resolve) { & $Resolve $upn } else { Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'upn' -Key $upn }
+    switch ("$($r.state)") {
+        'found' { $u = @($r.principals)[0]; return [pscustomobject]@{ id = "$($u.id)"; userPrincipalName = "$($u.userPrincipalName)"; displayName = "$($u.displayName)"; mail = "$($u.mail)"; onPremisesSyncEnabled = $u.onPremisesSyncEnabled } }
+        'notfound' { throw 'HTTP 404 Request_ResourceNotFound' }
+        default { throw "$($r.detail)" }
+    }
+}
+
 function Initialize-PimManagerTenantCache {
     # Make sure the tenant-list cache (entra-roles, AUs, PIM groups, azure scopes, azure RBAC roles + the directory facts)
     # exists in HOSTED mode. WEB-GRAPH-MIN-1 (3.0.69): when it is empty / stale the web app QUEUES the engine's
@@ -13905,17 +14097,17 @@ function Resolve-PimManagerAdminObjectId {
     if (-not $u -or $u -notmatch '@') { $o.error = "'$u' is not a user principal name"; return [pscustomobject]$o }
     try {
         if ($script:PimAdminObjectIdResolver -is [scriptblock]) { $o.id = "$(& $script:PimAdminObjectIdResolver $u)".Trim().ToLowerInvariant() }
-        elseif (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
-            $q = [uri]::EscapeDataString("userPrincipalName eq '$($u.Replace("'", "''"))'")
-            # 2026-10-27 (owner, internal: "NOT deleted -- the account to delete could not be pinned: --" with no reason):
-            # the list used to come WRAPPED (Invoke-PimGraphGetAll's return ,@(...)), so an empty answer read as one hit with
-            # no id and no error. Unrolled here: 0 / 1 / many are counted for real. 3.0.69: a relative path (the web app's
-            # allowed user lookup, basic profile only -- tests/Test-PimWebGraphMinimal.ps1).
-            $hits = @(@(Invoke-PimGraph -Path "/users?`$filter=$q&`$select=id,userPrincipalName" -All) | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
-            if ($hits.Count -eq 1) { $o.id = "$($hits[0].id)".Trim().ToLowerInvariant() }
-            elseif ($hits.Count -gt 1) { $o.error = "$($hits.Count) accounts answer to '$u'" }
-            else { $o.error = "no account '$u' was found in Microsoft Entra ID" }
-        } else { $o.error = 'this Manager has no connection to Microsoft Entra ID to read the account' }
+        elseif (Get-Command Resolve-PimManagerDirectoryPrincipal -ErrorAction SilentlyContinue) {
+            # GRAPH-PICKER (owner 2026-11-16): the ENGINE's record of the account (pim.DirectoryPrincipal), at most 7 days old --
+            # an older one, or none, is looked up again by the engine first ("PIM is looking this up ..."; the operator retries).
+            # 0 / 1 / many are counted for real (2026-10-27: an empty answer must never read as one hit with no id).
+            $r = Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'upn' -Key $u -MaxAgeHours 168 -Fresh
+            $hits = @(@($r.principals) | Where-Object { $null -ne $_ })
+            if ("$($r.state)" -eq 'found' -and $hits.Count -eq 1) { $o.id = "$($hits[0].id)".Trim().ToLowerInvariant() }
+            elseif ("$($r.state)" -eq 'found' -and $hits.Count -gt 1) { $o.error = "$($hits.Count) accounts answer to '$u'" }
+            elseif ("$($r.state)" -eq 'notfound') { $o.error = "no account '$u' was found in Microsoft Entra ID" }
+            else { $o.error = "$($r.detail)"; $o['lookupPending'] = [bool]$r.lookupPending }
+        } else { $o.error = 'this Manager has no directory reader loaded to read the account' }
     } catch { $o.error = "the account could not be read: $($_.Exception.Message)" }
     if ($o.id -and $o.id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $o.error = "'$($o.id)' is not an object id"; $o.id = '' }
     return [pscustomobject]$o
@@ -14141,6 +14333,10 @@ function Invoke-Server {
     # Stale here == a deploy that didn't actually roll the image (the "stuck on
     # 2.4.222" case) and is a HARD FAIL in the smoke.
     Write-Host ("  [version] PIM Manager {0} (from VERSION)" -f (Get-PimSolutionVersion)) -ForegroundColor Cyan
+    # GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16 "yes extend the rule to pim too"): the web app makes NO Microsoft
+    # Graph call. Every directory read comes from PIM's SQL (pim.DirectoryPrincipal, written by the engine); a name not stored
+    # yet is a targeted collect the engine makes (Request-PimManagerDirectoryLookup). Invoke-PimRest refuses Graph from here on.
+    $global:PIM_WebNoGraph = $true
 
     # SEC-01 -- state the AUTHENTICATION POSTURE at boot, loudly, so which layer is
     # actually protecting this Manager is never a guess. The hosted smoke greps this
@@ -15537,6 +15733,9 @@ function Invoke-PimManagerPostRouteJobsRun {
             # type whose real handler only Start-PimScheduler registers is queued -- verify-convergence and discovery too.
             # The scheduler's own list (Get-PimTickOnlyJobTypes) wins when it names more, so the two cannot drift apart.
             if (Get-Command Get-PimTickOnlyJobTypes -ErrorAction SilentlyContinue) { $_engineTypes = @(@($_engineTypes) + @(Get-PimTickOnlyJobTypes) | Select-Object -Unique) }
+            # 🔒 GRAPH-PICKER (owner 2026-11-16): EVERY job is queued for the engine now -- a job run in this process would read
+            # (or write) the tenant as the internet-facing web identity. The Manager runs no job itself.
+            $_engineTypes = @(@($_engineTypes) + @("$($job.type)") | Select-Object -Unique)
             # 🔒 Drift page (2026-09-14): 'drift-snapshot' is a full engine plan over every scope -- queued, never run here.
             # 🔒 §70.1b option 2: 'active-assignments-snapshot' is queued for the same reason -- run here it would
             # be a 140-170 s live Graph/ARM read on this process's ONE request loop, the exact freeze it exists to
@@ -15587,35 +15786,9 @@ function Invoke-PimManagerPostRouteJobsRun {
                 })
                 return 202
             }
-
-            try {
-                $r = Invoke-PimJobForceStart -Name $name -Job $job
-                if ("$($r.status)" -eq 'queued') {
-                    # §95.2o: another run holds the area this job writes -- Invoke-PimJobForceStart queued it for the scheduler.
-                    Write-PimManagerAuditEvent -Action 'schedule.job.run.queued' -Target "job:$name" -After @{ type = "$($job.type)"; waitingFor = "$($r.waitingFor)"; queued = $true } -Result 'ok'
-                    $kick = $null; try { $kick = Start-PimManagerTickNow -Reason "run-now:$name" } catch { $kick = $null }
-                    Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; name = $name; runId = ''; status = 'queued'; started = [bool]($kick -and $kick.started)
-                        waitingFor = "$($r.waitingFor)"; waitingArea = "$($r.waitingArea)"; detail = "$($r.detail)" })
-                    return 202
-                }
-                Write-PimManagerAuditEvent -Action 'schedule.job.run' -Target "job:$name" -After @{ runId = "$($r.runId)"; status = "$($r.status)" } -Result $(if ($r.ok) { 'ok' } else { 'error' })
-                # ALERT-01: engine-failure used to be fired HERE, and ONLY here -- which is
-                # exactly why it never fired for a scheduled run. It now fires from the two
-                # real run-completion points in PIM-Scheduler.ps1, including the force-start
-                # this handler just invoked. Re-adding a call here would double-alert: the
-                # alert is a property of the RUN, not of the endpoint that launched it.
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
-                    ok     = [bool]$r.ok
-                    name   = $name
-                    runId  = "$($r.runId)"
-                    status = "$($r.status)"
-                    detail = "$($r.detail)"
-                })
-                return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
-                return 500
-            }
+            # (unreachable since GRAPH-PICKER: every type is queued above -- the in-process Invoke-PimJobForceStart run is gone)
+            Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "job '$name' was not queued" }
+            return 500
 }
 function Invoke-PimManagerPostRouteJobsCancel {
     # 93.4 MCP-GAP-3a/4a (owner 2026-10-31): the body of POST /api/jobs/cancel, MOVED here unchanged -- the route and the MCP tool
@@ -17253,15 +17426,22 @@ function Handle-Request {
                 return 403
             }
             $script:lastHeartbeat = Get-Date
-            if (-not (Get-Command Import-PimEntraDepartments -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'discovery library not loaded (Import-PimEntraDepartments missing).' }
+            if (-not (Get-Command Get-PimEntraDepartmentImportPlan -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'discovery library not loaded (Get-PimEntraDepartmentImportPlan missing).' }
                 return 500
             }
             $body = Read-RequestJson -Request $req
             $pattern = if ($body -and $body.PSObject.Properties['pattern'] -and "$($body.pattern)".Trim()) { "$($body.pattern)".Trim() } else { (Get-PimManagerDepartmentImportPattern) }
             try {
                 $existing = @(Get-PimManagerDepartments)
-                $plan = Import-PimEntraDepartments -Existing $existing -Pattern $pattern
+                # GRAPH-PICKER (owner 2026-11-16): the ENGINE reads the Entra groups for the pattern (tenant-cache scope
+                # 'department-import' -> kind 'department-groups'); the page asks again until that read is there (202).
+                $dgRead = Get-PimManagerDepartmentGroupsRead -Pattern $pattern
+                if (-not $dgRead.ready) {
+                    Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $false; lookupPending = $true; pattern = $pattern; message = "$($dgRead.message)" })
+                    return 202
+                }
+                $plan = Get-PimEntraDepartmentImportPlan -Discovered @($dgRead.groups) -Existing $existing -Pattern $pattern
                 # Persist the chosen pattern + the merged department list (engine is the writer).
                 Set-PimManagerSetting -Name 'DepartmentImportPattern' -Value $pattern
                 # BUG-142: through the ONE writer, so an import reaches the engine's store too.
@@ -18765,17 +18945,13 @@ function Handle-Request {
                 $dn = ("$($t.displayName)" -replace '[\x00-\x1F\x7F]', ' ').Trim()
                 # Confirm it is a GROUP in this tenant and take its real name. A lookup that cannot run is an error, never
                 # "accepted unchecked" -- a wrong id here would go into the Remediation command.
-                if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the group could not be confirmed, so nothing was saved' }; return 503 }
-                try {
-                    $g = Invoke-PimGraph -Path "/groups/$gid`?`$select=id,displayName"
-                    if (-not $g -or "$($g.id)" -ine $gid) { throw 'not found' }
-                    $dn = "$($g.displayName)"
-                } catch {
-                    $m = "$($_.Exception.Message)"
-                    $st = if ($m -match '404|not found|Request_ResourceNotFound') { 400 } else { 502 }
-                    Write-JsonResponse -Response $resp -Status $st -Body @{ error = $(if ($st -eq 400) { "No group with id $gid in this tenant (a user or another object is not a group)." } else { "The group could not be confirmed in the directory: $m" }) }
-                    return $st
-                }
+                # GRAPH-PICKER (owner 2026-11-16): the group as the ENGINE stored it (pim.DirectoryPrincipal); not stored yet = the
+                # engine looks it up and the page saves again in a moment (202 lookupPending) -- never a Graph call from here.
+                $gR = Resolve-PimManagerDirectoryPrincipal -Kind 'group' -KeyType 'id' -Key $gid -NotFoundFreshMinutes 10
+                if ("$($gR.state)" -eq 'pending') { Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $false; lookupPending = $true; message = "$($gR.detail) -- nothing was saved yet" }); return 202 }
+                if ("$($gR.state)" -in @('notfound', 'invalid')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "No group with id $gid in this tenant (a user or another object is not a group)." }; return 400 }
+                if ("$($gR.state)" -ne 'found') { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "The group could not be confirmed in the directory, so nothing was saved: $($gR.detail)" }; return 503 }
+                $dn = "$(@($gR.principals)[0].displayName)"
                 $after[$c] = [ordered]@{ groupId = $gid.ToLowerInvariant(); displayName = $dn }
             }
             # 97.2 (owner 2026-10-08: "the custom json structure for multi-tenant (optional)"): the extra tenants of the
@@ -19351,14 +19527,15 @@ function Handle-Request {
             $addr = "$($st0.mailbox.address)".Trim()
             if (-not $st0.mailbox.saved -and -not $addr) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'Save step 1 (the mailbox name) first.' }; return 400 }
             $key = $addr; $why = ''
-            try {
-                # WEB-GRAPH-MIN-1 (3.0.69): basic profile only -- mail or userPrincipalName (proxyAddresses is not in it)
-                $f = [uri]::EscapeDataString("mail eq '$($addr.Replace("'", "''"))' or userPrincipalName eq '$($addr.Replace("'", "''"))'")
-                $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail").value | Where-Object { $_ })
-                if ($hits.Count -eq 1) { $key = "$($hits[0].userPrincipalName)".Trim() }
-                elseif ($hits.Count -gt 1) { $why = "more than one directory object carries $addr" }
-                else { $why = "$addr is not in the directory yet -- run the command in step 1 first (a new mailbox can take a few minutes to appear)" }
-            } catch { $key = $addr }   # the directory could not be read: keep the address; the mail check below says whether Graph resolves it
+            # GRAPH-PICKER (owner 2026-11-16): the mailbox account from PIM's SQL (mail OR userPrincipalName) -- not stored yet =
+            # the engine looks it up and the page asks again in a moment (202 lookupPending), never a Graph call from here.
+            $mbR = Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'mail' -Key $addr -NotFoundFreshMinutes 5
+            $hits = @(@($mbR.principals) | Where-Object { $_ })
+            if ("$($mbR.state)" -eq 'found' -and $hits.Count -eq 1) { $key = "$($hits[0].userPrincipalName)".Trim() }
+            elseif ("$($mbR.state)" -eq 'found' -and $hits.Count -gt 1) { $why = "more than one directory object carries $addr" }
+            elseif ("$($mbR.state)" -eq 'notfound') { $why = "$addr is not in the directory yet -- run the command in step 1 first (a new mailbox can take a few minutes to appear)" }
+            elseif ("$($mbR.state)" -eq 'pending') { Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $false; lookupPending = $true; message = "$($mbR.detail)" }); return 202 }
+            # unavailable / invalid: keep the address; the mail check below says whether it resolves
             if ($why) { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; error = $why; errors = @{ mbxName = $why } }); return 400 }
             try {
                 $before = [ordered]@{ mode = $st0.mode; sender = $st0.sender }
@@ -20416,11 +20593,6 @@ function Handle-Request {
                 return 409
             }
 
-            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- cannot issue a TAP' }
-                return 503
-            }
-
             try {
                 # 🔒 §65 -- THE MANAGER NO LONGER ISSUES THE TAP. IT QUEUES THE REQUEST.
                 # Operator, 2026-09-12: *"as the engine/queue must do the actual change"*. The
@@ -20436,8 +20608,10 @@ function Handle-Request {
                 # destroying a working TAP for a mailbox we cannot reach. Checking it at enqueue
                 # time gives the operator the refusal while they are still looking at the screen;
                 # the engine re-checks at apply time because readiness can change in between.
-                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
-                if (-not "$uid".Trim()) { throw "account '$upn' not found in the directory" }
+                # GRAPH-PICKER (owner 2026-11-16): the object id from PIM's SQL when the engine stored it; otherwise the entry
+                # carries the UPN only and the ENGINE resolves it when it applies (Graph takes a UPN wherever it takes an id).
+                $uid = Get-PimManagerStoredUserId -Upn $upn
+                if ("$uid" -eq '-') { throw "account '$upn' not found in the directory (PIM's engine looked it up)" }
 
                 $cs = (Get-PimManagerStoreCs)
                 if (-not $cs -or -not (Get-Command Add-PimSqlQueueChange -ErrorAction SilentlyContinue)) {
@@ -21217,6 +21391,8 @@ function Handle-Request {
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
             $__lu = "$($req.QueryString['upn'])".Trim()
             $__f = Invoke-PimManagerExistingAccountLookup -Upn $__lu
+            # GRAPH-PICKER: the engine is looking the account up -- 202, the page asks again in a moment
+            if (-not $__f.found -and $__f.PSObject.Properties['lookupPending'] -and $__f.lookupPending) { Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ found = $false; upn = $__lu; lookupPending = $true; message = "$($__f.error)" }); return 202 }
             $__st = if ($__f.found) { 200 } elseif ("$($__f.error)".Trim()) { 400 } else { 404 }
             Write-JsonResponse -Response $resp -Status $__st -Body ([ordered]@{ found = [bool]$__f.found; upn = "$($__f.upn)"; displayName = "$($__f.displayName)"
                 source = "$($__f.source)"   # synced from AD | cloud | not known
@@ -21360,56 +21536,11 @@ function Handle-Request {
                 return $st
             }
 
-            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-                # 🔴 An unavailable directory must NOT render as "no people found". An
-                # empty list looks like a definitive answer, and the operator would
-                # conclude the person does not exist. Say the lookup could not run.
-                Write-JsonResponse -Response $resp -Status 503 -Body @{
-                    error = 'no Graph client in this runtime -- the directory could not be searched'
-                    code  = 'graph-unavailable'
-                    hint  = 'This is NOT "no matches" -- the lookup did not run.'
-                }
-                return 503
-            }
-
-            # PRIMARY: $search (matches tokens WITHIN a name, so a surname finds the
-            # person). FALLBACK: $filter/startswith (prefix-only) when $search is not
-            # served. The response reports WHICH mode answered, so a degraded result is
-            # visible rather than silently narrower than the operator expects.
-            $mode = 'search'; $users = $null; $searchErr = ''
-            try {
-                $users = @(Invoke-PimGraph -Path (Get-PimDirectoryPeopleSearchPath -Term $q.term -Top $q.top) -Headers (Get-PimDirectorySearchHeaders) -All)
-            } catch {
-                $searchErr = "$($_.Exception.Message)"
-                $users = $null
-            }
-            if ($null -eq $users) {
-                $mode = 'startswith'
-                try {
-                    $users = @(Invoke-PimGraph -Path (Get-PimDirectoryPeopleFilterPath -Term $q.term -Top $q.top) -All)
-                } catch {
-                    Write-JsonResponse -Response $resp -Status 502 -Body @{
-                        error = "directory search failed: $($_.Exception.Message)"
-                        code  = 'graph-error'
-                        hint  = 'This is NOT "no matches" -- the lookup failed. Both the search and the startswith query errored.'
-                        searchError = $searchErr
-                    }
-                    return 502
-                }
-            }
-
-            $shaped = @(@($users) | ForEach-Object { ConvertTo-PimDirectoryPerson -User $_ } | Where-Object { $null -ne $_ })
-            $page   = Select-PimDirectoryPeoplePage -People $shaped -Top $q.top
-
-            Write-JsonResponse -Response $resp -Status 200 -Body @{
-                query     = $q.term
-                matchMode = $mode
-                count     = @($page.people).Count
-                truncated = [bool]$page.truncated
-                people    = @($page.people)
-                note      = if ($mode -eq 'startswith') { 'Prefix match only -- the tenant did not serve a full search, so a surname may not match.' } else { '' }
-            }
-            return 200
+            # GRAPH-PICKER (owner 2026-11-16): PIM's SQL, never Graph (Invoke-PimManagerDirectorySearch). 🔴 An unavailable store
+            # must NOT render as "no people found": it answers 503 'directory-unavailable', never an empty list.
+            $ds = Invoke-PimManagerDirectorySearch -Kind 'user' -Term $q.term -Top $q.top
+            Write-JsonResponse -Response $resp -Status $ds.status -Body $ds.body
+            return $ds.status
         }
         # 97.2 (owner 2026-10-08: "give option to dropdown group"): the group lookup behind the PIM Activator deployment-group
         # pickers (Intune / Edge for Business steps; 100.90: no app sign-in assignment any more). Same contract as /api/directory/people: Admin, a 2+ character query, $search first then startswith, and
@@ -21427,26 +21558,10 @@ function Handle-Request {
             } catch {}
             $q = Resolve-PimDirectoryQuery -Query $qs['q'] -Top $qs['top']
             if (-not $q.ok) { $st = Get-PimDirectorySearchHttpStatus -Code $q.code; Write-JsonResponse -Response $resp -Status $st -Body @{ error = $q.reason; code = $q.code }; return $st }
-            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the directory could not be searched'; code = 'graph-unavailable'; hint = 'This is NOT "no matches" -- the lookup did not run.' }
-                return 503
-            }
-            $mode = 'search'; $groups = $null; $searchErr = ''
-            try { $groups = @(Invoke-PimGraph -Path (Get-PimDirectoryGroupSearchPath -Term $q.term -Top $q.top) -Headers (Get-PimDirectorySearchHeaders) -All) }
-            catch { $searchErr = "$($_.Exception.Message)"; $groups = $null }
-            if ($null -eq $groups) {
-                $mode = 'startswith'
-                try { $groups = @(Invoke-PimGraph -Path (Get-PimDirectoryGroupFilterPath -Term $q.term -Top $q.top) -All) }
-                catch {
-                    Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "directory search failed: $($_.Exception.Message)"; code = 'graph-error'; hint = 'This is NOT "no matches" -- the lookup failed.'; searchError = $searchErr }
-                    return 502
-                }
-            }
-            $shaped = @(@($groups) | ForEach-Object { ConvertTo-PimDirectoryGroup -Group $_ } | Where-Object { $null -ne $_ })
-            $page = Select-PimDirectoryPeoplePage -People $shaped -Top $q.top
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ query = $q.term; matchMode = $mode; count = @($page.people).Count; truncated = [bool]$page.truncated; groups = @($page.people)
-                note = $(if ($mode -eq 'startswith') { 'Prefix match only -- the tenant did not serve a full search.' } else { '' }) }
-            return 200
+            # GRAPH-PICKER (owner 2026-11-16): PIM's SQL, never Graph (Invoke-PimManagerDirectorySearch).
+            $ds = Invoke-PimManagerDirectorySearch -Kind 'group' -Term $q.term -Top $q.top
+            Write-JsonResponse -Response $resp -Status $ds.status -Body $ds.body
+            return $ds.status
         }
 
         if ($path -eq '/api/admin-sessions/revoke' -and $method -eq 'POST') {
@@ -21504,14 +21619,11 @@ function Handle-Request {
                 return $st
             }
 
-            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- cannot revoke sessions' }
-                return 503
-            }
-
             try {
-                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
-                if (-not "$uid".Trim()) { throw "account '$upn' not found in the directory" }
+                # GRAPH-PICKER (owner 2026-11-16): the object id from PIM's SQL when the engine stored it; otherwise the entry
+                # carries the UPN only and the ENGINE resolves it when it applies (PIM-QueueActions 'session-revoke').
+                $uid = Get-PimManagerStoredUserId -Upn $upn
+                if ("$uid" -eq '-') { throw "account '$upn' not found in the directory (PIM's engine looked it up)" }
 
                 # 🔒 §65 -- QUEUED, NOT ISSUED HERE. The Manager is read-only; the engine performs
                 # the revoke (PIM-QueueActions.ps1 'session-revoke') under its own identity.
@@ -22580,6 +22692,19 @@ function Handle-Request {
                 $wTid = ''; try { $wTid = "$((Get-PimManagerTenantContext).tenantId)".Trim() } catch { }
                 $chk = Test-PimWorkloadResourceValue -Connector $conn -Value $wres -TenantId $wTid
                 if (-not $chk.ok) { Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ error = "$($chk.error)"; needsResource = $true }); return 409 }
+                # GRAPH-PICKER (owner 2026-11-16): a connector whose API IS Microsoft Graph (entra-approle: a service principal's
+                # app roles) never runs here -- the ENGINE reads the roles (a targeted collect, kind 'approles') and stores them.
+                if (Test-PimManagerConnectorIsGraph -Connector $conn) {
+                    $arR = Resolve-PimManagerDirectoryPrincipal -Kind 'approles' -KeyType 'id' -Key $wres -NotFoundFreshMinutes 10 -MaxAgeHours 24
+                    if ("$($arR.state)" -eq 'found') {
+                        $det = @($arR.principals)[0].detail
+                        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; resource = $wres; roles = @($(if ($det) { @($det.roles) })); source = 'engine'; readUtc = "$(if ($det) { $det.readUtc })" })
+                        return 200
+                    }
+                    $why = if ("$($arR.state)" -eq 'pending') { "$($arR.detail)." } elseif ("$($arR.state)" -eq 'notfound') { 'PIM looked this application up and could not read its roles.' } else { "$($arR.detail)" }
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; resource = $wres; roles = @(); source = 'engine'; pending = [bool]$arR.lookupPending; lookupPending = [bool]$arR.lookupPending; note = $why })
+                    return 200
+                }
                 try {
                     Initialize-PimManagerTenantConnection
                     # Business Central lists permission sets per COMPANY; with none given, the environment's first company
@@ -22635,22 +22760,15 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to run the workload crawl' }
                 return 403
             }
-            if (-not (Get-Command Update-PimWorkloadCrawlMap -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'workload crawl helper not loaded' }
-                return 501
-            }
-            try {
-                Initialize-PimManagerTenantConnection
-                $dir = Join-Path $solutionRoot 'workloads\connectors'
-                $written = Update-PimWorkloadCrawlMap -ConnectorsDir $dir
-                $map = Read-PimWorkloadCrawlMap
-                Write-PimManagerAuditEvent -Action 'workload.crawl' -Target 'all-connectors' -After @{ crawledUtc = "$($map.crawledUtc)" }
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; crawledUtc = "$($map.crawledUtc)"; crawl = $map })
-                return 200
-            } catch {
-                Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }
-                return 502
-            }
+            # GRAPH-PICKER (owner 2026-11-16): the crawl reads every connector's live assignments -- Graph among them -- so the
+            # ENGINE runs it (the tenant-cache job, scope 'workload-crawl'); this route only asks for it. The map is read back
+            # with GET /api/workload-crawl once the engine has written it.
+            $q = Request-PimManagerEngineTenantCache -Scope 'workload-crawl' -Reason 'workload-crawl'
+            $map = $null; if (Get-Command Read-PimWorkloadCrawlMap -ErrorAction SilentlyContinue) { try { $map = Read-PimWorkloadCrawlMap } catch { $map = $null } }
+            Write-PimManagerAuditEvent -Action 'workload.crawl' -Target 'all-connectors' -After @{ queued = [bool]$q.queued; detail = "$($q.detail)" } -Result $(if ($q.queued) { 'ok' } else { 'error' })
+            if (-not $q.queued) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "$($q.detail)" }; return 503 }
+            Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; queued = $true; detail = "$($q.detail)"; crawledUtc = "$(if ($map) { $map.crawledUtc })"; crawl = $map })
+            return 202
         }
         if ($path -eq '/api/workload-recon' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
@@ -24213,7 +24331,8 @@ function Handle-Request {
             }
             try {
                 $adLive = ''
-                if ($adId -match '^[0-9a-fA-F-]{36}$') { try { $adLive = "$((Invoke-PimGraph -Path "/groups/$adId`?`$select=id,displayName").displayName)" } catch { $adLive = '' } }
+                # GRAPH-PICKER (owner 2026-11-16): the group's name as the ENGINE stored it (none yet = '' -- the plan works without it)
+                if ($adId -match '^[0-9a-fA-F-]{36}$') { try { $adR = Resolve-PimManagerDirectoryPrincipal -Kind 'group' -KeyType 'id' -Key $adId; if ("$($adR.state)" -eq 'found') { $adLive = "$(@($adR.principals)[0].displayName)" } } catch { $adLive = '' } }
                 $adPlan = Get-PimGroupAdoptPlan -Pins (Get-PimManagerSettingObject -Name 'GroupObjectPins') -Held (Get-PimManagerSettingObject -Name 'GroupAdoptHeld') -Name $adName -ObjectId $adId -LiveName $adLive
                 if (-not $adPlan.ok) { Write-JsonResponse -Response $resp -Status $adPlan.status -Body @{ ok = $false; error = $adPlan.error }; return [int]$adPlan.status }
                 Set-PimManagerSettingObject -Name 'GroupObjectPins' -Value $adPlan.pins

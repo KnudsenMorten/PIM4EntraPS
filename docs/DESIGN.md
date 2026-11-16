@@ -12667,3 +12667,60 @@ commit. On the access map a package is its own box in the people column, linked 
 Each release ships `whats-new/<version>.json` (written for an admin from its release notes). The Manager shows them in
 Settings > What's new with the shared Invardia renderer, the release hand-over carries the folder to invardia.com, and the
 Community repository carries `WHATSNEW.md` generated from the same files -- the same words in all three places.
+
+## 35. GRAPH-PICKER: the web app makes no Graph call (REQUIREMENTS §103)
+
+The audit trail of every Microsoft Graph (and Azure) call reachable from the PIM Manager process at 3.1.38 (bf72158b6),
+found by `tests/Test-PimWebNoGraph.ps1` (call graph over `engine\**` + `tools\pim-manager\*`, leaves only) and by hand.
+Line numbers are 3.1.38's `tools/pim-manager/Open-PimManager.ps1` unless named. Counts (the gate's leaf scan): at 3.1.38,
+32 Graph-reaching call sites (30 in Open-PimManager.ps1 + 2 in _proroutes.ps1; 13 of them a direct `Invoke-PimGraph`);
+after this change 8, every one on the gate's reviewed list below (no Graph at run time), and 0 direct Graph calls.
+
+**Live Graph, directory reads (13 `Invoke-PimGraph` calls, 11 places) -- all moved to PIM's SQL:**
+
+| # | Line | Where (route / trigger) | Read | Now |
+|---|------|-------------------------|------|-----|
+| 1 | 5650 | `Invoke-PimManagerAccessObjectIdBackfill` (request loop hourly; PUT /api/access-map) | ManagerAccess UPN -> object id | SQL by UPN; missing = lookup, read again in 3 min |
+| 2 | 5695 | `Resolve-PimManagerRecipientUpns` (recipients / department owners saved -> auto-Reader) | address -> UPN | SQL by mail OR UPN, exactly one |
+| 3 | 6144 | `Invoke-PimManagerExistingAccountLookup` (GET /api/admin-accounts/existing-lookup, /upn-check) | exact UPN + onPremisesSyncEnabled | SQL reader passed to `Find-PimExistingAccount`; pending = 202 / verdict 'pending' |
+| 4 | 13914 | `Resolve-PimManagerAdminObjectId` (admin delete: commit, DELETE route, approval) | UPN -> object id to pin | SQL record at most 7 days old (`-Fresh`), else lookup first |
+| 5 | 18770 | PUT /api/settings/activator-targets | confirm a group id + its name | SQL group by id; pending = 202 |
+| 6 | 19357 | POST /api/settings/mail/mailbox/use | mailbox address -> UPN | SQL by mail OR UPN; pending = 202 |
+| 7 | 20439 | POST /api/admin-tap/reset | UPN -> object id | SQL id, else the queue entry carries the UPN (engine resolves) |
+| 8 | 21381, 21389 | GET /api/directory/people ($search, startswith) | people picker | SQL contains-search + a prefix lookup when the page is short |
+| 9 | 21435, 21439 | GET /api/directory/groups | group picker | same |
+| 10 | 21513 | POST /api/admin-sessions/revoke | UPN -> object id | as 7 |
+| 11 | 24216 | POST /api/groups/adopt | group id -> name | SQL group by id ('' meanwhile -- the plan works without it) |
+
+**Library paths that reached Graph from a web route (found by the call graph) -- moved:**
+
+| Line | Route | Path | Now |
+|------|-------|------|-----|
+| 17264 | POST /api/settings/departments/import | `Import-PimEntraDepartments` -> `Get-PimLiveEntraDepartmentGroups` (groups + owners) | engine scope 'department-import' -> cache 'department-groups'; the route plans from it (202 while reading) |
+| 15592 | POST /api/jobs/run (and the MCP tool) | `Invoke-PimJobForceStart` ran non-engine job types in-process (reminders, escalations, ...) | every type queued for the engine |
+| 22645 | POST /api/workload-crawl | `Update-PimWorkloadCrawlMap` (4 Graph-auth connectors among all) | engine scope 'workload-crawl'; 202 |
+| 22588, 22591 | GET /api/workload-roles?resource= | `Get-PimWorkloadConnectorRoles` for entra-approle (Graph) | engine lookup kind 'approles' |
+
+**Reviewed, not moved (no Graph at run time -- re-checked by the gate):** `Send-PimAccessReviewReminders -Record`
+(_proroutes 1414/1415: the engine's record, the mail is a queued notify request); `Get-PimMgmtReportDefaultReaders` / `Invoke-PimMgmtReportRequest -Readers` (the one Graph
+reader, reviewsOverdue, is replaced by the engine's record); `Send-PimNotifyMail` reached through `Test-PimTapMailReady`
+(-WhatIf), `Invoke-PimGuardTrip` / `Send-PimSafetyAlert`, the alert path (diverted to `$global:PIM_NotifyMailQueue` before
+any Graph call, SECURE-WEB-1); `Find-PimExistingAccount` (always given the SQL reader); the operator CLI `-Refresh` run
+(top level, not server mode, signed in as the engine identity).
+
+**Not directory reads, left with the web identity:** the per-row workload connectors that are not Graph (Business Central
+companies + permission sets, Dataverse / Power Platform roles, Azure DevOps) -- a token for that resource as id-pim-web;
+the identity's own claims (`Get-PimRestToken -Resource graph` in `Get-PimManagerSelfAppId` / `Get-PimManagerSelfIdentity`:
+a token is minted and its claims read, no Graph call; it works with zero app roles).
+
+**SQL replay, not Graph:** `Invoke-PimEngineRecordedGraph` / `-Arm` (15 + 8 sites: mail checks, permission health,
+environment report, own-principals review, queue names) read the engine's recorded answers (WEB-GRAPH-MIN-1).
+
+**Azure Resource Manager (separate, unchanged):** `Invoke-PimArm` at 4897 (`Start-PimManagerTickNow`: start the engine job),
+6456 / 13011 (read the engine job), 13264 (`Get-PimManagerEnvironmentReport`, only inside its own resource group --
+`Test-PimArmPathInResourceGroup`), 15639 (`Invoke-PimManagerPostRouteJobsCancel`: stop an execution). All in the PIM
+resource group, as id-pim-web (its Reader there; starting / stopping needs the job right `$script:PimManagerMayStartJobs`
+gates -- the wake queue is the normal path).
+
+**The store and the queue** are `engine/_shared/PIM-DirectoryPrincipals.ps1` (both halves) and REQUIREMENTS §103 (the
+contract). Enforcement: `tests/Test-PimWebNoGraph.ps1` (static) + `Invoke-PimRest` (`$global:PIM_WebNoGraph`, run time).

@@ -953,7 +953,10 @@ function Invoke-PimQueueAction {
 
             'tap-reset' {
                 $uid = "$($p.userId)".Trim()
-                if (-not $uid) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='tap-reset has no userId' } }
+                # GRAPH-PICKER: the web app queues the UPN alone when PIM's SQL does not hold the account's object id yet (it
+                # reads no Graph) -- Graph takes a UPN wherever it takes an id, as 'session-revoke' already does (§79.6).
+                if (-not $uid) { $uid = "$($p.userPrincipalName)".Trim() }
+                if (-not $uid) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='tap-reset has no userId or userPrincipalName' } }
                 # 🔴 REFUSE BEFORE DESTROYING (the AdminTap provider's BUG-66 guard, which this path
                 # never had). The old pass is deleted two lines below; if the new one then cannot be
                 # mailed, the account is locked out. So when the real mail path is in use, prove the

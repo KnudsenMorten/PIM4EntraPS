@@ -1,0 +1,4 @@
+{"version":"3.1.40","date":"2026-11-16","type":"security",
+ "summary":"The web app no longer reads your directory itself. People and groups come from PIM's own store, filled by the engine.",
+ "new":[],
+ "fixes":[{"title":"No directory reads from the web app","text":"The PIM Manager web app no longer calls Microsoft Graph. People and groups come from PIM's own store, which the engine fills. A name not found yet is looked up by the engine within a minute."}]}

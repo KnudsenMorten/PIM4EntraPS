@@ -89,7 +89,7 @@
 # 'pim-identities' (the recorded directory answers) and 'admin-import-reads' are written by the ENGINE's tenant-cache job
 # (engine/_shared/PIM-EngineDirectoryFacts.ps1) and only READ by the web app, which makes no Graph call of its own beyond the
 # pickers. 'tenant-org' + 'tenant-domains' are written by the same job now (the web app no longer reads Graph for them).
-$script:PimTenantCacheKinds = @('admin-tap-state','demo-group','pim-app-registrations','workload-roles','pim-identities','admin-import-reads','access-reviews','entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report')   # access-reviews: AR-ENGINE-1 (3.0.71), the access reviews the ENGINE read (Get-PimEngineAccessReviewsFact, Pro); mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
+$script:PimTenantCacheKinds = @('admin-tap-state','demo-group','pim-app-registrations','workload-roles','pim-identities','admin-import-reads','access-reviews','entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live','mgmt-report','department-groups')   # department-groups: GRAPH-PICKER, the Entra groups a department import asked for (the engine reads them); access-reviews: AR-ENGINE-1 (3.0.71), the access reviews the ENGINE read (Get-PimEngineAccessReviewsFact, Pro); mgmt-report: MGMT-REPORT, the latest monthly management report (.pptx) + the figure history its trends use; managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
 $script:PimTenantCacheMem   = @{}
 $script:PimTenantCacheReadErrors = @{}   # REQ 100.112: kind -> why its last read failed (Get-PimTenantCacheReadError)
 
@@ -100,6 +100,10 @@ if (Test-Path -LiteralPath $__pimEdfLib) { . $__pimEdfLib }
 # reviews (kind 'access-reviews'); the web app builds its views from that record and holds no AccessReview right.
 $__pimArLib = Join-Path $PSScriptRoot '..\..\engine\access-reviews\PIM-AccessReviews.ps1'
 if (-not (Get-Command Get-PimEngineAccessReviewsFact -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $__pimArLib)) { . $__pimArLib }
+# GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16): the directory the web app reads (pim.DirectoryPrincipal) -- the
+# engine's scoped collect + the targeted lookups the web asks for (Invoke-PimTenantListRefresh below; both halves, one file).
+$__pimDirPLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-DirectoryPrincipals.ps1'
+if (-not (Get-Command Invoke-PimDirectoryLookupQueue -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $__pimDirPLib)) { . $__pimDirPLib }
 
 function Get-PimTenantCacheStoreCs {
     # The store connection string, or $null when this process has no store.
@@ -837,6 +841,70 @@ function Set-PimActivityLastReadUtc {
 # Single-flight lock so concurrent UI refresh requests don't hammer Graph.
 $script:PimTenantRefreshInProgress = $false
 
+function Invoke-PimTenantDirectorySteps {
+    <#
+      ENGINE (GRAPH-PICKER, owner 2026-11-16). The directory work of one tenant-cache run, by scope:
+        every scope but 'access-reviews' / 'workload-crawl' / 'department-import'  the targeted lookups the web app asked for
+        a full refresh (not admin-import / access-reviews / on-demand)             + the scoped collect (Invoke-PimDirectoryPrincipalCollect)
+        'workload-crawl'                                                           the connector crawl (Update-PimWorkloadCrawlMap)
+        'department-import'                                                        the Entra groups of the stored DepartmentImportPattern
+      Each step is OPTIONAL: a failure is reported (stale) and never fails the refresh. Returns kind -> result.
+    #>
+    param([string]$Scope = 'All', [switch]$IsOnDemand, [switch]$Quiet)
+    $out = [ordered]@{}
+    $cs = Get-PimTenantCacheStoreCs
+    $root = Join-Path $PSScriptRoot '..\..'
+    $connDir = Join-Path $root 'workloads\connectors'
+    $say = { param($label, $text, $color) if (-not $Quiet) { Write-Host ("    {0,-22} {1}" -f $label, $text) -ForegroundColor $color } }
+    $load = { param($rel, $fn) if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { $p = Join-Path $root $rel; if (Test-Path -LiteralPath $p) { . $p } } }
+    if ("$Scope" -eq 'workload-crawl') {
+        try {
+            . $load 'engine\_shared\PIM-WorkloadConnectors.ps1' 'Read-PimWorkloadConnectors'
+            . $load 'engine\_shared\PIM-WorkloadMap.ps1' 'Update-PimWorkloadCrawlMap'
+            if (-not (Get-Command Update-PimWorkloadCrawlMap -ErrorAction SilentlyContinue)) { throw 'the workload crawl library is not in this engine' }
+            $w = Update-PimWorkloadCrawlMap -ConnectorsDir $connDir
+            $out['workload-crawl'] = @{ ok = $true; count = 1; detail = "$w" }; & $say 'Workload crawl' "written ($w)" 'DarkGray'
+        } catch { $out['workload-crawl'] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }; & $say 'Workload crawl' "NOT RUN -- $($_.Exception.Message)" 'DarkYellow' }
+        return $out
+    }
+    if ("$Scope" -eq 'department-import') {
+        try {
+            # the discovery library is Pro (not in the community payload): loaded only when present
+            $__disc = Join-Path $root 'engine\discovery\PIM-Discovery.ps1'; if (-not (Get-Command Get-PimLiveEntraDepartmentGroups -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $__disc)) { . $__disc }
+            if (-not (Get-Command Get-PimLiveEntraDepartmentGroups -ErrorAction SilentlyContinue)) { throw 'the discovery library is not in this engine' }
+            $pat = "$(Get-PimEngineFactSetting -Name 'DepartmentImportPattern')".Trim(); if (-not $pat) { $pat = 'ORG-*' }
+            $groups = @(Get-PimLiveEntraDepartmentGroups -Pattern $pat)
+            $path = Set-PimTenantCacheEntry -Kind 'department-groups' -Value ([ordered]@{ pattern = $pat; groups = @($groups); readUtc = (Get-Date).ToUniversalTime().ToString('o') })
+            $out['department-groups'] = @{ ok = $true; count = $groups.Count; path = $path }; & $say 'Department groups' "$($groups.Count) group(s) for '$pat'" 'DarkGray'
+        } catch { $out['department-groups'] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }; & $say 'Department groups' "NOT READ -- $($_.Exception.Message)" 'DarkYellow' }
+        return $out
+    }
+    if ("$Scope" -eq 'access-reviews' -or -not $cs -or -not (Get-Command Invoke-PimDirectoryLookupQueue -ErrorAction SilentlyContinue)) { return $out }
+    # the targeted lookups (cheap: only what the web app asked for)
+    try {
+        $appRoles = {
+            param($id)
+            . $load 'engine\_shared\PIM-WorkloadConnectors.ps1' 'Read-PimWorkloadConnectors'
+            $c = @(Read-PimWorkloadConnectors -ConnectorsDir $connDir) | Where-Object { "$($_.id)" -eq 'entra-approle' } | Select-Object -First 1
+            if (-not $c) { throw 'the entra-approle connector is not shipped with this engine' }
+            @(Get-PimWorkloadConnectorRoles -Connector $c -Tokens @{ resource = $id })
+        }
+        $lq = Invoke-PimDirectoryLookupQueue -ConnectionString $cs -AppRoles $appRoles
+        $out['directory-lookups'] = @{ ok = $true; count = [int]$lq.processed; found = [int]$lq.found; notFound = [int]$lq.notFound; errors = [int]$lq.errors }
+        if ($lq.processed) { & $say 'Directory lookups' ("{0} asked: {1} found, {2} not found, {3} failed" -f $lq.processed, $lq.found, $lq.notFound, $lq.errors) 'DarkGray' }
+    } catch { $out['directory-lookups'] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }; & $say 'Directory lookups' "NOT RUN -- $($_.Exception.Message)" 'DarkYellow' }
+    # the scoped collect -- a full refresh only
+    if (-not $IsOnDemand -and "$Scope" -ne 'admin-import') {
+        try {
+            $c = Invoke-PimDirectoryPrincipalCollect -ConnectionString $cs
+            $n = [int]$c.snapshot + [int]$c.groups + [int]$c.resolved
+            $out['directory-principals'] = @{ ok = $true; count = $n; path = 'sql:pim.DirectoryPrincipal' }
+            & $say 'Directory principals' ("{0} stored (snapshot {1}, PIM groups {2}, named {3}/{4} read)" -f $n, $c.snapshot, $c.groups, $c.resolved, $c.named) 'DarkGray'
+        } catch { $out['directory-principals'] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }; & $say 'Directory principals' "NOT RECORDED -- $($_.Exception.Message)" 'DarkYellow' }
+    }
+    return $out
+}
+
 function Invoke-PimTenantListRefresh {
     [CmdletBinding()]
     param(
@@ -866,8 +934,11 @@ function Invoke-PimTenantListRefresh {
         # WEB-GRAPH-MIN-1 (3.0.69): the directory facts the web app reads instead of calling Graph itself. All OPTIONAL
         # (a missing permission skips that one, a transient failure keeps the last record) and document-shaped (map).
         $hasFacts = [bool](Get-Command Get-PimEngineDirectoryAnswers -ErrorAction SilentlyContinue)
+        # GRAPH-PICKER (owner 2026-11-16): ON-DEMAND scopes the web app asks for -- each runs ONLY its own step (below):
+        # 'directory-lookup' the targeted collects, 'workload-crawl' the connector crawl, 'department-import' the groups of a pattern.
+        $isOnDemand = ("$Scope" -in @('directory-lookup', 'workload-crawl', 'department-import'))
         $factSteps = @()
-        if ($hasFacts -and "$Scope" -ne 'access-reviews') {
+        if ($hasFacts -and "$Scope" -ne 'access-reviews' -and -not $isOnDemand) {
             $factSteps = @(
                 @{ kind = 'admin-import-reads';    label = 'Admin import reads';    fn = { Invoke-PimEngineAdminImportReads };    map = $true; optional = $true; fact = $true }
             )
@@ -884,11 +955,11 @@ function Invoke-PimTenantListRefresh {
         }
         # AR-ENGINE-1 (3.0.71): the access reviews (Pro; only when the reader is installed). A FACT: a failed read keeps the
         # last record (a 403 is 'PERMISSION:' = skipped), it never fails the refresh.
-        if ("$Scope" -ne 'admin-import' -and (Get-Command Get-PimEngineAccessReviewsFact -ErrorAction SilentlyContinue)) {
+        if ("$Scope" -ne 'admin-import' -and -not $isOnDemand -and (Get-Command Get-PimEngineAccessReviewsFact -ErrorAction SilentlyContinue)) {
             $factSteps += @(@{ kind = 'access-reviews'; label = 'Access reviews'; fn = { Get-PimEngineAccessReviewsFact }; map = $true; optional = $true; fact = $true })
         }
         $listSteps = @()
-        if ("$Scope" -notin @('admin-import', 'access-reviews')) { $listSteps = @(
+        if ("$Scope" -notin @('admin-import', 'access-reviews') -and -not $isOnDemand) { $listSteps = @(
             @{ kind = 'entra-roles';      label = 'Entra ID roles';        fn = { Get-PimEntraRolesFromTenant } },
             @{ kind = 'aus';              label = 'Administrative Units';  fn = { Get-PimAdministrativeUnitsFromTenant } },
             @{ kind = 'pim-groups';       label = 'PIM-* groups';          fn = { Get-PimGroupsFromTenant } },
@@ -974,7 +1045,11 @@ function Invoke-PimTenantListRefresh {
         # objects (Graph 403 on every environment, 2026-10-09), so the tick -- which holds the Graph read rights -- records
         # users / groups / service principals here; the updater's sizing reads pim.Settings 'TenantObjectCounts' on a 403.
         # Best effort: never fails or slows the refresh beyond three $count calls.
-        if ("$Scope" -notin @('admin-import', 'access-reviews')) { try {
+        # GRAPH-PICKER (owner 2026-11-16): the directory the web app reads instead of Graph (engine/_shared/PIM-DirectoryPrincipals.ps1).
+        $__ds = Invoke-PimTenantDirectorySteps -Scope "$Scope" -IsOnDemand:$isOnDemand -Quiet:$Quiet
+        foreach ($__k in @($__ds.Keys)) { $results[$__k] = $__ds[$__k] }
+
+        if ("$Scope" -notin @('admin-import', 'access-reviews') -and -not $isOnDemand) { try {
             $csC = Get-PimTenantCacheStoreCs
             if (-not (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue)) {
                 $tsz = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-TenantSizing.ps1'   # the tick does not load it otherwise

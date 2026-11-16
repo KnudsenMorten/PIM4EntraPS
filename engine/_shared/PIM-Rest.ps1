@@ -1158,6 +1158,16 @@ function Save-PimRestRetryCounts {
     return @{ saved = $false; reason = 'another writer kept winning -- kept for the next run' }
   } catch { return @{ saved = $false; reason = "$($_.Exception.Message)" } }
 }
+function Test-PimWebNoGraphRefusal {
+  # PURE (reads $global:PIM_WebNoGraph). GRAPH-PICKER: the refusal text when this process is the web app and the call goes to
+  # Microsoft Graph (the 'graph' resource or a graph.microsoft.com URL); '' otherwise.
+  param([string]$Url = '', [string]$Resource = '')
+  if (-not $global:PIM_WebNoGraph) { return '' }
+  if ("$Resource" -ieq 'graph' -or "$Resource" -match '(?i)graph\.microsoft\.com' -or "$Url" -match '(?i)^https?://graph\.microsoft\.com') {
+    return 'GRAPH-PICKER: the web app (PIM Manager) makes no Microsoft Graph call -- the engine reads the directory and stores it in PIM''s SQL'
+  }
+  return ''
+}
 function Invoke-PimRest {
   [CmdletBinding()]
   param(
@@ -1172,6 +1182,10 @@ function Invoke-PimRest {
     # (mail send, operator decision 2026-09-13: the hosted engine sends as its managed identity).
     [switch]$UseManagedIdentity
   )
+  # GRAPH-PICKER (framework SECURE-WEB-1, owner 2026-11-16): the internet-facing web app (PIM Manager, server mode) makes NO
+  # Graph call -- refused BEFORE a token is minted. The engine (the flag is never set there) is unchanged.
+  $__ng = Test-PimWebNoGraphRefusal -Url $Url -Resource $Resource
+  if ($__ng) { throw $__ng }
   # Keep a scheduler lease alive through a long live read (minutes of paged calls). No-op outside
   # a leased tick; time-gated in Invoke-PimSchedulerLeaseHeartbeat (PIM-Scheduler.ps1).
   if ($global:PIM_LeaseHeartbeat -and (Get-Command Invoke-PimSchedulerLeaseHeartbeat -ErrorAction SilentlyContinue)) { [void](Invoke-PimSchedulerLeaseHeartbeat) }

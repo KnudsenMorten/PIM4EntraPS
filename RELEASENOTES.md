@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.41 -- 2026-11-17
+
+- A schema step the quiesce held on the SAME version (the new updater's own follow-up run) is now retried every 15 minutes until it runs, instead of "nothing to do"; the ring approval stays the authority. Found at ring 0 on 3.1.40: pim.DirectoryPrincipal was missing and the people picker failed.
+
+## 3.1.40 -- 2026-11-16
+
+- Security (GRAPH-PICKER): the Manager (internet-facing web identity) no longer calls Microsoft Graph -- people and group lookups read pim.DirectoryPrincipal, filled by the engine (scoped: principals in PIM's groups and roles, PIM's groups, addresses named in PIM's rows); a name not found is looked up by the engine on request (validated, rate-limited, woken through pim-wake); job types run from the page are queued to the engine; a gate test refuses any Graph call from the web path.
+
 ## 3.1.39 -- 2026-11-16
 
 - Security: on every update the updater compares the web identity (id-pim-web) with its approved rights after the roll and removes excess only where it already holds the right to (on a standard install every item is reported: run warning, one admin mail, one fix request); the Support app's db_owner outside an open session and contained users of identities that no longer exist are reported; support-change mail severity, and a failed mark-executed after an approved app proposal is recorded.

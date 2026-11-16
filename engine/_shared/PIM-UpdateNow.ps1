@@ -630,7 +630,12 @@ function Get-PimUpdateRetryDecision {
     if (-not $hv) { $res.reason = 'no-head'; $res.line = "$pre -- the ring's head is not known this run, so it is not retried now (the next 15-minute run asks again)"; return $res }
     $cmp = Compare-PimUpdateNowVersion -A $hv -B $RunningVersion
     if ($null -eq $cmp) { $res.reason = 'unreadable'; $res.line = "$pre -- the head ('$hv') or the running version ('$RunningVersion') cannot be read; not retried"; return $res }
-    if ($cmp -le 0) { $res.reason = 'not-ahead'; $res.line = "$pre -- the ring's head $hv is not ahead of the running $RunningVersion; nothing to do"; return $res }
+    if ($cmp -lt 0) { $res.reason = 'not-ahead'; $res.line = "$pre -- the ring's head $hv is not ahead of the running $RunningVersion; nothing to do"; return $res }
+    # SCHEMA-FOLLOWUP-1 (2026-11-16, 3.1.40 at ring 0): the held run can be the FOLLOW-UP run on the SAME version -- the run the
+    # new updater makes so ITS code applies ITS schema (the roll's own schema step ran with the previous updater's code, which
+    # does not know the new tables). Head == running is then NOT "nothing to do": the new schema is still missing (measured:
+    # pim.DirectoryPrincipal absent, the people picker failed until a later run). Retry it: the same path, the same quiesce.
+    $schemaOnly = ($cmp -eq 0)
     $rm = -1; $tm = -1
     if ("$RunningVersion".Trim().TrimStart('v', 'V') -match '^(\d+)\.') { $rm = [int]$Matches[1] }
     if ($hv.TrimStart('v', 'V') -match '^(\d+)\.') { $tm = [int]$Matches[1] }
@@ -638,7 +643,13 @@ function Get-PimUpdateRetryDecision {
     if ($Hold) { $res.reason = 'hold'; $res.line = "$pre -- this environment is HELD (PIM_UPDATE_HOLD=1); not retried"; return $res }
     if ($OtherRunning -is [bool] -and $OtherRunning) { $res.reason = 'busy'; $res.line = "$pre -- another updater execution is running; not retried now (never two at once)"; return $res }
     if (-not ($OtherRunning -is [bool])) { $res.reason = 'unreadable-runs'; $res.line = "$pre -- the updater's executions could not be read; not retried now (never two at once)"; return $res }
-    $res.retry = $true; $res.reason = 'retry'
+    $res.retry = $true
+    if ($schemaOnly) {
+        $res.reason = 'schema-pending'
+        $res.line = "update retry: retrying the schema step held at $at by a running job -- running $RunningVersion is the ring head, its own schema step still has to run (the same quiesce rule: waits up to $($res.waitMinutes) min for no PIM job running, nothing is stopped)"
+        return $res
+    }
+    $res.reason = 'retry'
     $res.line = "update retry: retrying the roll held at $at by a running job -- ring head $hv, running $RunningVersion (the same quiesce rule: waits up to $($res.waitMinutes) min for no PIM job running, nothing is stopped)"
     return $res
 }

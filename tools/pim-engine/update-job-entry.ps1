@@ -1451,6 +1451,12 @@ if ($unKind.kind -eq 'quick') {
                     if ($null -eq $unRtAp) { $unRtAp = Get-PimUpdateNowRingApproval -Cs $unCs }
                     $unRt2 = Get-PimUpdateRetryDecision @unRtArgs -HeadVersion "$($unRtAp.version)"
                     if (-not $unRt2.retry) { $unRt = $unRt2; $unRt.line = "$($unRt2.line) (the ring's approval: $($unRtAp.reason))" }
+                    elseif ($unRt.reason -eq 'retry' -and $unRt2.reason -ne 'retry') {
+                        # SCHEMA-FOLLOWUP-1: /head is ahead but the RING approves only the running version -- that is not a
+                        # held schema step of the running version (schema-pending is decided on the head alone); no retry here
+                        $unRt = $unRt2; $unRt.retry = $false; $unRt.reason = 'not-ahead'
+                        $unRt.line = "update retry: the roll held by a running job is not retried -- the ring approves $($unRtAp.version), not ahead of the running $($script:PimRunningVersion); nothing to do (the ring's approval: $($unRtAp.reason))"
+                    }
                 }
             } catch { $unRt = $null }
         }

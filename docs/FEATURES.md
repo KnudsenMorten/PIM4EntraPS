@@ -748,6 +748,12 @@ deployment is a supported choice) and no credentials lying around.
   and confirm the pattern right in Settings before importing.
 
 ## 9. Auth / Identity
+- **The web portal never reads your directory.** ✅ 2026-11-16 — The internet-facing PIM Manager portal makes no
+  Microsoft Graph call at all. The people and group pickers, and every check that turns a name into an account, search
+  PIM's own database. The engine — which is not reachable from the internet — reads the directory and keeps that database
+  current: the people and groups PIM already works with, plus any name an admin types that is not stored yet (the page
+  shows "looking it up…" for about a minute, then the answer). The portal's identity therefore needs no directory-read
+  permission.
 - **Sign-in by Microsoft's built-in Container Apps sign-in, with no secret.** ✅ 2026-11-15 — the PIM Manager page,
   its API and its AI assistant endpoint sit behind Microsoft's own sign-in for Azure Container Apps. Microsoft's platform
   checks every request's sign-in before it reaches PIM, and refuses a request without a valid Entra sign-in for PIM. The
