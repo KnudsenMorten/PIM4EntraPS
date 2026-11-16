@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.36 -- 2026-11-16
+
+- Admin accounts page: one search box, office users hidden by default, filters by type / company / department / tasks, a bulk bar (disable, enable, reset TAP, revoke sessions, give access, export) through the existing staging and guards, and a compact Actions menu per row; the active-assignments warning mail says in plain words what was not read, why, and what is kept.
+
+## 3.1.35 -- 2026-11-16
+
+- Access page: a text filter in each column narrows only that column, so drag-drop still works on a long list (it also finds access packages and their groups); the Access packages list has a filter; the Workload recon button is removed (each workload role keeps its own status badge).
+
+## 3.1.34 -- 2026-11-16
+
+- An admin account whose name does not follow the naming pattern no longer blocks Save (the PIM-NAME-002 check is removed); the engine still never changes an account PIM did not create.
+
 ## 3.1.33 -- 2026-11-16
 
 - The MCP server (/mcp) is closed by default on every installation and answers 404 until the installation is deliberately opened; an update no longer reports its own short-lived consent job as still on the previous build.

@@ -1,5 +1,43 @@
 # What's new in PIM Manager
 
+## 3.1.36 · 2026-11-16 · Feature update
+
+The Admin accounts page has one search, filters by type, company and department, and actions for many accounts at once. Warning mails about unread assignments now say what happened in plain words.
+
+### New features
+
+- **Filter admin accounts** - One search box, and filters by type (internal admin, consultant, guest, office user), company, department and tasks such as auto-disable within 14 days. Office users are hidden until you show them.
+- **Act on many accounts at once** - Select accounts, for example every consultant from one company, and disable, enable, reset TAP or revoke sessions together. A confirmation lists the accounts first, and every change still goes through Pending changes.
+
+### Fixes
+
+- **Clearer warning mail** - When some active assignments could not be read, the mail now says which part, why, and what PIM keeps instead.
+
+## 3.1.35 · 2026-11-16 · Feature update
+
+Each column on the Access page has its own filter, so you can narrow a long list and still drag and drop. Access packages can be filtered too.
+
+### New features
+
+- **Filter each column on the Access page** - Type in a column's filter box to narrow only that column. The other columns stay, so you can drag a person onto the role you found. Type package to find access packages.
+- **Filter access packages** - A filter box above the access packages list narrows it by package name, description or group name.
+
+### Fixes
+
+- **Simpler Access page** - The workload check button is removed. Each workload role shows its own status: in place, missing or left out.
+
+## 3.1.34 · 2026-11-16 · Fix-only
+
+An admin account whose name does not follow the naming pattern no longer blocks saving your changes.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Admin names no longer block saving** - An admin account whose name does not follow the naming pattern is no longer an error and no longer blocks Save. PIM still never changes an account it did not create.
+
 ## 3.1.33 · 2026-11-16 · Security
 
 The assistant connection (MCP) is closed by default, and an update no longer reports a short-lived helper job as not updated.

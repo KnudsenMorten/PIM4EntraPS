@@ -1,0 +1,5 @@
+{"version":"3.1.35","date":"2026-11-16","type":"feature",
+ "summary":"Each column on the Access page has its own filter, so you can narrow a long list and still drag and drop. Access packages can be filtered too.",
+ "new":[{"title":"Filter each column on the Access page","text":"Type in a column's filter box to narrow only that column. The other columns stay, so you can drag a person onto the role you found. Type package to find access packages."},
+        {"title":"Filter access packages","text":"A filter box above the access packages list narrows it by package name, description or group name."}],
+ "fixes":[{"title":"Simpler Access page","text":"The workload check button is removed. Each workload role shows its own status: in place, missing or left out."}]}

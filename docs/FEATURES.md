@@ -1429,7 +1429,19 @@ deployment is a supported choice) and no credentials lying around.
   the other direct groups — "what people are assigned to" — so selecting one shows the permissions it is
   linked to. Names are matched ignoring upper/lower case, so an admin spelled differently in two places
   still shows their access, and a name that genuinely matches nothing is reported rather than silently
-  dropped. Workload reconciliation only appears when workload bindings exist.
+  dropped. Each workload role box shows whether it is in place, missing or left out (exempted).
+
+- **Filter one column of the Access map and drag onto what is left.** ✅ 2026-11-16 Each of the four columns has
+  its own *Filter this column* box, left of the All / Assigned / Not assigned choice. Typing narrows only that
+  column — by the name shown, the group tag or role name behind it, or the box's type word (*access package*,
+  *package group*, *central*) — and the other columns stay as they are. So you can type "Reports" in the last
+  column and drag a person or a group straight onto *Reports Reader*, or select and Ctrl+click as before. The box
+  works together with the All / Assigned choice and the search, hides a section heading when nothing under it
+  is left, shows a small "3 of 40", and clears with × or Esc. Each column remembers its text in your browser.
+  The *Workload recon* button is gone from the toolbar; the badge on each workload box says the same thing.
+- **Filter the access packages.** ✅ 2026-11-16 A box above the Access packages list narrows it by package name,
+  description or group name; an open package's details hide with it. It is remembered in your browser and clears
+  with × or Esc.
 
 - **The Access map is tested at every option, in a real browser.** ✅ 2026-09-25 Every kind of box is clicked
   and must draw its whole chain — up to the people, down to the roles and scopes — with every line joining the
@@ -1938,6 +1950,15 @@ deployment is a supported choice) and no credentials lying around.
   the rule decides whether an unanswered person **keeps** access (the default) or gets an offboarding approval
   request. A SuperAdmin can decide any open person, every decision is in the audit trail, and a department without an
   owner is reported to the alert recipients every day.
+- **Admin accounts, built for an administrator's daily tasks.** ✅ 2026-11-16 (built, not released) — One search box
+  above the list. Office users (people's own accounts with a delegation) are hidden by default; one click shows them,
+  and the count says how many are hidden. Filter by type in plain words (internal admin, consultant, guest, office
+  user), by company, department, privilege, platform and status, and by task: auto-disable within 14 days, TAP not
+  enforced, staged change. Select the rows (for example every consultant of one company) and act on all of them at once:
+  disable, enable, disable and remove delegations, set the auto-disable date, reset the TAP, revoke sessions, give
+  access or export. Each bulk action asks first, names the accounts, and goes through the same staging, approvals and
+  checks as the single-row button. Each row shows Give access and Disable / Enable; the other actions are in its
+  Actions menu. Your filters are remembered, and a link can open the page with filters set.
 - **Ignore an admin account PIM should not manage.** ✅ 2026-10-01 — Admin accounts lists the privileged accounts that
   exist in the directory but not in PIM. Next to **Import**, **Ignore** (with an optional reason) leaves one out: it is
   no longer listed or counted, on Admin accounts or on Home, for every administrator. Nothing changes in the directory.

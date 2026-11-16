@@ -8681,7 +8681,7 @@ to") in column 2, so their nestings into permission groups are real cross-column
 department shows the permissions it is linked to. (Emitting them as permission groups put them in the
 bundle column, where their nestings became same-column hops and were dropped.) Names are joined
 case-insensitively for every connection kind, and a name that matches nothing is reported rather than
-silently dropped. The Workload recon control appears only when the board has workload targets.
+silently dropped. (The Workload recon control was removed 2026-11-16, REQUIREMENTS 86.2a.)
 
 **Linking and unlinking on the board (2026-09-21 / 2026-09-22).** The board has exactly two editable
 edges, each usable from either end (`MAP_ASSIGN_MODES`): admin ↔ direct group → one
@@ -8786,9 +8786,10 @@ each `workload-target` with a PURE reconciliation verdict (`Get-PimWorkloadRecon
 no network): **mapped** (live = desired), **missing** (desired, not live — a
 candidate to push via the connector `assign`), **exempted** (an active exemption
 covers it), or **unknown** (the workload wasn't crawled / its crawl errored — never
-a false *missing*). The verdict drives the col-3 board badge + chip badge + the
-"Workload recon" summary (`GET /api/workload-recon`); admins can trigger a fresh
-sweep with `POST /api/workload-crawl`. The engine remains the only writer; the GUI
+a false *missing*). The verdict drives the col-3 board badge + chip badge (the
+Access map's "Workload recon" summary button was removed 2026-11-16, REQUIREMENTS
+86.2a; `GET /api/workload-recon` and `POST /api/workload-crawl` stay as API routes
+for scripts and the scheduler). The engine remains the only writer; the GUI
 read path is side-effect-free. `GET /api/workload-crawl` is a server-authoritative
 parity read of the raw crawl map (tooling/tests/scheduler), the same pattern as
 `/api/map-risk`.

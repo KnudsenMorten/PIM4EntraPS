@@ -481,6 +481,16 @@
   #dgvBoard .map-item.cf-hide:not(.sel):not(.path) { display:none !important; }
   .map-col-tools { padding:0 10px 4px; text-align:right; }
   .map-col-filter { font-size:11px; font-weight:400; text-transform:none; letter-spacing:0; margin-left:6px; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#24292f; }
+  /* MAP-COLTEXT (owner 2026-11-16): a text filter per Access map column, left of the All / Assigned select. It narrows ONLY
+     its own column, so the other columns keep every box you may want to drag onto. A box it hides is hidden even on the
+     selected path or while dragging (you asked for that column narrowed) -- never the selected box itself. The selector is
+     deliberately more specific than the drag / link-target / picker rules that force `display:flex !important`. */
+  #mapBoard .map-col .map-col-body .map-item.tf-hide:not(.sel) { display:none !important; }
+  #mapBoard .map-col .map-col-body .map-group-hdr.tf-hide { display:none; }
+  #mapBoard .map-col-tools { display:flex; justify-content:flex-end; align-items:center; gap:3px; }
+  .map-col-text { width:10em; min-width:5em; flex:0 1 auto; font-size:11px; font-weight:400; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#24292f; }
+  .map-col-text-x { font-size:12px; line-height:1; padding:0 3px; border:0; background:transparent; color:#57606a; cursor:pointer; }
+  .map-col-text-n { font-size:10.5px; color:#57606a; white-space:nowrap; }
   #mapBoard .map-item.link-cand:hover { opacity:1; background:#ddf4ff; border-color:#0969da; }
   /* §91.23: sent by the managing tenant (uplink) -- read-only on this tenant. Teal, its own colour. */
   #mapBoard .map-item.map-central { border-left:3px solid #1b7c83; }
@@ -1172,6 +1182,14 @@
   table.acct-grid > tbody > tr.acct-row:hover > td { background:#eaf2ff; }
   .acct-actions { display:flex; flex-wrap:wrap; gap:6px; max-width:760px; }
   .acct-actions-who { width:100%; font-size:11px; font-weight:700; color:#0969da; }
+  /* 101.5 (e): the row's Actions menu -- Give access + Enable / Disable stay on the row, the rest opens from here */
+  .acct-more { position:relative; display:inline-block; }
+  .acct-more > summary { list-style:none; cursor:pointer; font-size:11px; display:inline-block; }
+  .acct-more > summary::-webkit-details-marker { display:none; }
+  .acct-more > summary::after { content:' \25BE'; }
+  .acct-more-menu { position:absolute; right:0; z-index:30; margin-top:4px; display:flex; flex-direction:column; gap:4px; min-width:220px;
+    padding:6px; background:#fff; border:1px solid #d0d7de; border-radius:6px; box-shadow:0 6px 18px rgba(31,35,40,.15); }
+  .acct-more-menu > button { text-align:left; }
   .set-table input { font-size:12.5px; padding:3px 6px; border:1px solid #d0d7de; border-radius:5px; }
   .set-table input:disabled { background:#f6f8fa; color:#57606a; }
   .setMsg { margin-left:10px; font-size:12px; }
@@ -1572,7 +1590,6 @@
       <button id="mapLinkBtnA" class="primary" style="display:none;"></button>
       <button id="mapLinkBtnB" class="primary" style="display:none;"></button>
       <button id="mapRiskToggle" class="ghost" title="Flag orphans (dead delegation), stale (past review horizon) and over-privileged (reaches Tier-0/1 or unusually many targets) nodes">Risk overlay</button>
-      <button id="mapWorkloadRecon" class="ghost" style="display:none;" title="Shown only when workload role bindings exist. Reconcile the desired workload role bindings (Defender XDR / Intune / Power BI / Power Platform / Business Central / Azure DevOps / Dataverse) against the live crawl: mapped / missing / exempted">Workload recon</button>
       <button id="mapCsv" class="ghost" title="Export the whole delegation map (every admin → target) as CSV">Export CSV</button>
       <button id="mapPrint" class="ghost" title="Open a printable view of the delegation map">Print</button>
       <!-- IMP-21: the direct-vs-inherited rule stated once, in plain words, next to the steps.
@@ -3752,7 +3769,7 @@
   // reset tap, create new admin, flag for deletion, revoke sessions."
   // ONE row per admin, every verb reachable without leaving it. Rows the caller may not manage
   // are never returned by the endpoint, so they cannot be drawn and cannot be bulk-selected.
-  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set(), showRemoved: false, chips: null };   // sel: §89 multi-select (UPNs); showRemoved: §96.5 D1 (b); chips: 100.29
+  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set(), showRemoved: false, chips: null, hideOffice: null, staged: null };   // sel: §89 multi-select (UPNs); showRemoved: §96.5 D1 (b); chips: 100.29; hideOffice + staged: 101.5 (filter stays '': the one search box is the list menu's, 101.5 (a))
 
   // ===== 100.29 ADMIN-FILTERS =================================================
   // Owner 2026-10-09: "i need a way to filter between external vs. internal admins and also high priv vs. day2day".
@@ -3762,19 +3779,53 @@
   // (GET /api/admin-accounts privilegeClass / privilegeReason / platform -- Get-PimManagerAdminPrivilegeClass); the page
   // only reads them. The ticked chips are remembered per browser (localStorage; a blocked store just forgets).
   const ACCT_FILTER_KEY = 'pim.acctFilters.v1';
+  // 101.5 (owner 2026-11-16: "think as admin admin, what tasks they have and add options"): Type in plain words, Company
+  // (the consultants' company) and Department first, then Privilege / Platform / Status, then the admin's own TASKS.
+  // Service account: no admin type for it exists (AdminTypePrefixes = internal-adminuser / external-adminuser /
+  // external-guest, + existing-account), so there is no chip for it.
   const ACCT_FILTER_GROUPS = [
-    { id: 'type',     label: 'Type',       tip: 'From the admin type (Settings > Naming conventions > Prefix by admin type): internal-adminuser = internal, external-adminuser = external, external-guest = guest.' },
+    { id: 'type',     label: 'Type',       tip: 'From the admin type: internal-adminuser = internal admin, external-adminuser = consultant (external), external-guest = guest (external), existing-account = office user (the person\'s own account).' },
+    { id: 'company',  label: 'Company',    tip: 'The company on the admin row (for a consultant: the consultant\'s company); "none" = no company set.' },
+    { id: 'dept',     label: 'Department', tip: 'The internal sponsor department; "none" = no department linked.' },
     { id: 'priv',     label: 'Privilege',  tip: 'High-priv = the name matches the high-priv naming pattern (AdminAccountPatternHighPriv), OR its level is L0 / tier T0 (the row, or an L0 / T0 marker in its name or display name, e.g. "(Admin, Cloud, ID, L0, T0)"), OR Purpose = HighPriv. Day-to-day = the rest. Tier-0 delegations are not checked here.' },
     { id: 'platform', label: 'Platform',   tip: 'Cloud = an Entra ID admin; AD = an on-premises Active Directory admin (TargetPlatform = AD, hybrid).' },
-    { id: 'dept',     label: 'Department', tip: 'The internal sponsor department; "none" = no department linked.' },
-    { id: 'status',   label: 'Status',     tip: 'The account status the engine enforces.' }
+    { id: 'status',   label: 'Status',     tip: 'The account status the engine enforces.' },
+    { id: 'task',     label: 'Tasks',      tip: 'Accounts that need a look: an auto-disable date within 14 days (or already past), no TAP enforced, or a change staged in Pending changes that is not committed yet.' }
   ];
   const ACCT_FILTER_LABELS = {
-    type: { internal: 'internal', external: 'external', guest: 'guest', existing: 'existing account' },
+    type: { internal: 'internal admin', external: 'consultant (external)', guest: 'guest (external)', existing: 'office user' },
+    company: { '': 'none' },
     priv: { 'high-priv': 'high-priv', 'day-to-day': 'day-to-day', unknown: 'not classified' },
     platform: { cloud: 'cloud (Entra)', ad: 'AD (hybrid)' },
-    dept: { '': 'none' }
+    dept: { '': 'none' },
+    task: { 'autodisable-soon': 'auto-disable within 14 days', 'tap-off': 'TAP not enforced', 'staged': 'staged change' }
   };
+  // 101.5: the groups whose facet is a LIST (a row can need several tasks); every other facet is one value.
+  const ACCT_FILTER_MULTI = { task: 1 };
+  // PURE (exported for the harness): the admins with a change staged in Pending changes and not committed -- an admin row
+  // added, removed or edited (Account-Definitions-Admins), or a delegation of the admin added, removed or edited
+  // (PIM-Assignments-Admins). Returns a Set of lower-case UPNs / user names. pc = the pendingChanges object.
+  function pimAcctStagedKeys(pc) {
+    const out = new Set();
+    const lc = v => String(v == null ? '' : v).trim().toLowerCase();
+    const same = (a, b) => { a = a || {}; b = b || {}; const cols = new Set(Object.keys(a).concat(Object.keys(b))); for (const c of cols) { if (String(a[c] == null ? '' : a[c]) !== String(b[c] == null ? '' : b[c])) return false; } return true; };
+    const scan = (base, keysOf) => {
+      const p = pc && pc[base]; if (!p || !Array.isArray(p.rows)) return;
+      const baseline = Array.isArray(p.baseline) ? p.baseline : [];
+      const orig = Array.isArray(p.origRows) ? p.origRows : p.rows;
+      const dels = p.deletes || new Set();
+      p.rows.forEach((r, i) => {
+        if (!r) return;
+        const oi = orig.indexOf(r);
+        const changed = (dels.has && dels.has(i)) || oi < 0 || !same(r, baseline[oi]);
+        if (changed) keysOf(r).forEach(k => { if (k) out.add(k); });
+      });
+    };
+    scan('Account-Definitions-Admins', r => [lc(r.UserPrincipalName), lc(r.UserName)]);
+    scan('PIM-Assignments-Admins', r => [lc(r.Username), lc(r.UserName)]);
+    return out;
+  }
+  function acctStagedSet() { try { return pimAcctStagedKeys(typeof pendingChanges !== 'undefined' ? pendingChanges : null); } catch (_) { return new Set(); } }
   function acctFacets(a) {
     a = a || {};
     const t = String(a.adminType || '').toLowerCase();
@@ -3783,7 +3834,38 @@
     const priv = (pc === 'high-priv' || pc === 'day-to-day') ? pc : 'unknown';
     const pl = String(a.platform || '').toLowerCase();
     const platform = (pl === 'ad' || pl === 'cloud') ? pl : (/^ad$/i.test(String(a.targetPlatform || '')) ? 'ad' : 'cloud');
-    return { type: type, priv: priv, platform: platform, dept: String(a.department || '').trim(), status: String(a.accountStatus || 'Enabled').trim().toLowerCase() || 'enabled' };
+    const task = [];
+    if (a.autoDisableSoon || a.autoDisablePast) task.push('autodisable-soon');
+    if (type !== 'existing' && !a.createTAP) task.push('tap-off');
+    const st = acctGridState.staged;
+    if (st && st.size && (st.has(String(a.userPrincipalName || '').trim().toLowerCase()) || st.has(String(a.userName || '').trim().toLowerCase()))) task.push('staged');
+    return { type: type, company: String(a.company || '').trim(), priv: priv, platform: platform, dept: String(a.department || '').trim(), status: String(a.accountStatus || 'Enabled').trim().toLowerCase() || 'enabled', task: task };
+  }
+  // 101.5 (b): office users (existing accounts) are hidden by default; one click shows them. Remembered per browser.
+  const ACCT_HIDE_OFFICE_KEY = 'pim.acctHideOffice.v1';
+  function acctHideOffice() {
+    if (typeof acctGridState.hideOffice !== 'boolean') {
+      let v = true;
+      try { const raw = localStorage.getItem(ACCT_HIDE_OFFICE_KEY); if (raw === '0') v = false; } catch (_) { }
+      acctGridState.hideOffice = v;
+    }
+    return acctGridState.hideOffice;
+  }
+  function acctHideOfficeSave(v) { acctGridState.hideOffice = !!v; try { localStorage.setItem(ACCT_HIDE_OFFICE_KEY, v ? '1' : '0'); } catch (_) { } }
+  // 101.5 (f) PURE: the chips a link asks for (?type=&company=&dept=&priv=&platform=&status=&task=, &office=show). A value of
+  // a closed group (type, priv, platform, task) must be one the page knows; a name (company, dept, status) is text, at most
+  // 100 characters, compared as it is -- never evaluated. chips = null when the link names none.
+  function pimAcctLinkChips(params) {
+    const c = {}; let any = false;
+    const closed = { type: ACCT_FILTER_LABELS.type, priv: ACCT_FILTER_LABELS.priv, platform: ACCT_FILTER_LABELS.platform, task: ACCT_FILTER_LABELS.task };
+    ACCT_FILTER_GROUPS.forEach(g => {
+      const vals = (params && params.getAll ? params.getAll(g.id) : []).map(v => String(v).trim()).filter(v => v.length <= 100)
+        .filter(v => closed[g.id] ? Object.prototype.hasOwnProperty.call(closed[g.id], v) : true)
+        .map(v => g.id === 'status' ? v.toLowerCase() : v);
+      c[g.id] = Array.from(new Set(vals)).slice(0, 20);
+      if (c[g.id].length) any = true;
+    });
+    return { chips: any ? c : null, office: !!(params && params.get && params.get('office') === 'show') };
   }
   function acctChipsLoad() {
     const c = {}; ACCT_FILTER_GROUPS.forEach(g => { c[g.id] = []; });
@@ -3805,7 +3887,9 @@
     for (const g of ACCT_FILTER_GROUPS) {
       if (g.id === skip) continue;
       const on = c[g.id] || [];
-      if (on.length && on.indexOf(fc[g.id]) < 0) return false;
+      if (!on.length) continue;
+      if (ACCT_FILTER_MULTI[g.id]) { if (!(fc[g.id] || []).some(v => on.indexOf(v) >= 0)) return false; }
+      else if (on.indexOf(fc[g.id]) < 0) return false;
     }
     return true;
   }
@@ -3815,7 +3899,15 @@
     let h = '<div class="acct-fbar" id="acctFilterBar">';
     ACCT_FILTER_GROUPS.forEach(g => {
       const counts = {};
-      base.forEach(a => { const v = acctFacets(a)[g.id]; if (acctPasses(a, f, c, g.id)) counts[v] = (counts[v] || 0) + 1; else if (!(v in counts)) counts[v] = 0; });
+      const multi = !!ACCT_FILTER_MULTI[g.id];
+      // a list facet (Tasks) always offers its chips, each with its count (0 = dimmed)
+      if (multi) Object.keys(ACCT_FILTER_LABELS[g.id] || {}).forEach(k => { counts[k] = 0; });
+      base.forEach(a => {
+        const fv = acctFacets(a)[g.id]; const pass = acctPasses(a, f, c, g.id);
+        (multi ? fv : [fv]).forEach(v => { if (pass) counts[v] = (counts[v] || 0) + 1; else if (!(v in counts)) counts[v] = 0; });
+      });
+      // Company: no chips while no admin has a company (a lone "none" filters nothing)
+      if (g.id === 'company' && !Object.keys(counts).some(k => k !== '') && !(c.company || []).length) return;
       // the values the data has, in a stable order (+ a remembered value no row has any more, so it can be unticked)
       let vals = Object.keys(counts);
       (c[g.id] || []).forEach(v => { if (vals.indexOf(v) < 0) { vals.push(v); counts[v] = 0; } });
@@ -3865,23 +3957,32 @@
     const isRemoved = a => /^(removed|deleted)$/.test(String(a.accountStatus || '').toLowerCase()) && !a.deletePending;
     const nRemoved = acctGridState.rows.filter(isRemoved).length;
     const active = acctGridState.showRemoved ? acctGridState.rows : acctGridState.rows.filter(a => !isRemoved(a));
-    // 100.29: the text filter AND every ticked chip group (acctPasses); "N of M" counts what is left.
+    // 101.5 (b): office users (existing accounts) hidden by default -- one click ("Hide office users") shows them.
+    acctGridState.staged = acctStagedSet();
+    const isOffice = a => acctFacets(a).type === 'existing';
+    const nOffice = active.filter(isOffice).length;
     const chips = acctChips();
+    // a ticked "office user" Type chip asks for exactly those rows, so it wins over the hide
+    const hideOffice = acctHideOffice() && nOffice > 0 && (chips.type || []).indexOf('existing') < 0;
+    const inView = hideOffice ? active.filter(a => !isOffice(a)) : active;
+    // 100.29: every ticked chip group (acctPasses); "N of M" counts what is left. 101.5 (a): the ONE search box is the
+    // list menu's "Search every text column" above the table (name, UPN and type are columns of it).
     const anyChip = acctChipsActive(chips);
-    const rows = (f || anyChip) ? active.filter(a => acctPasses(a, f, chips, null)) : active;
+    const rows = (f || anyChip) ? inView.filter(a => acctPasses(a, f, chips, null)) : inView;
     PIM_ACCT_EXPORT.grid = rows; pimRegisterAccountsExport();   // 100.67: the rows shown (filter + chips applied)
 
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">' +
          '<h2 style="margin:0;font-size:16px;">Admin accounts</h2>' +
-         '<input id="acctFilter" type="search" placeholder="filter by name, UPN or type…" autocomplete="off" ' +
-           'value="' + escapeHtml(acctGridState.filter) + '" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:240px;">' +
          '<button class="btn-sec" id="acctRefresh">Refresh</button>' +
          (d.canCreate ? '<button class="btn" id="acctNew">+ New admin</button>' : '') +
-         '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span>' +
+         '<span class="acct-count" style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) +
+           (hideOffice ? ' &middot; <span class="acct-office-hidden">' + fmtNum(nOffice) + ' hidden (office users)</span>' : '') + '</span>' +
+         (nOffice ? '<label style="font-size:12px;color:#57606a;" title="Office users are people\'s own accounts with a PIM delegation. PIM manages their delegations only, never the account."><input type="checkbox" id="acctHideOffice"' +
+           (acctHideOffice() ? ' checked' : '') + '> Hide office users</label>' : '') +
          (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (the account is disabled and kept) or deleted (the account is deleted in Entra ID). Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
            (acctGridState.showRemoved ? ' checked' : '') + '> Show removed and deleted (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
-    h += acctFilterBarHtml(active, f);
+    h += acctFilterBarHtml(inView, f);
     // Framework §12.6: the Pro Business admin-cap banner (from 90%; filled from /api/license by renderAdminLicenceBanners).
     h += '<div class="admin-lic-banner" data-page="admins" style="display:none;margin-bottom:10px;"></div>';
 
@@ -3934,7 +4035,7 @@
          // A stored ManagerEmail is kept (the editor no longer sends it, and the server leaves a field not sent untouched).
          '<th>TAP</th><th>Mail forward</th>' +
          (syncCol === 'master' ? '<th>Sync to managed tenants</th>' : (syncCol === 'managed' ? '<th>From managing tenant</th>' : '')) +
-         '<th style="min-width:300px;">Actions</th></tr>';
+         '<th style="min-width:230px;">Actions</th></tr>';
     rows.forEach((a, rowIx) => {
       const busy = acctGridState.busy === a.userPrincipalName;
       const st = String(a.accountStatus || 'Enabled');
@@ -3954,7 +4055,8 @@
         '<td style="font-size:11.5px;">' + (a.existingAccount
             ? '<span class="acctExistingBadge" title="The person&rsquo;s own office account. PIM manages its delegations only -- never the account (no create, rename, disable, delete or TAP).">' + escapeHtml(a.adminTypeLabel || 'Existing account') + '</span>' +
               ((a.levelWarnings || []).length ? '<div class="acctLevelWarn" style="color:#9a6700;font-size:10.5px;margin-top:2px;" title="' + escapeHtml((a.levelWarnings || []).join('\n')) + '">&#9888; delegation above L4-L5 (allowed)</div>' : '')
-            : escapeHtml(a.adminType || '')) +
+            : '<span class="acct-type-plain">' + escapeHtml(acctChipLabel('type', acctFacets(a).type)) + '</span>' +
+              (a.adminType ? '<div style="color:#8c959f;font-size:10.5px;">' + escapeHtml(a.adminType) + '</div>' : '')) +
           (a.environment ? '<div style="color:#57606a;font-size:10.5px;">' + escapeHtml(a.environment) + '</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctDeptCell">' + acctSponsorDeptCell(a) + '</td>' +
         '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + (a.deletePending
@@ -3978,6 +4080,18 @@
             ? '<div class="acctDeletedNote" style="font-size:11.5px;color:#57606a;">Deleted in Entra ID. Entra keeps it restorable for 30 days (Entra admin center &rsaquo; Deleted users). PIM keeps this row so the account is not created again.</div></div></td></tr>'
             : '') +
           (String(a.accountStatus || '').toLowerCase() === 'deleted' ? '' :
+          // 101.5 (e) (owner 2026-11-16, calmer rows): Give access and Enable / Disable stay on the row; every other verb
+          // sits in the row's Actions menu (the destructive ones keep their red / orange inside it). The buttons, their
+          // classes and their handlers are the same as before -- only where they are drawn changed.
+          '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
+            ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button> ' +
+          // Operator 2026-10-05: Enable / Disable here and in the selection bar; Disable & remove delegations keeps the
+          // account (disabled) and takes all its delegations away. All three STAGE into Pending changes -- a disable is
+          // held for the offboard approval on commit like every disable (BUG-190), unless self-approval is on.
+          (/^(disabled|removed)$/.test(String(a.accountStatus || 'Enabled').toLowerCase())
+            ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself.' : 'Enable the account again (staged in Pending changes).') + '" style="font-size:11px;">Enable</button> '
+            : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself -- remove its delegations instead.' : 'Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval).') + '" style="font-size:11px;">Disable</button> ') +
+          '<details class="acct-more"><summary class="btn-sec acct-more-btn" title="More actions for this admin">Actions</summary><div class="acct-more-menu">' +
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
             (a.resetTapWhy ? ' title="' + escapeHtml(a.resetTapWhy) + '"' : '') + ' style="font-size:11px;">Reset TAP</button> ' +
           '<button class="btn-sec acctRevoke" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canRevokeSessions) +
@@ -3994,14 +4108,8 @@
           // wrong place, it must be per user in the top"). It was on the TAP table below, which is
           // a different, TAP-only list -- so the one place an operator manages an admin did not
           // include the verb that changes the admin.
-          // Operator 2026-10-05: Enable / Disable here and in the selection bar; Disable & remove delegations keeps the
-          // account (disabled) and takes all its delegations away. All three STAGE into Pending changes -- a disable is
-          // held for the offboard approval on commit like every disable (BUG-190), unless self-approval is on.
-          (/^(disabled|removed)$/.test(String(a.accountStatus || 'Enabled').toLowerCase())
-            ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself.' : 'Enable the account again (staged in Pending changes).') + '" style="font-size:11px;">Enable</button> '
-            : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly && !a.accountVerbsLocked) + ' title="' + (a.accountVerbsLocked ? 'Existing account (office user): PIM never enables or disables the account itself -- remove its delegations instead.' : 'Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval).') + '" style="font-size:11px;">Disable</button> ') +
           '<button class="btn-sec acctDisableStrip" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
-            ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;">Disable &amp; remove delegations</button> ' +
+            ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;color:#bc4c00;">Disable &amp; remove delegations</button> ' +
           // §96.5 D1 (b): Remove from PIM -- every delegation removed, the account DISABLED and KEPT, the admin out of the active list.
           (String(a.accountStatus || '').toLowerCase() === 'removed' ? '' :
           '<button class="btn-sec acctRemoveFromPim" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
@@ -4015,9 +4123,8 @@
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
           '<button class="btn-sec acctEditTop" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (a.readOnly ? ' disabled' : '') +
-            ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the managing tenant' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to managed tenants.') + '" style="font-size:11px;">Edit</button> ' +
-          '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
-            ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
+            ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the managing tenant' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to managed tenants.') + '" style="font-size:11px;">Edit</button>' +
+          '</div></details>' +
         '</div></td></tr>') +
         // The inline editor for THIS admin, collapsed until Edit is pressed.
         '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 11 : 10) + '" style="background:#f6f8fa;padding:10px 12px;">' +
@@ -4051,6 +4158,14 @@
     const cOpts = (companyOptions(function () { const c = document.getElementById('acctGridWrap'); if (c) renderAccountGrid(c); }) || []).map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('');
     return '<div id="acctBulk" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:12px;">' +
       '<b>' + n + ' selected</b>' +
+      // 101.5 (d): the everyday verbs first -- each goes through the SAME per-account path as the row's own button.
+      '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
+      '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
+      '<button class="btn-sec" id="acctBulkDisableStrip" style="color:#bc4c00;">Disable &amp; remove delegations</button>' +
+      '<button class="btn-sec" id="acctBulkTap">Reset TAP</button>' +
+      '<button class="btn-sec" id="acctBulkRevoke">Revoke sessions</button>' +
+      '<button class="btn-sec" id="acctBulkAccess" title="Opens the delegation wizard with the selected admins named; you place them into the group on its membership step.">Give access</button>' +
+      '<button class="btn-sec" id="acctBulkExport" title="An Excel workbook of the selected admins (the same columns as the page export).">Export</button>' +
       '<span>Department (internal) <select id="acctBulkDept"><option value="">(none -- unlink)</option>' + dOpts + '</select> <button class="btn-sec" id="acctBulkDeptGo">Link</button></span>' +
       '<span>Company <select id="acctBulkCo"><option value="">(none -- unlink)</option>' + cOpts + '</select> <button class="btn-sec" id="acctBulkCoGo">Link</button></span>' +
       // Operator 2026-10-06 ("this auto-extend is confusing ... what is what here"): BOTH controls change the ACCOUNT's
@@ -4061,11 +4176,6 @@
         '<b>Account auto-disable date:</b> push out by <input id="acctBulkExtN" type="number" min="1" max="999" value="3" style="width:56px;"> <select id="acctBulkExtU"><option value="m">months</option><option value="d">days</option></select> <button class="btn-sec" id="acctBulkExtGo">Push out</button>' +
         ' <span style="color:#57606a;">or set it to</span> <input id="acctBulkDate" type="date"> <button class="btn-sec" id="acctBulkDateGo">Set date</button>' +
         ' <span style="color:#57606a;font-size:11px;">(the account, not its delegations)</span></span>' +
-      '<button class="btn-sec" id="acctBulkTap">Reset TAP</button>' +
-      '<button class="btn-sec" id="acctBulkRevoke">Revoke sessions</button>' +
-      '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
-      '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
-      '<button class="btn-sec" id="acctBulkDisableStrip">Disable &amp; remove delegations</button>' +
       '<button class="btn-sec" id="acctBulkRemoveFromPim" style="color:#bc4c00;" title="Every delegation removed; each account DISABLED and KEPT in Entra ID; the admins leave this list (a second administrator approves only for a high-privilege or break-glass admin, or with maker-checker on).">Remove from PIM</button>' +
       ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') ? '<button class="btn-sec" id="acctBulkDelete" style="color:#cf222e;border-color:#cf222e;">Delete account(s)</button>' : '') +
       '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
@@ -4108,38 +4218,72 @@
       try { await renderAccounts(); } catch (_) { }
     };
     const on = function (id, fn) { const el = document.getElementById(id); if (el) el.onclick = fn; };
-    on('acctBulkDeptGo', function () { const v = document.getElementById('acctBulkDept').value; if (!confirm((v ? 'Link ' + acctGridState.sel.size + ' account(s) to the department (internal) "' + v + '"?' : 'Unlink ' + acctGridState.sel.size + ' account(s) from their department?') + '\n\nThe department owners approve and receive the mail for these admins.')) return; each('Department', () => ({ department: v })); });
-    on('acctBulkCoGo', function () { const v = document.getElementById('acctBulkCo').value; if (!confirm(v ? 'Link ' + acctGridState.sel.size + ' account(s) to the company "' + v + '"?' : 'Unlink ' + acctGridState.sel.size + ' account(s) from their company?')) return; each('Company', () => ({ company: v })); });
-    on('acctBulkExtGo', function () {
+    const n0 = function () { return acctGridState.sel.size; };
+    on('acctBulkDeptGo', async function () { const v = document.getElementById('acctBulkDept').value; if (!(await acctBulkConfirm(v ? 'Link to department ' + v : 'Unlink from department', (v ? 'Link ' + n0() + ' account(s) to the department (internal) "' + v + '"?' : 'Unlink ' + n0() + ' account(s) from their department?') + ' The department owners approve and receive the mail for these admins.', Array.from(acctGridState.sel), v ? 'Link' : 'Unlink'))) return; each('Department', () => ({ department: v })); });
+    on('acctBulkCoGo', async function () { const v = document.getElementById('acctBulkCo').value; if (!(await acctBulkConfirm(v ? 'Link to company ' + v : 'Unlink from company', v ? 'Link ' + n0() + ' account(s) to the company "' + v + '"?' : 'Unlink ' + n0() + ' account(s) from their company?', Array.from(acctGridState.sel), v ? 'Link' : 'Unlink'))) return; each('Company', () => ({ company: v })); });
+    on('acctBulkExtGo', async function () {
       const n = parseInt(document.getElementById('acctBulkExtN').value, 10), u = document.getElementById('acctBulkExtU').value;
       if (!(n >= 1 && n <= 999)) { msg('Enter a whole number from 1 to 999.', true); return; }
       const without = Array.from(acctGridState.sel).filter(x => !/^\d{4}-\d{2}-\d{2}/.test(String((rowsByUpn[x] || {}).autoDisableDate || ''))).length;
-      if (!confirm('Push out the ACCOUNT auto-disable date of ' + acctGridState.sel.size + ' account(s) by ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + '?\n\nThis is the day each account is disabled and loses its PIM access -- not a delegation\'s expiry.\nEach counts from its current date (or today when that is earlier).' + (without ? '\n\n' + without + ' of them have NO date yet (or a date expression): they GET one, ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + ' from today.' : ''))) return;
+      if (!(await acctBulkConfirm('Push out the auto-disable date', 'Push out the ACCOUNT auto-disable date of ' + n0() + ' account(s) by ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + '? This is the day each account is disabled and loses its PIM access -- not a delegation\'s expiry. Each counts from its current date (or today when that is earlier).' + (without ? ' ' + without + ' of them have no date yet (or a date expression): they get one, ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + ' from today.' : ''), Array.from(acctGridState.sel), 'Push out'))) return;
       each('Extend auto-disable', a => ({ autoDisableDate: acctExtendDate(a.autoDisableDate, n, u) }));
     });
-    on('acctBulkDateGo', function () {
+    on('acctBulkDateGo', async function () {
       const v = document.getElementById('acctBulkDate').value;
       if (!v) { msg('Pick a date first.', true); return; }
-      if (!confirm('Set the auto-disable date of ' + acctGridState.sel.size + ' account(s) to ' + v + '?\n\nOn that date each account is disabled, its sessions revoked and its PIM access removed. A date today or earlier is held for an approval.')) return;
+      if (!(await acctBulkConfirm('Set the auto-disable date', 'Set the auto-disable date of ' + n0() + ' account(s) to ' + v + '? On that date each account is disabled, its sessions revoked and its PIM access removed. A date today or earlier is held for an approval.', Array.from(acctGridState.sel), 'Set date'))) return;
       each('Auto-disable date', () => ({ autoDisableDate: v }));
     });
+    // 101.5 (d): a row the per-row button refuses (its can... flag from the server) is left out of the bulk action too,
+    // and the message says how many and why -- a bulk action never does what the row's own button would not.
     const actions = async function (kind) {
-      const upns = Array.from(acctGridState.sel);
-      if (!confirm('Queue ' + (kind === 'tap' ? 'a new Temporary Access Pass' : 'a revoke of ALL sign-in sessions (the accounts stay enabled)') + ' for ' + upns.length + ' account(s)?\n\nNothing happens until the queue is committed on Pending changes.')) return;
+      const all = Array.from(acctGridState.sel);
+      const can = u => { const a = rowsByUpn[u] || {}; return kind === 'tap' ? !!a.canResetTap : !!a.canRevokeSessions; };
+      const upns = all.filter(can), skipped = all.filter(u => !can(u));
+      if (!upns.length) { msg('None of the selected accounts can ' + (kind === 'tap' ? 'get a new TAP' : 'have its sessions revoked') + ' (the row button says why).', true); return; }
+      if (!(await acctBulkConfirm(kind === 'tap' ? 'Reset TAP' : 'Revoke sessions', 'Queue ' + (kind === 'tap' ? 'a new Temporary Access Pass' : 'a revoke of all sign-in sessions (the accounts stay enabled)') + ' for ' + upns.length + ' account(s)? Nothing happens until the queue is committed on Pending changes.' + (skipped.length ? ' ' + skipped.length + ' selected account(s) are left out: their own button is off.' : ''), upns, kind === 'tap' ? 'Queue TAP reset' : 'Queue revoke'))) return;
       let ok = 0; const bad = [];
       for (const u of upns) { try { await api('POST', kind === 'tap' ? '/api/admin-tap/reset' : '/api/admin-sessions/revoke', { userPrincipalName: u }); ok++; } catch (e) { bad.push(u + ': ' + (e.message || e)); } }
       try { refreshQueueBadge(); } catch (_) { }
-      msg((kind === 'tap' ? 'TAP reset' : 'Session revoke') + ' QUEUED for ' + ok + ' of ' + upns.length + ' -- NOT yet in effect: commit the queue on Pending changes.' + (bad.length ? ' Refused: ' + bad.slice(0, 5).join('; ') : ''), bad.length > 0);
+      msg((kind === 'tap' ? 'TAP reset' : 'Session revoke') + ' queued for ' + ok + ' of ' + upns.length + ' -- not yet in effect: commit the queue on Pending changes.' + (skipped.length ? ' Left out: ' + skipped.length + '.' : '') + (bad.length ? ' Refused: ' + bad.slice(0, 5).join('; ') : ''), bad.length > 0);
     };
     on('acctBulkTap', function () { actions('tap'); });
     on('acctBulkRevoke', function () { actions('sessions'); });
     on('acctBulkClear', function () { acctGridState.sel.clear(); rerender(); });
-    const selIds = function () { return Array.from(acctGridState.sel).map(u => ({ upn: u, userName: String((rowsByUpn[u] || {}).userName || '') })); };
-    on('acctBulkEnable', function () { acctStageStatus(selIds(), 'Enabled', false); });
-    on('acctBulkDisable', function () { acctStageStatus(selIds(), 'Disabled', false); });
+    const selIds = function (keep) { return Array.from(acctGridState.sel).filter(u => !keep || keep(rowsByUpn[u] || {})).map(u => ({ upn: u, userName: String((rowsByUpn[u] || {}).userName || '') })); };
+    // the same rule as the row: Enable / Disable are off for an office user (PIM never enables or disables that account)
+    const statusIds = function (verb) {
+      const ids = selIds(a => !a.accountVerbsLocked && !a.readOnly);
+      const left = acctGridState.sel.size - ids.length;
+      if (left) msg(verb + ': ' + left + ' selected office user(s) or read-only admin(s) left out -- PIM never ' + (verb === 'Enable' ? 'enables' : 'disables') + ' those accounts.', false);
+      return ids;
+    };
+    on('acctBulkEnable', function () { acctStageStatus(statusIds('Enable'), 'Enabled', false); });
+    on('acctBulkDisable', function () { acctStageStatus(statusIds('Disable'), 'Disabled', false); });
     on('acctBulkDisableStrip', function () { acctStageStatus(selIds(), 'Disabled', true); });
-    on('acctBulkDelete', function () { acctStageDelete(selIds()); });
-    on('acctBulkRemoveFromPim', function () { acctStageRemoveFromPim(selIds()); });
+    on('acctBulkDelete', function () { acctStageDelete(selIds(a => !a.accountVerbsLocked && !a.readOnly && acctFacets(a).platform !== 'ad')); });
+    on('acctBulkRemoveFromPim', function () { acctStageRemoveFromPim(selIds()); });   // read-only rows cannot be ticked
+    // 101.5 (d) Give access: the row's own jump (PIM_WIZARD_PREFILL + the delegation wizard), with every selected admin named.
+    on('acctBulkAccess', async function () {
+      const upns = Array.from(acctGridState.sel).filter(u => { const a = rowsByUpn[u] || {}; return !(a.accessLocked || (a.readOnly && a.source !== 'central')); });
+      if (!upns.length) { msg('None of the selected accounts can be given access here.', true); return; }
+      if (!(await acctBulkConfirm('Give access', 'Open the delegation wizard for ' + upns.length + ' admin(s)? You place them into the group on its membership step; nothing is written until you commit under Pending changes.', upns, 'Open the wizard'))) return;
+      try { window.PIM_WIZARD_PREFILL = { admin: upns.join(', ') }; } catch (_) { }
+      wizardResourceDelegation();
+    });
+    // 101.5 (d) Export: the page's own export (POST /api/export, audited), limited to the selected rows.
+    on('acctBulkExport', async function () {
+      PIM_ACCT_EXPORT.only = new Set(acctGridState.sel);
+      try { await pimExportDownload('xlsx'); } finally { PIM_ACCT_EXPORT.only = null; }
+    });
+  }
+  // 101.5 (d): the bulk confirm -- the count and the accounts it acts on, in the page's own dialog (pimConfirm).
+  function acctBulkConfirm(title, line, upns, okLabel, danger) {
+    upns = upns || [];
+    const shown = upns.slice(0, 15);
+    return pimConfirm({ title: title + ' (' + upns.length + ')', body: line,
+      note: 'Accounts: ' + shown.join(', ') + (upns.length > shown.length ? ' and ' + (upns.length - shown.length) + ' more' : ''),
+      okLabel: okLabel || 'OK', danger: !!danger });
   }
 
   // 🔴 THE ADMIN EDITOR WAS SIX IDENTICAL TEXT BOXES (operator, 2026-09-12: "where is the field to
@@ -4555,16 +4699,19 @@
   //   * a row carrying BOTH names with different dates -- which the engine refuses outright, and
   //     which would otherwise look exactly like a normal scheduled date.
   // 100.67: Admin accounts & TAP export -- the accounts table (as filtered) and the Temporary Access Pass table.
-  const PIM_ACCT_EXPORT = { grid: null, tap: null };
+  // only: 101.5 (d) the bulk Export -- a Set of the selected UPNs while that export runs (then only those rows, no TAP table).
+  const PIM_ACCT_EXPORT = { grid: null, tap: null, only: null };
   function pimRegisterAccountsExport() {
     pimExportSet('accounts', 'Admin accounts & TAP', () => {
       const out = [];
-      if (Array.isArray(PIM_ACCT_EXPORT.grid)) out.push(pimExportRows('Admin accounts', [
+      const only = PIM_ACCT_EXPORT.only;
+      const gridRows = Array.isArray(PIM_ACCT_EXPORT.grid) ? (only ? PIM_ACCT_EXPORT.grid.filter(a => only.has(a.userPrincipalName)) : PIM_ACCT_EXPORT.grid) : null;
+      if (gridRows) out.push(pimExportRows(only ? 'Admin accounts (selected)' : 'Admin accounts', [
         ['Admin', a => a.displayName || a.userName || a.userPrincipalName || ''], ['UPN', 'userPrincipalName'], ['Type', 'adminType'], ['Environment', 'environment'],
-        ['Department (internal)', 'department'], ['Status', a => (a.accountStatus || 'Enabled') + (a.alreadyFlagged ? ' (marked for manual removal)' : '')],
+        ['Company', 'company'], ['Department (internal)', 'department'], ['Status', a => (a.accountStatus || 'Enabled') + (a.alreadyFlagged ? ' (marked for manual removal)' : '')],
         ['Auto-disable', a => a.autoDisableDate || a.offboardDate || ''], ['TAP', a => a.createTAP ? 'enforced' : 'n/a (AD only)'],
-        ['Mail forward', a => a.forwardMailsToContact ? (a.mailForwardAddress || 'on -- no address') : 'off']], PIM_ACCT_EXPORT.grid));
-      if (Array.isArray(PIM_ACCT_EXPORT.tap)) out.push(pimExportRows('Temporary Access Pass', [
+        ['Mail forward', a => a.forwardMailsToContact ? (a.mailForwardAddress || 'on -- no address') : 'off']], gridRows));
+      if (!only && Array.isArray(PIM_ACCT_EXPORT.tap)) out.push(pimExportRows('Temporary Access Pass', [
         ['Admin', a => a.displayName || a.userPrincipalName || ''], ['UPN', 'userPrincipalName'], ['TAP status', 'status'], ['Detail', 'detail'],
         ['Created', a => a.createdDateTime ? fmtTime(a.createdDateTime) : ''], ['Sends to', 'managerEmail'], ['Lifetime (h)', 'tapLifetimeHours']], PIM_ACCT_EXPORT.tap));
       return out;
@@ -4703,12 +4850,15 @@
         if (res.ok) { row.hidden = true; renderAccounts(); }
       };
     });
-    const fi = document.getElementById('acctFilter');
-    if (fi) {
-      fi.oninput = () => { acctGridState.filter = fi.value; renderAccountGrid(container).then(() => {
-        const f2 = document.getElementById('acctFilter'); if (f2) { f2.focus(); f2.setSelectionRange(f2.value.length, f2.value.length); }
-      }); };
-    }
+    // 101.5 (a): no page search box any more -- the list menu's "Search every text column" is the one search.
+    // 101.5 (b): Hide office users (on by default, remembered per browser).
+    const ho = document.getElementById('acctHideOffice');
+    if (ho) ho.onchange = () => { acctHideOfficeSave(!!ho.checked); renderAccountGrid(container); };
+    // 101.5 (e): one row's Actions menu open at a time; a verb chosen from it closes it.
+    container.querySelectorAll('details.acct-more').forEach(dt => {
+      dt.addEventListener('toggle', () => { if (dt.open) container.querySelectorAll('details.acct-more[open]').forEach(o => { if (o !== dt) o.open = false; }); });
+      dt.querySelectorAll('.acct-more-menu > button').forEach(b => b.addEventListener('click', () => { dt.open = false; }));
+    });
     // 100.29: a chip toggles its value in its group (remembered per browser); Clear filters drops chips + text.
     container.querySelectorAll('.acct-fchip').forEach(b => {
       b.onclick = () => {
@@ -25290,7 +25440,10 @@
     // status '' = remove the delegations only; the account keeps its status (operator 2026-10-06, the delegations table).
     const verb = !status ? 'Remove all delegations' : status === 'Deleted' ? 'Delete account' : status === 'Removed' ? 'Remove from PIM' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
     const offb = (status === 'Disabled' || status === 'Deleted' || status === 'Removed');
-    const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p><ul>' +
+    // 101.5 (d): a bulk change names the accounts it acts on before anything else (the first 15, then "and N more").
+    const listed = ids.length > 1 ? '<p class="acctBulkWho" style="color:#57606a;font-size:12px;">' + ids.slice(0, 15).map(x => escapeHtml(x.upn)).join(', ') +
+      (ids.length > 15 ? ' and ' + (ids.length - 15) + ' more' : '') + '</p>' : '';
+    const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p>' + listed + '<ul>' +
       (status ? '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' : '') +
       (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li>' +
         (status === 'Deleted' ? '<li><b style="color:#cf222e;">The account is DELETED in Entra ID</b> by the engine after you commit -- your delete is the approval (restorable for 30 days under Entra Deleted users).</li>'
@@ -38538,7 +38691,7 @@
   //   * Every change -- create, pause, resume, a policy change, retire -- is STAGED in Pending changes; the audited commit writes it.
   //   * Calm: one line per state, the reason behind More info; no number or dot on the menu entry.
   // ===================================================================
-  const AP_STATE = { data: null, loading: null, open: '', creating: false, editing: '', err: '' };
+  const AP_STATE = { data: null, loading: null, open: '', creating: false, editing: '', err: '', filter: null };
   const AP_STATE_TEXT = { active: 'Active', waiting: 'Waiting for its new groups', paused: 'Paused', off: 'Switched off', pending: 'Waiting for the next engine run', retiring: 'Being retired' };
   const AP_GROUP_TYPES = [['department', 'Department'], ['role', 'Role'], ['organisation', 'Organisation'], ['project', 'Project'], ['crossorg', 'Cross-org']];
   function apIsLockedGroup(n) {
@@ -38599,6 +38752,13 @@
     if (!pk.length) {
       h += '<div class="empty" style="color:#57606a;font-size:12.5px;">No access package yet.' + (d.canWrite ? ' Create one above.' : '') + '</div>';
     } else {
+      // AP-FILTER (owner 2026-11-16: "where do i filter on access packages"): one text box above the table narrows the rows by
+      // package name, description or group name; remembered per viewer in localStorage 'pim.ap.filter'.
+      if (AP_STATE.filter == null) { let f = ''; try { f = String(localStorage.getItem('pim.ap.filter') || ''); } catch (_) { f = ''; } AP_STATE.filter = f.slice(0, 200); }
+      h += '<div class="ap-filter-bar" style="margin:4px 0 6px;display:flex;align-items:center;gap:6px;max-width:1100px;">' +
+        '<input type="text" id="apFilter" class="map-col-text" style="width:22em;" autocomplete="off" placeholder="Filter packages (name, description or group)..." aria-label="Filter packages" title="Show only the packages whose name, description or group name contains this text. Esc clears it." value="' + escapeHtml(AP_STATE.filter) + '">' +
+        '<button type="button" id="apFilterX" class="map-col-text-x" title="Clear the filter" aria-label="Clear the filter">&times;</button>' +
+        '<span id="apFilterN" class="map-col-text-n"></span></div>';
       h += '<table class="set-table" id="apTable" style="width:100%;max-width:1100px;font-size:12.5px;"><thead><tr><th>Package</th><th>Its new groups</th><th>Approval / access ends</th><th>State</th></tr></thead><tbody>';
       for (const p of pk) {
         const groups = (p.groups || []).map(g => escapeHtml(g.name || g.tag)).join('<br>');
@@ -38617,6 +38777,37 @@
     host.querySelectorAll('[data-ap-act]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); apAction(b.dataset.apAct, b.dataset.apName); });
     const ef = document.getElementById('apEditForm');
     if (ef) ef.onsubmit = (ev) => { ev.preventDefault(); apSaveEdit(ef); };
+    const ff = document.getElementById('apFilter'), fx = document.getElementById('apFilterX');
+    if (ff) {
+      ff.oninput = () => apSetFilter(host, ff.value);
+      ff.onkeydown = (ev) => { if (ev.key !== 'Escape') return; ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); ff.value = ''; apSetFilter(host, ''); };
+      if (fx) fx.onclick = () => { ff.value = ''; apSetFilter(host, ''); try { ff.focus(); } catch (_) { } };
+      apApplyFilter(host);
+    }
+  }
+  function apSetFilter(host, v) {
+    AP_STATE.filter = String(v || '').slice(0, 200);
+    try { if (AP_STATE.filter.trim()) localStorage.setItem('pim.ap.filter', AP_STATE.filter); else localStorage.removeItem('pim.ap.filter'); } catch (_) { }
+    apApplyFilter(host);
+  }
+  // A row passes when the text is in its name, description, or one of its groups (name or tag), case-insensitive. The open
+  // detail row follows its package row.
+  function apApplyFilter(host) {
+    const raw = String(AP_STATE.filter || ''), q = raw.trim().toLowerCase();
+    const pk = (AP_STATE.data && AP_STATE.data.packages) || [];
+    let total = 0, shown = 0;
+    host.querySelectorAll('#apTable tr.ap-row').forEach(tr => {
+      const p = pk.find(x => String(x.name) === tr.dataset.ap);
+      const hay = p ? [p.name, p.description].concat((p.groups || []).map(g => g.name), (p.groups || []).map(g => g.tag)) : [tr.dataset.ap];
+      const hit = !q || hay.some(v => v != null && String(v).toLowerCase().includes(q));
+      tr.style.display = hit ? '' : 'none';
+      const nx = tr.nextElementSibling;
+      if (nx && nx.classList.contains('ap-detail-row')) nx.style.display = hit ? '' : 'none';
+      total++; if (hit) shown++;
+    });
+    const fx = document.getElementById('apFilterX'); if (fx) fx.style.display = raw ? '' : 'none';
+    const n = document.getElementById('apFilterN');
+    if (n) n.textContent = q ? (shown ? shown + ' of ' + total : 'No package matches this filter.') : '';
   }
   function apDetailHtml(p, d) {
     let h = '<div class="ap-detail" style="padding:6px 4px;">';
@@ -38981,10 +39172,11 @@
   // crawled). Purely a read of the backend-stamped reconStatus -- the engine
   // remains the writer; the GUI only surfaces what the crawl found.
   const MAP_RECON = {
-    mapped:   { icon: '✓', color: '#1a7f37', label: 'Mapped' },
-    missing:  { icon: '⚠', color: '#cf222e', label: 'Missing (not live)' },
-    exempted: { icon: '⊘', color: '#9a6700', label: 'Exempted' },
-    unknown:  { icon: '—', color: '#57606a', label: 'Not yet crawled' }
+    // Plain words (owner 2026-11-16, on the old "Workload recon" wording: "people dont understand this").
+    mapped:   { icon: '✓', color: '#1a7f37', label: 'In place' },
+    missing:  { icon: '⚠', color: '#cf222e', label: 'Missing (not in place yet)' },
+    exempted: { icon: '⊘', color: '#9a6700', label: 'Left out (exempted)' },
+    unknown:  { icon: '—', color: '#57606a', label: 'Not read yet' }
   };
   function mapStampReconBadge(el, n) {
     const r = MAP_RECON[String(n.reconStatus)] || MAP_RECON.unknown;
@@ -38994,7 +39186,7 @@
     b.style.color = r.color;
     let tip = r.label;
     if (n.reconReason) tip += ' — ' + n.reconReason;
-    if (n.reconCrawledUtc) tip += ' (crawled ' + fmtTime(n.reconCrawledUtc) + ')';
+    if (n.reconCrawledUtc) tip += ' (last read ' + fmtTime(n.reconCrawledUtc) + ')';
     b.title = tip;
     const cnt = el.querySelector('.map-count');
     if (cnt) el.insertBefore(b, cnt); else el.appendChild(b);
@@ -39125,7 +39317,8 @@
     board.classList.toggle('drag-mode', !!from);
     board.querySelectorAll('.map-item').forEach(el => {
       const t = m && m.byId[el.dataset.id];
-      const ok = !!(from && t && t.id !== from.id && mapPairMode(from.kind, t.kind));
+      // MAP-COLTEXT: a box the column's text filter hides is no drop target.
+      const ok = !!(from && t && t.id !== from.id && mapPairMode(from.kind, t.kind)) && !mapTfHidden(el);
       el.classList.toggle('drop-ok', ok);
       if (!ok) el.classList.remove('drop-hot');
     });
@@ -39140,7 +39333,7 @@
     };
     el.ondragend = () => { MAP.drag = null; mapDragMark(null); };
     el.ondragover = (ev) => {
-      if (!MAP.drag || !el.classList.contains('drop-ok')) return;
+      if (!MAP.drag || !el.classList.contains('drop-ok') || mapTfHidden(el)) return;
       if (ev.preventDefault) ev.preventDefault();          // preventDefault = "this box accepts it"
       try { ev.dataTransfer.dropEffect = 'link'; } catch (_) { }
       el.classList.add('drop-hot');
@@ -39151,7 +39344,7 @@
       let src = MAP.drag;
       if (!src) { try { src = ev.dataTransfer.getData('text/plain'); } catch (_) { src = null; } }
       MAP.drag = null; mapDragMark(null);
-      if (!src || src === n.id) return;
+      if (!src || src === n.id || mapTfHidden(el)) return;
       const res = await mapStageLink(src, n.id);
       // 🔴 THE DROP DID NOT REDRAW THE BOARD (operator: "i dont see it colors when i drag drop" /
       // "it should keep it when staged"). Ctrl+click went through mapCtrlLink, which re-renders;
@@ -39210,11 +39403,9 @@
       if (c >= 0) cols[c].push(n);
     }
     for (const c of cols) c.sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
-    // §70.22 (operator 2026-09-14: "nothing happens here, if empty why show it"): Workload recon compares desired
-    // WORKLOAD role bindings (Defender XDR / Intune / Power BI ...) with the live crawl. With no workload bindings it can
-    // only say "PIM-Assignments-Workloads is empty", so the button is shown only when the board has workload targets.
-    const wlBtnVis = document.getElementById('mapWorkloadRecon');
-    if (wlBtnVis) wlBtnVis.style.display = cols[3].some(n => n.kind === 'workload-target') ? '' : 'none';
+    // MAP-WLBTN-GONE (owner 2026-11-16: "honestly i dont think that button adds any value"): the toolbar's workload check
+    // button and its result panel are removed. Each workload box still carries its own status badge (in place / missing /
+    // left out), which says the same thing where you look.
 
     // col 0: admins (dot color: Purpose -- HighPriv red / Day2Day blue;
     // legacy tier fallback for not-yet-upgraded CSVs)
@@ -39485,6 +39676,7 @@
       const sEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.source) + '"]');
       const tEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.target) + '"]');
       if (!sEl || !tEl) continue;
+      if (mapTfHidden(sEl) || mapTfHidden(tEl)) continue;   // MAP-COLTEXT: no wire to a box the column filter hides
       const sR = sEl.getBoundingClientRect(), tR = tEl.getBoundingClientRect();
       // skip wires to items scrolled out of their column
       const sCol = sEl.closest('.map-col-body').getBoundingClientRect();
@@ -40193,9 +40385,9 @@
         const c = { mapped: 0, missing: 0, exempted: 0, unknown: 0 };
         for (const t of groups[k]) { const s = String(t.reconStatus || 'unknown'); if (c[s] != null) c[s]++; else c.unknown++; }
         const parts = [];
-        if (c.mapped)   parts.push(c.mapped + ' mapped');
+        if (c.mapped)   parts.push(c.mapped + ' in place');
         if (c.missing)  parts.push(c.missing + ' missing');
-        if (c.exempted) parts.push(c.exempted + ' exempted');
+        if (c.exempted) parts.push(c.exempted + ' left out (exempted)');
         if (parts.length) summ = ' <span class="pt-recon-summary" style="color:#57606a;font-weight:400;">[' + parts.join(', ') + ']</span>';
       }
       // IMP-18. COLLAPSED BY DEFAULT. Selecting one role group rendered ~42 chips filling a
@@ -40507,46 +40699,6 @@
     document.getElementById('mapRiskToggle').classList.toggle('on', MAP.riskOn);
     mapApplyRisk();
   };
-  // Workload reconciliation: pull the desired-vs-live-crawl summary (engine is
-  // the writer; this reads /api/workload-recon) and show it in the map detail
-  // panel. Admins can trigger a fresh crawl sweep (POST /api/workload-crawl) --
-  // the engine performs the crawl + persists the cache; the page then reloads so
-  // the workload-target chips re-badge from the refreshed baked data.
-  const mapWlBtn = document.getElementById('mapWorkloadRecon');
-  if (mapWlBtn) mapWlBtn.onclick = async () => {
-    const d = document.getElementById('mapDetail');
-    let s = null;
-    try { const r = await api('GET', '/api/workload-recon'); s = r && r.summary; }
-    catch (e) { if (d) d.innerHTML = '<span style="color:#cf222e">Workload recon unavailable: ' + escapeHtml(e && e.message ? e.message : 'error') + '</span>'; return; }
-    if (!s || !s.total) {
-      if (d) d.innerHTML = '<span style="color:#57606a">No desired workload role bindings (PIM-Assignments-Workloads is empty).</span>';
-      return;
-    }
-    const crawled = s.crawledUtc ? (' &middot; crawled ' + escapeHtml(fmtTime(s.crawledUtc))) : ' &middot; <i>not yet crawled</i>';
-    let html = '<b>Workload reconciliation</b> &mdash; ' + s.total + ' desired binding(s): ' +
-      '<span style="color:#1a7f37">&#10003; ' + (s.mapped || 0) + ' mapped</span>, ' +
-      '<span style="color:#cf222e">&#9888; ' + (s.missing || 0) + ' missing</span>, ' +
-      '<span style="color:#9a6700">&#8856; ' + (s.exempted || 0) + ' exempted</span>' +
-      ((s.unknown || 0) ? ', <span style="color:#57606a">&mdash; ' + s.unknown + ' not yet crawled</span>' : '') +
-      crawled;
-    if (isServer && roleAtLeast('Admin')) {
-      html += ' &nbsp;<button id="mapWlCrawl" class="ghost">&#x21bb; Re-crawl now</button>';
-    }
-    if (d) d.innerHTML = html;
-    const cb = document.getElementById('mapWlCrawl');
-    if (cb) cb.onclick = async () => {
-      cb.disabled = true; cb.textContent = 'Crawling...';
-      try {
-        const r = await api('POST', '/api/workload-crawl');
-        cb.textContent = 'Crawled ' + (r && r.crawledUtc ? fmtTime(r.crawledUtc) : '');
-        // Reload so the freshly-crawled recon status bakes into PIM_DATA chips.
-        setTimeout(() => { location.reload(); }, 700);
-      } catch (e) {
-        cb.disabled = false; cb.textContent = '↻ Re-crawl now';
-        alert('Crawl failed: ' + (e && e.message ? e.message : 'error'));
-      }
-    };
-  };
   (document.getElementById('mapClear') || {}).onclick = () => { mapClearSel(); };
   (document.getElementById('mapFocusToggle') || {}).onclick = () => {
     MAP.focusMode = (MAP.focusMode === false);   // toggle; default true
@@ -40587,10 +40739,64 @@
       };
       const bar = document.createElement('div');
       bar.className = 'map-col-tools';
+      // MAP-COLTEXT (owner 2026-11-16: "an easy way to filter the dropdown to specific group or role, so they can do easy
+      // drag drop"): a text box LEFT of the select. It narrows only this column; the find box above collapses the board.
+      const tx = mapColTextState();
+      const n = document.createElement('span');
+      n.className = 'map-col-text-n'; n.dataset.col = String(i);
+      const t = document.createElement('input');
+      t.type = 'text'; t.className = 'map-col-text'; t.dataset.col = String(i);
+      t.placeholder = 'Filter this column (name or type)...'; t.autocomplete = 'off'; t.spellcheck = false;
+      t.title = 'Show only the boxes in this column whose name contains this text. The other columns stay as they are, so you can drag onto what is left. Esc clears it.';
+      t.setAttribute('aria-label', 'Filter this column');
+      t.value = tx[i] || '';
+      const x = document.createElement('button');
+      x.type = 'button'; x.className = 'map-col-text-x'; x.dataset.col = String(i);
+      x.textContent = '×'; x.title = 'Clear this column’s filter'; x.setAttribute('aria-label', 'Clear this column’s filter');
+      x.style.display = t.value ? '' : 'none';
+      t.onclick = (ev) => ev.stopPropagation();
+      t.oninput = () => mapSetColText(i, t.value);
+      t.onkeydown = (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault();
+        t.value = ''; mapSetColText(i, '');
+      };
+      x.onclick = (ev) => { if (ev) ev.stopPropagation(); t.value = ''; mapSetColText(i, ''); try { t.focus(); } catch (_) { } };
+      bar.appendChild(n);
+      bar.appendChild(t);
+      bar.appendChild(x);
       bar.appendChild(s);
       h.insertAdjacentElement('afterend', bar);
     });
   }
+  // MAP-COLTEXT: one text per column, remembered per viewer in localStorage 'pim.map.colText' ({"<col>": "<text>"}); an
+  // empty box is dropped from it, and the key goes when every box is empty.
+  function mapColTextState() {
+    if (!MAP.colText) {
+      let s = null; try { s = JSON.parse(localStorage.getItem('pim.map.colText') || 'null'); } catch (_) { s = null; }
+      MAP.colText = [0, 1, 2, 3].map(i => (s && typeof s === 'object' && typeof s[i] === 'string') ? s[i].slice(0, 200) : '');
+    }
+    return MAP.colText;
+  }
+  function mapSetColText(i, v) {
+    const st = mapColTextState(); st[i] = String(v || '').slice(0, 200);
+    const o = {}; st.forEach((t, k) => { if (String(t || '').trim()) o[k] = t; });
+    try { if (Object.keys(o).length) localStorage.setItem('pim.map.colText', JSON.stringify(o)); else localStorage.removeItem('pim.map.colText'); } catch (_) { }
+    mapApplyColFilter();
+    if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+  }
+  // Case-insensitive substring on the shown name, and on the name / id the box stands for (a role's name, a group's tag).
+  function mapColTextMatch(n, el, q) {
+    if (!q) return true;
+    const lbl = el && el.querySelector('.map-label');
+    const hay = [lbl ? lbl.textContent : '', n && n.label, n && n.id, n && n.roleName, n && n.groupTag, n && n.scopePath];
+    // ...and the box's type word: "access package" / "package group" / "central" (owner 2026-11-16: "where do i filter on
+    // access packages") -- so "package" in People leaves the access packages, and in the group columns the package groups.
+    if (el) el.querySelectorAll('.map-central-badge').forEach(b => hay.push(b.textContent));
+    return hay.some(v => v != null && String(v).toLowerCase().includes(q));
+  }
+  // A box the column's text filter hides (the selected box is always kept): not drawn to, not a drop target.
+  function mapTfHidden(el) { return !!el && el.classList.contains('tf-hide') && !el.classList.contains('sel'); }
   function mapIsAssigned(m, n) {
     if (!m || !n) return false;
     const c = m.colOf(n);
@@ -40600,17 +40806,42 @@
   function mapApplyColFilter() {
     const m = MAP.model; if (!m) return;
     const st = mapColFilterState();
+    const tx = mapColTextState();
     const colEls = ['mapCol0', 'mapCol1', 'mapCol2', 'mapCol3'].map(id => document.getElementById(id));
     colEls.forEach((colEl, i) => {
       if (!colEl) return;
       const f = st[i] || 'all';
+      const raw = String(tx[i] || '');
+      const q = raw.trim().toLowerCase();
+      let total = 0, shown = 0;
       colEl.querySelectorAll('.map-item').forEach(el => {
         const n = m.byId[el.dataset.id];
         const a = mapIsAssigned(m, n);
         el.classList.toggle('cf-hide', (f === 'assigned' && !a) || (f === 'unassigned' && a));
+        // MAP-COLTEXT: AND with the select above and with the find / selection collapse (each hides on its own).
+        const tHide = !!q && !mapColTextMatch(n, el, q);
+        el.classList.toggle('tf-hide', tHide);
+        if (tHide) el.classList.remove('drop-ok', 'drop-hot');
+        total++; if (!tHide) shown++;
+      });
+      // A section heading (ENTRA ID ROLES, a group prefix, ...) whose boxes the text filter left nothing of goes too.
+      colEl.querySelectorAll('.map-group-hdr').forEach(h => {
+        let any = false;
+        for (let s = h.nextElementSibling; s && !s.classList.contains('map-group-hdr'); s = s.nextElementSibling) {
+          if (!s.classList.contains('map-item')) continue;
+          if (s.classList.contains('sel') || (!s.classList.contains('tf-hide') &&
+              !(s.classList.contains('cf-hide') && !s.classList.contains('path')))) { any = true; break; }
+        }
+        h.classList.toggle('tf-hide', !!q && !any);
       });
       const sel = document.querySelector('#mapBoard .map-col-filter[data-col="' + i + '"]');
       if (sel && sel.value !== f) sel.value = f;
+      const inp = document.querySelector('#mapBoard .map-col-text[data-col="' + i + '"]');
+      if (inp && inp.value !== raw && document.activeElement !== inp) inp.value = raw;
+      const x = document.querySelector('#mapBoard .map-col-text-x[data-col="' + i + '"]');
+      if (x) x.style.display = raw ? '' : 'none';
+      const hint = document.querySelector('#mapBoard .map-col-text-n[data-col="' + i + '"]');
+      if (hint) hint.textContent = q ? (shown + ' of ' + total) : '';
     });
   }
   // Export the WHOLE delegation map (every admin -> every reachable target, with
@@ -40741,6 +40972,9 @@
     // held policy change set, ?tab=guards&guard=<id> that guard, ?tab=settings&section=licence Settings > Licence.
     if (want === 'approvals') { const cs = params.get('changeset'); if (cs && /^[A-Za-z0-9-]{1,40}$/.test(cs)) APPR_FOCUS_CHANGESET = cs.toLowerCase(); }
     if (want === 'guards') { const gd = params.get('guard'); if (gd && /^[a-z0-9][a-z0-9.-]{0,99}$/.test(gd)) GUARDS_FOCUS = gd; }
+    // 101.5 (f): Admin accounts takes its chips in the link -- ?tab=accounts&type=external&company=<name>&dept=<name>&task=staged
+    // (a key may repeat), &office=show shows the office users. For this visit only: the remembered chips are not changed.
+    if (want === 'accounts') { try { const lc = pimAcctLinkChips(params); if (lc.chips) acctGridState.chips = lc.chips; if (lc.office) acctGridState.hideOffice = false; } catch (_) { } }
     // §100.57: the pending-actions reminder links the exact Approvals / Guards / Access requests entry
     const deepSel = pimDeepFocusSelector(want, params);
     // PIM 100.100: Discovery & gaps takes ?tab=coverage&status=ignored (the Ignored list). An old link to the Discovery

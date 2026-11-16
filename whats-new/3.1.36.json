@@ -1,0 +1,5 @@
+{"version":"3.1.36","date":"2026-11-16","type":"feature",
+ "summary":"The Admin accounts page has one search, filters by type, company and department, and actions for many accounts at once. Warning mails about unread assignments now say what happened in plain words.",
+ "new":[{"title":"Filter admin accounts","text":"One search box, and filters by type (internal admin, consultant, guest, office user), company, department and tasks such as auto-disable within 14 days. Office users are hidden until you show them."},
+        {"title":"Act on many accounts at once","text":"Select accounts, for example every consultant from one company, and disable, enable, reset TAP or revoke sessions together. A confirmation lists the accounts first, and every change still goes through Pending changes."}],
+ "fixes":[{"title":"Clearer warning mail","text":"When some active assignments could not be read, the mail now says which part, why, and what PIM keeps instead."}]}

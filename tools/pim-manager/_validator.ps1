@@ -1242,66 +1242,10 @@ function Invoke-PimPreflightValidation {
         }
     }
 
-    # ------------------------------------------------------------------
-    # PIM-NAME-002: admin UPN doesn't match the convention its Purpose selects.
-    # Purpose=HighPriv -> AdminAccountPatternHighPriv; Purpose=Day2Day ->
-    # AdminAccountPattern; blank/unknown Purpose -> either pattern passes.
-    # ------------------------------------------------------------------
-    if (($adminPatternRegex -or $adminPatternHighPrivRegex) -and $loaded.ContainsKey('Account-Definitions-Admins')) {
-        $rows = $loaded['Account-Definitions-Admins'].rows
-        for ($i = 0; $i -lt $rows.Count; $i++) {
-            $r = $rows[$i]
-            if (Test-PimRowIsBlank -Row $r) { continue }
-            $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
-            if (-not $upn) { continue }
-            # ADMIN-EXISTING-ACCOUNT (4): the naming check is skipped for this type ONLY -- its name is the existing UPN.
-            if (Test-PimValidatorRowIsExistingAccount -Row $r) { continue }
-            $purpose = "$(Get-PimRowValue -Row $r -Column 'Purpose')".Trim()
-            $applicable = if ($purpose -ieq 'HighPriv' -and $adminPatternHighPrivRegex) { @($adminPatternHighPrivRegex) }
-                          elseif ($purpose -ieq 'Day2Day' -and $adminPatternRegex)      { @($adminPatternRegex) }
-                          else { @($adminPatternRegex, $adminPatternHighPrivRegex | Where-Object { $_ }) }
-            $matched = $false
-            foreach ($rx in $applicable) { if ($rx.IsMatch($upn)) { $matched = $true; break } }
-            if (-not $matched) {
-                # Say what the name SHOULD look like for THIS row -- the pattern with its values filled in -- not only
-                # the raw template, which the operator cannot check by eye ("i dont see the problem here").
-                $fill = {
-                    param([string]$tpl)
-                    $prefixes = $naming.AdminTypePrefixes; $suffixes = $naming.EnvironmentSuffixes
-                    $at = "$(Get-PimRowValue -Row $r -Column 'AdminType')".Trim(); if (-not $at) { $at = "$($naming.AdminTypeDefault)".Trim() }
-                    $en = "$(Get-PimRowValue -Row $r -Column 'Environment')".Trim(); if (-not $en) { $en = "$($naming.EnvironmentDefault)".Trim() }
-                    $pick = { param($map, $k) if ($null -eq $map -or -not $k) { return $null }; if ($map -is [System.Collections.IDictionary]) { if ($map.Contains($k)) { return "$($map[$k])" } } elseif ($map.PSObject.Properties[$k]) { return "$($map.$k)" }; $null }
-                    $co = "$(Get-PimRowValue -Row $r -Column 'Company')".Trim(); if (-not $co) { $co = "$($naming.Company)".Trim() }
-                    $ini = "$(Get-PimRowValue -Row $r -Column 'Initials')".Trim()
-                    $vals = @{ AdminTypePrefix = (& $pick $prefixes $at); Platform = (& $pick $suffixes $en); Company = $co; Initial = $ini; Initials = $ini; AdminWord = "$($naming.AdminWord)".Trim() }
-                    $out = "$tpl"
-                    for ($pass = 0; $pass -lt 3; $pass++) {
-                        $out = [regex]::Replace($out, '\{([A-Za-z][A-Za-z0-9]*)\}',{ param($m) $v = $vals[$m.Groups[1].Value]; if ("$v".Trim()) { "$v" } else { '<' + $m.Groups[1].Value.ToLowerInvariant() + '>' } })
-                    }
-                    $out
-                }
-                $patLabel = if ($purpose -ieq 'HighPriv') { "the high-privilege pattern, i.e. '$(& $fill $naming.AdminAccountPatternHighPriv)' ($($naming.AdminAccountPatternHighPriv))" }
-                            elseif ($purpose -ieq 'Day2Day') { "the day-to-day pattern, i.e. '$(& $fill $naming.AdminAccountPattern)' ($($naming.AdminAccountPattern))" }
-                            else { "either pattern: '$(& $fill $naming.AdminAccountPattern)' or '$(& $fill $naming.AdminAccountPatternHighPriv)'" }
-                # NO-OVERWRITE (owner 2026-11-12: "we must not impact overwrite existing"): an ERROR when the name is not an
-                # admin name of this install at all -- not the pattern AND none of the recognised admin names (starts / ends;
-                # Test-PimAdminAccountNameIsPims, the SAME rule the engine refuses by): such a row may name a person's own
-                # account, which PIM must never change, so it takes an admin name or becomes an existing account. A name the
-                # install recognises as an admin's (a v1 'adm-...' admin, say) stays a WARNING -- an error blocks every
-                # Commit, and those accounts are PIM's. The offline CSV pre-import check judges by the SHIPPED names, not
-                # the install's ($global:PIM_ValidatorNameMismatchWarnOnly): a warning there, so a v1 file with its own
-                # admin names still imports; the Manager and the engine's refusal judge by the install's names.
-                $__nm2Sev = 'warning'
-                if (-not $global:PIM_ValidatorNameMismatchWarnOnly -and (Get-Command Test-PimAdminAccountNameIsPims -ErrorAction SilentlyContinue) -and ("$(Get-PimRowValue -Row $r -Column 'AdminSource')".Trim() -ine 'central')) {
-                    $__nm2 = $null; try { $__nm2 = Test-PimAdminAccountNameIsPims -Upn $upn } catch { $__nm2 = $null }
-                    if ($__nm2 -eq $false) { $__nm2Sev = 'error' }
-                }
-                [void]$violations.Add((New-PimViolation -Severity $__nm2Sev -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
-                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel -- upper and lower case are the same. If this account already exists and PIM did not create it, PIM will not change it." `
-                    -Suggestion "If '$upn' is a person's existing account, set AdminType=existing-account (PIM then gives it delegations only and never changes the account). Otherwise rename to fit the convention, fix the row's Purpose, or change the pattern in Settings > Naming (stored in SQL)."))
-            }
-        }
-    }
+    # PIM-NAME-002 (admin UPN vs the naming pattern) is REMOVED (owner 2026-11-16: "remove this check, as we now allow office
+    # users into the admin interface"). A name that fits no pattern is no finding at all: it blocked Save for ordinary office
+    # accounts. Safety does not depend on it -- the engine still never changes an account PIM did not create (NO-OVERWRITE,
+    # Test-PimAdminRowAccountIsForeign), whatever the validator says.
 
     # ------------------------------------------------------------------
     # PIM-ORPHAN-001: admin row with zero PIM-Assignments-Admins references.

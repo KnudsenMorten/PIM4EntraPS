@@ -2109,6 +2109,7 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
             $entry['stale'] = @($mc.stale)
             Register-PimActiveAssignmentsStaleParts -Stale @($mc.stale) -NowUtc $NowUtc   # round 6 F6: every run, the list decides
         }
+        $plainTxt = Get-PimActiveAssignmentsPartialText -Errors @($errs) -Carried @($mc.carried) -Missing @($mc.missing)
         $carryTxt = $(if (@($mc.carried).Count) { "; carried from the last complete read: " + (@($mc.carried | ForEach-Object { "$($_.surface) ($($_.rows) row(s), read $($_.readUtc))" }) -join ', ') } else { '' }) +
                     $(if (@($mc.missing).Count) { "; NOT read and nothing to carry: " + (@($mc.missing | ForEach-Object { "$($_.surface)" }) -join ', ') } else { '' })
     }
@@ -2165,9 +2166,44 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     if ([bool]$entry['partial']) {
         $out | Add-Member -NotePropertyName 'warning' -NotePropertyValue $true; $out | Add-Member -NotePropertyName 'trusted' -NotePropertyValue $false
         # round 3 item 11: the scheduler records 'warningSummary' (PIM-Scheduler.ps1 Write-PimJobRunRecord)
-        $out | Add-Member -NotePropertyName 'warningSummary' -NotePropertyValue ("active assignments partial: not read this time: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') + $carryTxt)
+        # AA-WARN-PLAIN (owner 2026-11-16, on the mail "active assignments partial: not read this time: pim-for-groups; carried
+        # ... (0 row(s) ...)"): the mail says in plain words WHAT was not read (all of a part, or N groups of it), WHY (the
+        # first error), what is kept instead, and that it usually clears by itself; the technical line stays in the run detail.
+        $out | Add-Member -NotePropertyName 'warningSummary' -NotePropertyValue $(if ($plainTxt) { $plainTxt } else { "active assignments partial: not read this time: " + (@($errs | ForEach-Object { "$($_.surface)" }) -join ', ') + $carryTxt })
     }
     return $out
+}
+
+function Get-PimActiveAssignmentsPartialText {
+    <#
+      AA-WARN-PLAIN (owner 2026-11-16): one plain sentence for a partial active-assignments read -- the warning mail's "What it
+      is about". Per part: what was not read (the whole part, or N groups of PIM for Groups), why (the first error, short),
+      and what is kept instead. '' when there is nothing to say.
+    #>
+    param([AllowNull()][object[]]$Errors, [AllowNull()][object[]]$Carried, [AllowNull()][object[]]$Missing)
+    $names = @{ 'entra-role' = 'Entra roles'; 'azure-rbac' = 'Azure roles'; 'pim-for-groups' = 'PIM for Groups'; 'app-permission' = 'app permissions' }
+    $fld = { param($o, $n) if ($null -eq $o) { return $null }; if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }; if ($o.PSObject.Properties[$n]) { return $o.$n }; $null }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($e in @($Errors)) {
+        if ($null -eq $e) { continue }
+        $s = "$(& $fld $e 'surface')"; if (-not $s) { continue }
+        $nm = if ($names.ContainsKey($s)) { $names[$s] } else { $s }
+        $gids = @(@(& $fld $e 'groupIds') | Where-Object { "$_".Trim() })
+        $why = "$(& $fld $e 'error')".Trim()
+        $why = ($why -replace '^the schedules of \d+ group\(s\) could not be read:?\s*', '' -split "`n")[0].Trim()
+        if ($why.Length -gt 160) { $why = $why.Substring(0, 157) + '...' }
+        $c = @(@($Carried) | Where-Object { $null -ne $_ -and "$(& $fld $_ 'surface')" -eq $s }) | Select-Object -First 1
+        $isMissing = @(@($Missing) | Where-Object { $null -ne $_ -and "$(& $fld $_ 'surface')" -eq $s }).Count -gt 0
+        $what = if ($gids.Count) { "$nm`: $($gids.Count) group(s) could not be read this time; every other group was read" } else { "$nm could not be read this time" }
+        if ($why) { $what += " ($why)" }
+        if ($c) {
+            $rows = [long](& $fld $c 'rows'); $rd = "$(& $fld $c 'readUtc')"
+            $what += if ($gids.Count) { ". Their $rows assignment(s) from the last read ($rd) are kept as they were" } else { ". The $rows assignment(s) from the last complete read ($rd) are kept as they were" }
+        } elseif ($isMissing) { $what += '. There is no earlier read to show instead, so this part is missing from the list until the next run' }
+        $parts.Add($what)
+    }
+    if (-not $parts.Count) { return '' }
+    return (($parts -join '. ') + '. This usually clears on the next run; if a part stays unread for days, PIM opens a support request by itself.')
 }
 
 function Update-PimActiveAssignmentsSnapshotMarks {
