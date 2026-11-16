@@ -1439,6 +1439,46 @@ deployment is a supported choice) and no credentials lying around.
   works together with the All / Assigned choice and the search, hides a section heading when nothing under it
   is left, shows a small "3 of 40", and clears with × or Esc. Each column remembers its text in your browser.
   The *Workload recon* button is gone from the toolbar; the badge on each workload box says the same thing.
+- **The Access map at enterprise scale: chips, scope groups, pins, many at once, a staging tray.** ✅ 2026-11-16
+  Built for an installation with many admins, many roles and hundreds of Azure delegation groups.
+  - *Chips under each column header* narrow that column by **type** (what it grants: Entra role, AU role, Azure
+    RBAC, Workload, Access package), by **tier** (T0–T2, L0–L4, from the box or its name) and to the boxes with a
+    **staged** change. Chips in one row are either / or; they combine with the column's text box and the All /
+    Assigned choice. Each chip shows its count, and only chips that can narrow the column are offered.
+  - *Azure RBAC is filed by scope*: management group, then subscription, then resource group, each heading with
+    its count. Azure delegation groups whose grants all sit in one subscription are filed the same way in the
+    permission-group column. Every heading opens and closes with a click; in a column of more than 60 boxes the
+    scope groups start closed, and typing in the column's box finds what is inside a closed group.
+  - *Pins*: the ☆ on a box keeps it visible whatever the filters, closed groups or focus; *Clear pins* drops
+    them. Pins and closed groups are remembered in your browser.
+  - *Many at once*: with a box selected, Ctrl+click or Shift+click other boxes in the **same** column (hold Ctrl
+    to see the rest of that column while the board is focused). Drag one of them onto a box — or Ctrl+click
+    it — to link them all; *Remove from N selected* lists what they are linked to today and stages those
+    removals. More than 10 links at once asks first, naming the count and the first 15.
+  - *Staged links* (toolbar) lists every link staged to be given or removed, with **Undo** on each line.
+  Every link is still staged one by one under Pending changes, through the same checks as a single drag or
+  Ctrl+click: access-package groups stay locked, central boxes stay read-only, removals stay Action=Remove,
+  and the commit's own approvals apply. A filter keystroke over 2,000 boxes in a column is measured in the
+  test harness.
+- **The Access map says what a change gives, who has what, and shows people and groups as a grid.** ✅ 2026-11-16
+  - *What a give reaches*: every give on the map (drag, Ctrl+click, the Give buttons, a tick in the grid) says what
+    it gives — "This gives Person A 3 permissions, via Helpdesk", and how many of them are new. A give that reaches a
+    **Tier-0 / L0** permission, or more than 25 permissions, asks one question first, naming them; a small give is
+    staged at once and the line appears under it. Giving many at once asks one question for all of them.
+  - *Who has this*: select a group or a permission and the panel lists every person who has it — directly, or through
+    which groups (the shortest way) — with **Remove** next to each. Remove takes away the person's own assignment
+    (asked first, staged under Pending changes); when the person also gets it another way, the line says so. The list
+    sorts by name, gets a filter box above 20 people, and exports to CSV.
+  - *Matrix*: a toolbar switch shows people (rows) and direct groups (columns) as a grid of tick boxes, using the
+    map's filters, chips and pins. A tick stages a give, an untick a removal (asked first); staged boxes are amber,
+    removals red. *+ all* on a column gives that group to everyone in the list (one question first). The header row
+    and the names column stay in place while you scroll; 50 people show per page.
+  - *Make like… and Compare with…*: on a selected person. *Make like* gives them every direct group another person
+    has and they lack — optionally also removing what they have that the other person does not — after one question
+    listing the changes. *Compare* shows two people side by side: direct groups and effective permissions, only in
+    one / in both / only in the other, with Tier-0 marked.
+  Everything is staged under Pending changes through the same checks as a single drag: access-package groups stay
+  locked, central links stay read-only, removals are Action=Remove, and the commit's own approvals apply.
 - **Filter the access packages.** ✅ 2026-11-16 A box above the Access packages list narrows it by package name,
   description or group name; an open package's details hide with it. It is remembered in your browser and clears
   with × or Esc.

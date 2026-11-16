@@ -491,6 +491,84 @@
   .map-col-text { width:10em; min-width:5em; flex:0 1 auto; font-size:11px; font-weight:400; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#24292f; }
   .map-col-text-x { font-size:12px; line-height:1; padding:0 3px; border:0; background:transparent; color:#57606a; cursor:pointer; }
   .map-col-text-n { font-size:10.5px; color:#57606a; white-space:nowrap; }
+  /* MAP-SCALE 101.1 / 101.2 (owner 2026-11-16, a large install: "500 delegation groups"). Chips per column (type / tier /
+     staged), collapsible scope groups (management group / subscription / resource group), pins that stay visible whatever
+     the filters, a multi-selection for bulk links, and the staging tray. A chip or a collapsed group hides a box like the
+     column text does (more specific than the rules that force display:flex); a PINNED box is never hidden by any of them. */
+  #mapBoard .map-col .map-col-body .map-item.ch-hide:not(.sel):not(.pinned) { display:none !important; }
+  #mapBoard .map-col .map-col-body .map-item.gr-hide:not(.sel):not(.pinned) { display:none !important; }
+  #mapBoard .map-col .map-col-body .map-item.pinned.tf-hide:not(.x-never),
+  #mapBoard .map-col .map-col-body .map-item.pinned.cf-hide:not(.x-never) { display:flex !important; }
+  #mapBoard.focused .map-col-body .map-item.pinned.dim { display:flex; opacity:.6; }
+  #mapBoard .map-col .map-col-body .map-az-hdr.tf-hide, #mapBoard .map-col .map-col-body .map-az-hdr.gr-hide { display:none; }
+  .map-col-chips { display:flex; flex-wrap:wrap; gap:3px; padding:0 10px 5px; }
+  .map-col-chips:empty { display:none; }
+  .map-chip { font-size:10.5px; line-height:1.4; padding:0 6px; border:1px solid #d0d7de; border-radius:10px; background:#fff; color:#24292f; cursor:pointer; white-space:nowrap; }
+  .map-chip .map-chip-n { color:#57606a; margin-left:3px; }
+  .map-chip.on { background:#ddf4ff; border-color:#0969da; color:#0550ae; }
+  .map-group-hdr.map-collapsible, .map-az-hdr { cursor:pointer; user-select:none; }
+  .map-az-hdr { padding:4px 8px 2px 14px; font-size:10.5px; color:#24292f; font-weight:600; display:flex; gap:5px; align-items:baseline; }
+  .map-az-hdr[data-level="2"] { padding-left:26px; font-weight:500; }
+  .map-az-hdr .map-az-caret, .map-group-hdr .map-az-caret { color:#57606a; width:9px; display:inline-block; }
+  .map-hdr-n { color:#57606a; font-weight:400; margin-left:4px; text-transform:none; letter-spacing:0; }
+  #mapBoard .map-item[data-gl="1"] { margin-left:8px; }
+  #mapBoard .map-item[data-gl="2"] { margin-left:18px; }
+  .map-item .map-pin { flex:0 0 auto; font-size:11px; color:#8c959f; opacity:0; cursor:pointer; padding:0 2px; }
+  .map-item:hover .map-pin, .map-item.pinned .map-pin, .map-item .map-pin:focus { opacity:1; }
+  .map-item.pinned .map-pin { color:#0969da; }
+  #mapBoard .map-item.msel { box-shadow:inset 0 0 0 2px #0969da; }
+  /* Holding Ctrl / Shift with something selected shows the rest of ITS column (faded), so a multi-selection can be built
+     while the board is focused on one path; a box in the multi-selection stays visible. */
+  #mapBoard.focused.multi-keys .map-col.sel-col .map-col-body .map-item.dim { display:flex; opacity:.5; }
+  #mapBoard.focused .map-col-body .map-item.msel.dim { display:flex; opacity:.85; }
+  #mapMultiBar { display:none; align-items:center; gap:6px; font-size:12px; color:#24292f; }
+  #mapTray { display:none; margin:0 14px 6px; border:1px solid #d0d7de; border-radius:8px; background:#fff; font-size:12px; max-height:220px; overflow:auto; }
+  #mapTray .mt-head { padding:6px 10px; color:#57606a; border-bottom:1px solid #eaeef2; }
+  #mapTray .mt-line { display:flex; align-items:center; gap:8px; padding:3px 10px; border-bottom:1px solid #f6f8fa; }
+  #mapTray .mt-line .mt-sign { width:14px; font-weight:700; color:#9a6700; }
+  #mapTray .mt-line.rm .mt-sign { color:#cf222e; }
+  #mapTray .mt-line .mt-what { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #mapTray .mt-line button { font-size:11px; padding:0 6px; }
+  /* MAP-IMPACT 101.3 / 101.4 (owner 2026-11-16: "think as an admin ... quick overview"). The impact line after a give,
+     "Who has this", Make like / Compare, and the people x direct groups matrix (sticky header row + first column). */
+  #mapDetail .map-impact { margin-top:3px; color:#24292f; }
+  #mapDetail .map-impact.t0 { color:#82071e; font-weight:600; }
+  .map-t0 { display:inline-block; font-size:9.5px; font-weight:700; color:#fff; background:#cf222e; border-radius:8px; padding:0 5px; margin-left:4px; }
+  #mapDetail .map-who { margin-top:8px; border-top:1px solid #eaeef2; padding-top:6px; }
+  #mapDetail .map-who-head { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-weight:600; }
+  #mapDetail .map-who-head input { font-size:11.5px; padding:1px 6px; border:1px solid #d0d7de; border-radius:4px; width:12em; }
+  #mapDetail .map-who-row { display:flex; align-items:baseline; gap:8px; padding:2px 0; border-bottom:1px solid #f6f8fa; }
+  #mapDetail .map-who-row .mw-name { font-weight:500; min-width:12em; }
+  #mapDetail .map-who-row .mw-how { color:#57606a; flex:1 1 auto; min-width:0; }
+  #mapDetail .map-who-row .mw-multi { color:#9a6700; }
+  #mapDetail .map-who-row button { margin-left:0; padding:0 8px; font-size:11px; }
+  #mapDetail .map-mk { margin-top:8px; }
+  #mapDetail .map-mk-body:empty { display:none; }
+  #mapDetail .map-mk-body { margin-top:6px; padding:6px 8px; border:1px solid #d0d7de; border-radius:6px; background:#fff; max-width:900px; }
+  #mapDetail .map-mk-body select { font-size:12px; max-width:320px; }
+  #mapDetail .map-cmp { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px 12px; margin-top:6px; }
+  #mapDetail .map-cmp h4 { margin:4px 0 2px; font-size:11.5px; }
+  #mapDetail .map-cmp .mc-sec { grid-column:1 / -1; font-weight:600; margin-top:4px; }
+  #mapDetail .map-cmp ul { margin:0; padding-left:16px; }
+  #mapScroll.mx-on #mapBoard { display:none; }
+  #mapMatrix { margin:0 14px 8px; font-size:12px; }
+  #mapMatrix .mx-bar { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; padding:6px 0; color:#57606a; }
+  #mapMatrix .mx-bar input[type="text"] { font-size:11.5px; padding:2px 6px; border:1px solid #d0d7de; border-radius:4px; width:12em; }
+  #mapMatrix .mx-note:empty { display:none; }
+  #mapMatrix .mx-note { color:#24292f; }
+  #mapMatrix .mx-wrap { overflow:auto; max-height:62vh; border:1px solid #d0d7de; border-radius:6px; background:#fff; }
+  #mapMatrix table.mx-table { border-collapse:separate; border-spacing:0; }
+  #mapMatrix th, #mapMatrix td { border-bottom:1px solid #eaeef2; border-right:1px solid #f0f2f4; padding:0; }
+  #mapMatrix thead th { position:sticky; top:0; z-index:2; background:#f6f8fa; vertical-align:bottom; }
+  #mapMatrix th.mx-col { padding:4px 2px; min-width:26px; max-width:26px; }
+  #mapMatrix .mx-col-t { writing-mode:vertical-rl; transform:rotate(180deg); display:block; max-height:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500; font-size:11px; margin:0 auto; }
+  #mapMatrix .mx-all { font-size:9.5px; padding:0 2px; margin-top:3px; }
+  #mapMatrix th.mx-row, #mapMatrix th.mx-corner { position:sticky; left:0; z-index:1; background:#fff; text-align:left; padding:2px 8px; white-space:nowrap; max-width:240px; overflow:hidden; text-overflow:ellipsis; font-weight:500; }
+  #mapMatrix thead th.mx-corner { z-index:3; background:#f6f8fa; }
+  #mapMatrix td.mx-c { text-align:center; }
+  #mapMatrix td.mx-add { background:#fff8c5; }
+  #mapMatrix td.mx-rm { background:linear-gradient(to top right, transparent 46%, #cf222e 48%, #cf222e 52%, transparent 54%), #ffebe9; }
+  #mapMatrix td.mx-central { background:#e6f4f5; }
   #mapBoard .map-item.link-cand:hover { opacity:1; background:#ddf4ff; border-color:#0969da; }
   /* §91.23: sent by the managing tenant (uplink) -- read-only on this tenant. Teal, its own colour. */
   #mapBoard .map-item.map-central { border-left:3px solid #1b7c83; }
@@ -1592,11 +1670,18 @@
       <button id="mapRiskToggle" class="ghost" title="Flag orphans (dead delegation), stale (past review horizon) and over-privileged (reaches Tier-0/1 or unusually many targets) nodes">Risk overlay</button>
       <button id="mapCsv" class="ghost" title="Export the whole delegation map (every admin → target) as CSV">Export CSV</button>
       <button id="mapPrint" class="ghost" title="Open a printable view of the delegation map">Print</button>
+      <!-- MAP-SCALE 101.2: the working set. Pins stay visible whatever the filters; the tray lists the links staged here. -->
+      <button id="mapPinsClear" class="ghost" style="display:none" title="Unpin every box (pins only keep boxes visible; they change nothing)">Clear pins</button>
+      <button id="mapTrayBtn" class="ghost" aria-expanded="false" title="List every link staged to be given or removed, with Undo per line. Commit them under Pending changes.">Staged links (0)</button>
+      <span id="mapMultiBar"></span>
+      <!-- MAP-IMPACT 101.4: people x direct groups as a grid of tick boxes (a STATE toggle: constant label, box glyph). -->
+      <button id="mapMatrixBtn" class="ghost" aria-pressed="false" title="Show people and their direct groups as a grid of tick boxes. A tick stages a give, an untick a removal (asked first), under Pending changes.">&#x2610; Matrix</button>
       <!-- IMP-21: the direct-vs-inherited rule stated once, in plain words, next to the steps.
            Dropped "Every box is a Definitions row; every wire is an Assignments row" -- that is
            storage vocabulary (BUG-89/BUG-90's class) and it explained the board to nobody. -->
       <span class="map-hint" id="mapHint"><b>See:</b> pick a person (left) or a permission (right) &mdash; the board collapses to what connects them. <b>People are assigned only to the second column</b>; everything further right is <b>inherited</b> through group nesting. <b style="color:#0969da;">&#x2795; Give:</b> select the source, then <b>Ctrl+click</b> each target &mdash; or <b>drag</b> one box onto another, or use the blue <b>Give / Add</b> buttons. <b style="color:#cf222e;">&#x2796; Remove:</b> use the red <b>Remove</b> buttons (they list only what it is linked to today), or Ctrl+click / drop on a link that already exists, and confirm. Staged changes show <b style="color:#9a6700;">amber &ldquo;staged add&rdquo;</b> and <b style="color:#cf222e;">red struck-through &ldquo;staged remove&rdquo;</b>; both are committed under <b>Pending changes</b>.</span>
     </div>
+    <div id="mapTray" aria-live="polite"></div>
     <div id="mapBoard">
       <svg id="mapWires"></svg>
       <!-- IMP-21. The four headers read as ONE SENTENCE left to right:
@@ -1622,6 +1707,7 @@
         <div class="map-col-body" id="mapCol3"></div>
       </div>
     </div>
+    <div id="mapMatrix" style="display:none;"></div>
     </div><!-- /#mapScroll -->
     <div id="mapDetail"><span class="empty">Nothing selected.</span></div>
   </div>
@@ -39283,12 +39369,36 @@
     }
     // Click = select. Ctrl/Cmd+click = LINK what is selected to this box (operator: "select source
     // then ctrl and click"). While a picker is open, a plain click adds, as the banner says.
+    // MAP-SCALE 101.2: a pin keeps this box visible whatever the filters / collapsed groups / find (view only, every role).
+    const pin = document.createElement('span');
+    pin.className = 'map-pin';
+    pin.setAttribute('role', 'button'); pin.tabIndex = 0;
+    const pinned = mapPinState().has(n.id);
+    pin.textContent = pinned ? '★' : '☆';
+    pin.title = pinned ? 'Pinned: stays visible whatever the filters. Click to unpin.' : 'Pin: keep this box visible whatever the filters';
+    pin.setAttribute('aria-label', pinned ? 'Unpin' : 'Pin');
+    pin.onclick = (ev) => { if (ev) { if (ev.stopPropagation) ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); } mapTogglePin(n.id); };
+    el.insertBefore(pin, cnt);
+    if (pinned) el.classList.add('pinned');
+    if (MAP.multi && MAP.multi.has(n.id)) el.classList.add('msel');
     el.onclick = (ev) => {
       // In a picker session the board click does what the OPEN SESSION says -- give or remove --
       // never "whichever applies to this box" (operator, 2026-09-22).
       if (MAP.assign) { if (MAP.assign.verb === 'remove') { mapTryRemove(n); } else { mapTryStage(n); } return; }
+      // MAP-SCALE 101.2: Ctrl / Shift+click on a box in the SAME column as the selection builds a multi-selection. Two
+      // boxes of one column can never be linked (mapPairMode has no same-column pair), so this gesture never clashed
+      // with Ctrl+click give / remove, which stays exactly as it was for a box in another column.
+      if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey) && MAP.sel && MAP.sel !== n.id && isServer && roleAtLeast('Admin') &&
+          mapMultiCan(MAP.sel, n.id)) { mapMultiToggle(n.id, !!ev.shiftKey && !(ev.ctrlKey || ev.metaKey)); return; }
+      // Ctrl / Shift+click on the selected box itself keeps the multi-selection (it is the anchor; a plain click re-selects).
+      if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey) && MAP.sel === n.id && MAP.multi && MAP.multi.size) return;
       if (ev && (ev.ctrlKey || ev.metaKey) && MAP.sel && MAP.sel !== n.id &&
-          isServer && roleAtLeast('Admin')) { mapCtrlLink(n.id); return; }
+          isServer && roleAtLeast('Admin')) {
+        // With a multi-selection, Ctrl+click on a box that can take them links every selected box (the same bulk path as a drop).
+        if (MAP.multi && MAP.multi.size > 1 && MAP.multi.has(MAP.sel)) { mapBulkLink(Array.from(MAP.multi), n.id); return; }
+        mapCtrlLink(n.id); return;
+      }
+      if (MAP.multi && MAP.multi.size) mapMultiClear(true);
       mapSelect(n.id);
     };
     mapWireDrag(el, n);
@@ -39345,6 +39455,8 @@
       if (!src) { try { src = ev.dataTransfer.getData('text/plain'); } catch (_) { src = null; } }
       MAP.drag = null; mapDragMark(null);
       if (!src || src === n.id || mapTfHidden(el)) return;
+      // MAP-SCALE 101.2: dragging one box of a multi-selection links EVERY selected box -- once per box through mapStageLink.
+      if (MAP.multi && MAP.multi.size > 1 && MAP.multi.has(src)) { await mapBulkLink(Array.from(MAP.multi), n.id); return; }
       const res = await mapStageLink(src, n.id);
       // 🔴 THE DROP DID NOT REDRAW THE BOARD (operator: "i dont see it colors when i drag drop" /
       // "it should keep it when staged"). Ctrl+click went through mapCtrlLink, which re-renders;
@@ -39389,6 +39501,14 @@
           : '✓ staged: <b>' + escapeHtml(res.fromLabel) + '</b> → <b>' + escapeHtml(res.toLabel) + '</b> (' +
             escapeHtml(res.type) + ') &mdash; Ctrl+click it again to undo &middot; commit under <a id="mapDropSave">Pending changes</a>')
       : '⚠ ' + escapeHtml(res.reason);
+    // MAP-IMPACT 101.3: what a staged give reaches, in one line under it (a give that reaches Tier-0 / L0 or more than 25
+    // permissions was asked about before it was staged; this line says it again where the change is shown).
+    if (res.ok && res.impact && !res.undone && !res.removed && !res.removeUndone) {
+      const im = document.createElement('div');
+      im.className = 'map-impact' + (res.impact.t0 ? ' t0' : '');
+      im.textContent = mapImpactText(res.impact);
+      note.appendChild(im);
+    }
     d.insertBefore(note, d.firstChild);
     const go = document.getElementById('mapDropSave');
     if (go) go.onclick = () => switchTab('save');
@@ -39410,6 +39530,7 @@
     // col 0: admins (dot color: Purpose -- HighPriv red / Day2Day blue;
     // legacy tier fallback for not-yet-upgraded CSVs)
     const c0 = document.getElementById('mapCol0'); c0.innerHTML = '';
+    const f0 = document.createDocumentFragment();
     for (const n of cols[0]) {
       const reach = mapReachCount(m, n.id);
       const el = mapItem(m, n, reach ? ('→ ' + reach) : '');
@@ -39417,8 +39538,9 @@
       if (purp === 'highpriv') el.querySelector('.map-dot').style.background = '#cf222e';
       else if (purp === 'day2day') el.querySelector('.map-dot').style.background = '#0969da';
       else if (n.tier) el.querySelector('.map-dot').style.background = ({ 'T0': '#cf222e', 'T1': '#9a6700', 'T2': '#1a7f37' })[String(n.tier).toUpperCase()] || '#0969da';
-      c0.appendChild(el);
+      f0.appendChild(el);
     }
+    c0.appendChild(f0);
 
     // col 1: role/org groups grouped by tag prefix
     const c1 = document.getElementById('mapCol1'); c1.innerHTML = '';
@@ -39429,34 +39551,51 @@
     const prefOf = n => { const t = String(n.groupTag || ''); const mch = t.match(prefRx); return mch ? mch[1].toUpperCase() : 'OTHER'; };
     const byPref = {};
     for (const n of cols[1]) (byPref[prefOf(n)] = byPref[prefOf(n)] || []).push(n);
+    // MAP-SCALE 101.1: every section heading is collapsible and carries its count (mapGroupHdr); boxes are built into a
+    // fragment and attached once per column.
+    const f1 = document.createDocumentFragment();
     for (const g of Object.keys(byPref).sort()) {
-      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = g; c1.appendChild(h);
-      for (const n of byPref[g]) c1.appendChild(mapItem(m, n, '→ ' + ((m.fwd[n.id] || []).length)));
+      const key = 'c1:' + g;
+      f1.appendChild(mapGroupHdr(1, key, g, 0, []));
+      for (const n of byPref[g]) f1.appendChild(mapPlaceItem(mapItem(m, n, '→ ' + ((m.fwd[n.id] || []).length)), [key], 0));
     }
+    c1.appendChild(f1);
 
     // col 2: permission groups grouped by source CSV; workload badge
     const c2 = document.getElementById('mapCol2'); c2.innerHTML = '';
     const srcOf = n => String(n.source || '').replace('PIM-Definitions-', '') || 'Other';
     const bySrc = {};
     for (const n of cols[2]) (bySrc[srcOf(n)] = bySrc[srcOf(n)] || []).push(n);
+    const f2 = document.createDocumentFragment();
     for (const g of Object.keys(bySrc).sort()) {
-      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = g; c2.appendChild(h);
-      for (const n of bySrc[g]) c2.appendChild(mapItem(m, n, m.workload.has(n.id) ? '⬡ app RBAC' : ''));
+      const key = 'c2:' + g;
+      f2.appendChild(mapGroupHdr(2, key, g, 0, []));
+      // MAP-SCALE 101.1: an Azure delegation group whose Azure grants all sit in ONE subscription (and resource group) is
+      // filed under it, so 500 of them read as a handful of scopes. The rest stay as they were, above the scope groups.
+      mapAppendScoped(f2, 2, key, bySrc[g], n => mapAzScopeOfGroup(m, n), n => mapItem(m, n, m.workload.has(n.id) ? '⬡ app RBAC' : ''), cols[2].length);
     }
+    c2.appendChild(f2);
 
     // col 3: targets grouped by kind
     const c3 = document.getElementById('mapCol3'); c3.innerHTML = '';
     const kindHdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope', 'workload-target': 'Workload roles & scopes' };
+    const f3 = document.createDocumentFragment();
     for (const k of ['entra-role', 'au-role', 'az-resource', 'workload-target']) {
       const items = cols[3].filter(n => n.kind === k);
       if (!items.length) continue;
-      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = kindHdr[k]; c3.appendChild(h);
-      for (const n of items) {
+      const key = 'c3:' + k;
+      f3.appendChild(mapGroupHdr(3, key, kindHdr[k], 0, []));
+      const mk = n => {
         const el = mapItem(m, n, '← ' + ((m.back[n.id] || []).length));
         if (k === 'workload-target' && n.reconStatus) { mapStampReconBadge(el, n); }
-        c3.appendChild(el);
-      }
+        return el;
+      };
+      // MAP-SCALE 101.1: Azure RBAC is filed by management group > subscription > resource group (from the scope path).
+      if (k === 'az-resource') { mapAppendScoped(f3, 3, key, items, n => mapAzScopeOf(n.scopePath), mk, cols[3].length); continue; }
+      for (const n of items) f3.appendChild(mapPlaceItem(mk(n), [key], 0));
     }
+    c3.appendChild(f3);
+    mapComputeMeta(m, cols);
 
     // Empty columns say so (§78 live GUI sweep, 2026-09-24: an environment with no delegations showed four blank white
     // boxes -- nothing said whether the map was empty, still loading, or broken, or where to start).
@@ -39479,10 +39618,13 @@
     });
 
     mapEnsureColFilters();   // §86.2
+    mapRenderColChips();     // MAP-SCALE 101.1
     mapApplyColFilter();
     mapApplyRisk();
     mapApplySearch();
     if (MAP.sel && m.byId[MAP.sel]) mapSelect(MAP.sel, true); else mapClearSel(true);
+    mapScaleChrome();        // MAP-SCALE 101.2: pins button, multi-selection bar, staging tray
+    mapRenderMatrix();       // MAP-IMPACT 101.4: the matrix view (when on), from the model and the filters just applied
   }
 
   // [M8] Stamp the risk classes/badges onto the rendered board items. Recomputed
@@ -39513,6 +39655,7 @@
 
   function mapClearSel(keep) {
     MAP.sel = null;
+    if (MAP.multi && MAP.multi.size) mapMultiClear(true);   // MAP-SCALE 101.2: no selection = no multi-selection
     MAP.lastEdges = null;         // nothing selected = nothing to redraw
     mapEndAssign(true);
     mapSetLinkButtons(null);      // nothing selected = nothing to link
@@ -39554,6 +39697,8 @@
 
   function mapSelect(id, rerendered) {
     const m = MAP.model || buildMapModel();
+    // MAP-SCALE 101.2: a multi-selection is anchored on the selection; selecting something outside it ends it.
+    if (MAP.multi && MAP.multi.size && !MAP.multi.has(id)) mapMultiClear(true);
     MAP.sel = id;
     const down = mapBfs(id, m.fwd, 'target');     // everything this node grants
     const up   = mapBfs(id, m.back, 'source');    // everyone who reaches this node
@@ -39673,9 +39818,12 @@
       const key = e.source + '>' + e.target;
       if (seen.has(key)) continue;
       seen.add(key);
-      const sEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.source) + '"]');
-      const tEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.target) + '"]');
-      if (!sEl || !tEl) continue;
+      // MAP-SCALE 101.1: the Access map looks its boxes up in the id index built per render (one attribute query per wire
+      // end over 2000+ boxes was the slow part of a redraw); the Delegation overview (ctx) keeps the query.
+      const idx = (!ctx && MAP.elById) ? MAP.elById : null;
+      const sEl = idx ? idx.get(e.source) : board.querySelector('.map-item[data-id="' + ptAttrEsc(e.source) + '"]');
+      const tEl = idx ? idx.get(e.target) : board.querySelector('.map-item[data-id="' + ptAttrEsc(e.target) + '"]');
+      if (!sEl || !tEl || (idx && (!sEl.isConnected || !tEl.isConnected))) continue;
       if (mapTfHidden(sEl) || mapTfHidden(tEl)) continue;   // MAP-COLTEXT: no wire to a box the column filter hides
       const sR = sEl.getBoundingClientRect(), tR = tEl.getBoundingClientRect();
       // skip wires to items scrolled out of their column
@@ -39733,12 +39881,16 @@
     // permissions, so hovering the selected box shows exactly its path.
     const paths = Array.from(svg.querySelectorAll('path'));
     const lit = new Set();
+    // MAP-SCALE 101.1: index the drawn paths by each end once, so the walk is linear in the wires, not wires x boxes.
+    const byKey = { 'data-s': new Map(), 'data-t': new Map() };
+    for (const p of paths) {
+      for (const k of ['data-s', 'data-t']) { const v = p.getAttribute(k); const a = byKey[k].get(v); if (a) a.push(p); else byKey[k].set(v, [p]); }
+    }
     const walk = (fromKey, toKey) => {
       const seen = new Set([id]), queue = [id];
       while (queue.length) {
         const cur = queue.shift();
-        for (const p of paths) {
-          if (p.getAttribute(fromKey) !== cur) continue;
+        for (const p of (byKey[fromKey].get(cur) || [])) {
           lit.add(p);
           const nxt = p.getAttribute(toKey);
           if (!seen.has(nxt)) { seen.add(nxt); queue.push(nxt); }
@@ -40113,7 +40265,10 @@
   // on its own). Clicking it again before commit takes the removal back out.
   // The managed-tenant question (REQ-REV-DOWN-1) is asked here too: a central removal that never
   // reaches the tenants is the precise trap that requirement exists for.
-  async function mapStageUnlink(fromNode, toNode) {
+  // MAP-SCALE 101.2: `opts.confirmed` = the caller already asked ONE question naming every link (the bulk remove's pimConfirm),
+  // so the per-link question is not asked again. Every other check below (role, row found, central read-only, the undo
+  // toggle, Action=Remove, the managed-tenant question) runs unchanged for each link.
+  async function mapStageUnlink(fromNode, toNode, opts) {
     const fLabel = fromNode.label || fromNode.id, tLabel = toNode.label || toNode.id;
     if (!isServer) return { ok: false, reason: 'static mode -- cannot edit. Restart with -Server.' };
     if (!roleAtLeast('Admin')) return { ok: false, reason: 'removing a delegation needs the Admin role.' };
@@ -40143,7 +40298,7 @@
       return { ok: true, removeUndone: true, base: f.base, fromLabel: fLabel, toLabel: tLabel };
     }
     const what = fLabel + ' → ' + tLabel;
-    if (!window.confirm('Take this access away?\n\n    ' + what + '\n\n' +
+    if (!(opts && opts.confirmed) && !window.confirm('Take this access away?\n\n    ' + what + '\n\n' +
         'This sets Action=Remove on one "' + entityLabel(f.base) + '" row. The engine removes exactly ' +
         'this assignment on its next run and then deletes the row.\n\n' +
         'The four words, so you pick the right one:\n' + pimVerbsText() +
@@ -40163,7 +40318,7 @@
   // 🔑 THE ONE PLACE A LINK IS MADE. Every way of asking for one -- the picker list, a click in the
   // lit column, a drag onto a box, Ctrl+click -- ends here, so they cannot drift into staging
   // different rows. Returns { ok, reason } and touches no chrome: each caller reports in its own way.
-  async function mapStageLink(fromId, toId) {
+  async function mapStageLink(fromId, toId, opts) {
     const m = MAP.model;
     const from = m && m.byId[fromId], to = m && m.byId[toId];
     if (!from || !to) return { ok: false, reason: 'that box is not on the board any more -- reload the page.' };
@@ -40220,6 +40375,13 @@
       row = { TargetGroupTag: tagOf(direct), SourceGroupTag: tagOf(perm), AssignmentType: pimNestingType(tagOf(perm), 'Active') };
     }
     Object.assign(row, { Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE', NumOfDaysWhenExpire: '365', Permanent: 'FALSE' });
+    // MAP-IMPACT 101.3: what this give reaches, BEFORE it is staged. Tier-0 / L0, or more than 25 permissions, is ONE question
+    // here -- so every route asks (drop, Ctrl+click, the picker, a matrix tick). A caller that already asked once for many
+    // (the bulk path, Make like) passes { impactAsked: true }; a small give says it inline after staging (mapDropResult).
+    const impact = mapImpact(m, fromId, toId);
+    if (impact && impact.ask && !(opts && opts.impactAsked) && !(await mapImpactAsk(impact))) {
+      return { ok: false, cancelled: true, reason: 'nothing staged -- cancelled.' };
+    }
     try {
       // wuxStage, not loadCsv+ensurePending: an entity that does not exist yet (first install) is
       // the NORMAL path on a new tenant, and loadCsv rejecting there staged nothing and said nothing.
@@ -40227,7 +40389,7 @@
     } catch (e) {
       return { ok: false, reason: 'could not stage it: ' + e.message };
     }
-    return { ok: true, base: spec.base, type: row.AssignmentType,
+    return { ok: true, base: spec.base, type: row.AssignmentType, impact: impact,
              fromLabel: (from.label || from.id), toLabel: (to.label || to.id) };
   }
 
@@ -40251,7 +40413,8 @@
     renderAccessMap();
     mapAssignChrome();
     mapAssignBanner('staged &rarr; ' + escapeHtml(n.label || n.id) +
-      ' <span style="color:#57606a">(' + escapeHtml(res.type) + ')</span>');
+      ' <span style="color:#57606a">(' + escapeHtml(res.type) + ')</span>' +
+      (res.impact ? ' <span class="map-impact' + (res.impact.t0 ? ' t0' : '') + '">' + escapeHtml(mapImpactText(res.impact)) + '</span>' : ''));
   }
 
   // The picker's other half: remove an existing delegation (or take that removal back).
@@ -40548,6 +40711,9 @@
         alert('Could not open ' + entityLabel(base) + ': ' + (e && e.message ? e.message : 'unknown error'));
       }
     };
+    // MAP-IMPACT 101.3 / 101.4: appended as elements (never `innerHTML +=`), so every handler bound above stays.
+    if (n.kind === 'admin') mapPersonTools(m, id, d);
+    else if (MAP_WHO_KINDS[n.kind]) mapWhoHasRender(m, id, d);
   }
 
   // [M8] residual -- stage a REMOVAL (revoke a grant) directly from the map.
@@ -40782,68 +40948,1177 @@
     const st = mapColTextState(); st[i] = String(v || '').slice(0, 200);
     const o = {}; st.forEach((t, k) => { if (String(t || '').trim()) o[k] = t; });
     try { if (Object.keys(o).length) localStorage.setItem('pim.map.colText', JSON.stringify(o)); else localStorage.removeItem('pim.map.colText'); } catch (_) { }
-    mapApplyColFilter();
+    mapApplyColFilter(i);   // MAP-SCALE 101.1: a keystroke re-filters its own column only
     if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
   }
   // Case-insensitive substring on the shown name, and on the name / id the box stands for (a role's name, a group's tag).
   function mapColTextMatch(n, el, q) {
     if (!q) return true;
+    // MAP-SCALE 101.1: the lower-cased text of a box is built once per render and kept on the box (a keystroke over 2000
+    // boxes no longer re-reads every label and badge from the DOM).
+    if (el && typeof el.__mapHay === 'string') return el.__mapHay.includes(q);
     const lbl = el && el.querySelector('.map-label');
     const hay = [lbl ? lbl.textContent : '', n && n.label, n && n.id, n && n.roleName, n && n.groupTag, n && n.scopePath];
     // ...and the box's type word: "access package" / "package group" / "central" (owner 2026-11-16: "where do i filter on
     // access packages") -- so "package" in People leaves the access packages, and in the group columns the package groups.
     if (el) el.querySelectorAll('.map-central-badge').forEach(b => hay.push(b.textContent));
-    return hay.some(v => v != null && String(v).toLowerCase().includes(q));
+    const s = hay.filter(v => v != null).map(v => String(v).toLowerCase()).join('\n');
+    if (el) el.__mapHay = s;
+    return s.includes(q);
   }
   // A box the column's text filter hides (the selected box is always kept): not drawn to, not a drop target.
-  function mapTfHidden(el) { return !!el && el.classList.contains('tf-hide') && !el.classList.contains('sel'); }
+  // MAP-SCALE 101.1: the same for a box a chip or a collapsed group hides; a PINNED box is never hidden, so it stays a target.
+  function mapTfHidden(el) {
+    return !!el && (el.classList.contains('tf-hide') || el.classList.contains('ch-hide') || el.classList.contains('gr-hide')) &&
+      !el.classList.contains('sel') && !el.classList.contains('pinned');
+  }
   function mapIsAssigned(m, n) {
     if (!m || !n) return false;
     const c = m.colOf(n);
     if (c === 0) return (m.fwd[n.id] || []).length > 0;
     return (m.back[n.id] || []).length > 0;
   }
-  function mapApplyColFilter() {
+  // MAP-SCALE 101.1: `only` (a column index) re-filters that column alone -- what a keystroke in its box needs. The pass is
+  // linear in the column: one walk over the boxes (assigned select AND text AND chips), counts per group key, then one walk
+  // over the headings (count, hidden when a filter left nothing under it, collapsed state). A collapsed group is ignored
+  // while the column's text box has text, so typing always finds what is inside a closed group.
+  function mapApplyColFilter(only) {
     const m = MAP.model; if (!m) return;
     const st = mapColFilterState();
     const tx = mapColTextState();
+    const chips = mapChipState();
+    const meta = MAP.meta || {};
     const colEls = ['mapCol0', 'mapCol1', 'mapCol2', 'mapCol3'].map(id => document.getElementById(id));
     colEls.forEach((colEl, i) => {
       if (!colEl) return;
+      if (typeof only === 'number' && only !== i) return;
       const f = st[i] || 'all';
       const raw = String(tx[i] || '');
       const q = raw.trim().toLowerCase();
+      const ch = chips[i] || {};
+      const cType = (ch.type || []), cTier = (ch.tier || []), cStaged = !!ch.staged;
+      const chipOn = cType.length > 0 || cTier.length > 0 || cStaged;
+      const filterOn = !!q || chipOn || f !== 'all';
+      const collapsed = mapCollapseState();
+      const colCount = MAP.colCount ? (MAP.colCount[i] || 0) : 0;
+      const isCollapsed = (key, level) => (q ? false : mapIsCollapsed(collapsed, key, level, colCount));
+      const items = (MAP.colItems && MAP.colItems[i]) || Array.from(colEl.querySelectorAll('.map-item'));
+      const shownBy = {};   // group key -> boxes that pass the filters (collapse not counted)
+      const keepBy = {};    // group key -> a selected / pinned box sits under it
       let total = 0, shown = 0;
-      colEl.querySelectorAll('.map-item').forEach(el => {
-        const n = m.byId[el.dataset.id];
+      for (const el of items) {
+        const id = el.dataset.id;
+        const n = m.byId[id];
         const a = mapIsAssigned(m, n);
-        el.classList.toggle('cf-hide', (f === 'assigned' && !a) || (f === 'unassigned' && a));
+        const cHide = (f === 'assigned' && !a) || (f === 'unassigned' && a);
+        el.classList.toggle('cf-hide', cHide);
         // MAP-COLTEXT: AND with the select above and with the find / selection collapse (each hides on its own).
         const tHide = !!q && !mapColTextMatch(n, el, q);
         el.classList.toggle('tf-hide', tHide);
-        if (tHide) el.classList.remove('drop-ok', 'drop-hot');
-        total++; if (!tHide) shown++;
-      });
-      // A section heading (ENTRA ID ROLES, a group prefix, ...) whose boxes the text filter left nothing of goes too.
-      colEl.querySelectorAll('.map-group-hdr').forEach(h => {
-        let any = false;
-        for (let s = h.nextElementSibling; s && !s.classList.contains('map-group-hdr'); s = s.nextElementSibling) {
-          if (!s.classList.contains('map-item')) continue;
-          if (s.classList.contains('sel') || (!s.classList.contains('tf-hide') &&
-              !(s.classList.contains('cf-hide') && !s.classList.contains('path')))) { any = true; break; }
+        // Chips: OR inside a group of chips (Azure RBAC or Entra role), AND across groups and with the box and the select.
+        let chHide = false;
+        if (chipOn) {
+          const mt = meta[id] || { types: [], tiers: [], staged: false };
+          if (cType.length && !cType.some(v => mt.types.indexOf(v) >= 0)) chHide = true;
+          if (!chHide && cTier.length && !cTier.some(v => mt.tiers.indexOf(v) >= 0)) chHide = true;
+          if (!chHide && cStaged && !(m.pending.has(id) || m.removing.has(id))) chHide = true;
         }
-        h.classList.toggle('tf-hide', !!q && !any);
-      });
-      const sel = document.querySelector('#mapBoard .map-col-filter[data-col="' + i + '"]');
+        el.classList.toggle('ch-hide', chHide);
+        const keys = el.__mapKeys || [];
+        let gHide = false;
+        for (let k = 0; k < keys.length; k++) { if (isCollapsed(keys[k], k)) { gHide = true; break; } }
+        el.classList.toggle('gr-hide', gHide);
+        if (tHide || chHide || gHide) el.classList.remove('drop-ok', 'drop-hot');
+        const passes = !tHide && !chHide && !(cHide && !el.classList.contains('path'));
+        const keep = el.classList.contains('sel') || el.classList.contains('pinned');
+        for (const k of keys) { if (passes) shownBy[k] = (shownBy[k] || 0) + 1; if (keep) keepBy[k] = true; }
+        total++; if (!tHide && !chHide && !cHide) shown++;
+      }
+      // A section heading (ENTRA ID ROLES, a group prefix, a subscription, ...) whose boxes the filters left nothing of goes
+      // too; each heading says how many of its boxes the filters leave, and a closed one says so with its caret.
+      const hdrs = (MAP.colHdrs && MAP.colHdrs[i]) || Array.from(colEl.querySelectorAll('.map-group-hdr, .map-az-hdr'));
+      for (const h of hdrs) {
+        const key = h.dataset.gkey, level = parseInt(h.dataset.level || '0', 10) || 0;
+        const nShown = shownBy[key] || 0, nAll = parseInt(h.dataset.total || '0', 10) || 0;
+        h.classList.toggle('tf-hide', filterOn && !nShown && !keepBy[key] && (!!q || chipOn || level > 0));
+        const parents = h.__mapKeys || [];
+        h.classList.toggle('gr-hide', parents.some((pk, pl) => isCollapsed(pk, pl)));
+        const closed = isCollapsed(key, level);
+        h.setAttribute('aria-expanded', closed ? 'false' : 'true');
+        const caret = h.querySelector('.map-az-caret'); if (caret) caret.textContent = closed ? '▸' : '▾';
+        const cnt = h.querySelector('.map-hdr-n');
+        if (cnt) { cnt.textContent = filterOn ? (nShown + ' of ' + nAll) : String(nAll); }
+        h.title = (closed ? 'Closed: click to show its ' : 'Click to close its ') + nAll + ' box' + (nAll === 1 ? '' : 'es') +
+          (filterOn ? ' (' + nShown + ' left by the filters)' : '') + '. Pinned boxes stay visible.';
+      }
+      // The column's header controls, found once and kept on the column (a document-wide query per keystroke walked every box).
+      let tools = colEl.__mapTools;
+      if (!tools || !tools.bar || !tools.bar.isConnected) {
+        let bar = null; const colBox = colEl.parentNode;
+        if (colBox) for (const c of colBox.children) { if (c.classList.contains('map-col-tools')) { bar = c; break; } }
+        tools = bar ? { bar: bar, sel: bar.querySelector('.map-col-filter'), inp: bar.querySelector('.map-col-text'), x: bar.querySelector('.map-col-text-x'), hint: bar.querySelector('.map-col-text-n') } : {};
+        if (bar) colEl.__mapTools = tools;
+      }
+      const sel = tools.sel || null;
       if (sel && sel.value !== f) sel.value = f;
-      const inp = document.querySelector('#mapBoard .map-col-text[data-col="' + i + '"]');
+      const inp = tools.inp || null;
       if (inp && inp.value !== raw && document.activeElement !== inp) inp.value = raw;
-      const x = document.querySelector('#mapBoard .map-col-text-x[data-col="' + i + '"]');
+      const x = tools.x || null;
       if (x) x.style.display = raw ? '' : 'none';
-      const hint = document.querySelector('#mapBoard .map-col-text-n[data-col="' + i + '"]');
-      if (hint) hint.textContent = q ? (shown + ' of ' + total) : '';
+      const hint = tools.hint || null;
+      if (hint) hint.textContent = (q || chipOn) ? (shown + ' of ' + total) : '';
     });
   }
+
+  // =====================================================================================================================
+  // MAP-SCALE (REQUIREMENTS 101.1 + 101.2, owner 2026-11-16: "think of it as a large enterprise install with many admins,
+  // many roles, many permission groups, like for azure some can have 500 delegation groups").
+  //   101.1 find fast: chips per column (type / tier / staged), scope groups (management group > subscription > resource
+  //         group) with counts, collapsed by default in a column of more than 60 boxes, remembered per viewer.
+  //   101.2 working set + bulk: pins, a multi-selection (Ctrl / Shift+click in the selection's column), bulk link (drag or
+  //         Ctrl+click) and bulk remove, the staging tray. Every link still goes through mapStageLink / mapStageUnlink /
+  //         mapUnstageLink one box at a time: nothing here writes a row of its own, so every guard applies unchanged.
+  // =====================================================================================================================
+  const MAP_COLLAPSE_AT = 60;
+  const MAP_TYPE_LABEL = { entra: 'Entra role', au: 'AU role', azure: 'Azure RBAC', workload: 'Workload', package: 'Access package' };
+  const MAP_TYPE_ORDER = ['entra', 'au', 'azure', 'workload', 'package'];
+  const MAP_TIER_ORDER = ['T0', 'T1', 'T2', 'L0', 'L1', 'L2', 'L3', 'L4'];
+  function mapLsGet(k) { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (_) { return null; } }
+  function mapLsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (_) { } }
+
+  // A heading and the boxes under it. `keys` = the group keys a box / heading sits under, outermost first.
+  function mapGroupHdr(col, key, label, level, parentKeys) {
+    const h = document.createElement('div');
+    h.className = level ? 'map-az-hdr' : 'map-group-hdr map-collapsible';
+    h.dataset.gkey = key; h.dataset.level = String(level); h.dataset.col = String(col);
+    h.setAttribute('role', 'button'); h.tabIndex = 0;
+    h.__mapKeys = parentKeys.slice();
+    const caret = document.createElement('span'); caret.className = 'map-az-caret'; caret.textContent = '▾';
+    const t = document.createElement('span'); t.className = 'map-hdr-t'; t.textContent = label;
+    const n = document.createElement('span'); n.className = 'map-hdr-n';
+    h.appendChild(caret); h.appendChild(t); h.appendChild(n);
+    const toggle = () => mapToggleCollapse(col, key, level);
+    h.onclick = (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); toggle(); };
+    h.onkeydown = (ev) => { if (ev && (ev.key === 'Enter' || ev.key === ' ')) { if (ev.preventDefault) ev.preventDefault(); toggle(); } };
+    return h;
+  }
+  function mapPlaceItem(el, keys, level) {
+    el.__mapKeys = keys.slice();
+    if (level) el.dataset.gl = String(level);
+    return el;
+  }
+  // Files `items` under `parentKey` by a scope path ([{key,label}] outermost first, or null = not filed). Unfiled first.
+  function mapAppendScoped(frag, col, parentKey, items, scopeOf, make, colCount) {
+    const loose = [], tree = new Map();
+    for (const n of items) {
+      const p = scopeOf(n);
+      if (!p || !p.length) { loose.push(n); continue; }
+      const k1 = p[0].key;
+      if (!tree.has(k1)) tree.set(k1, { label: p[0].label, rank: p[0].rank || 0, direct: [], sub: new Map() });
+      const g = tree.get(k1);
+      if (p.length < 2) { g.direct.push(n); continue; }
+      const k2 = k1 + '|' + p[1].key;
+      if (!g.sub.has(k2)) g.sub.set(k2, { label: p[1].label, items: [] });
+      g.sub.get(k2).items.push(n);
+    }
+    for (const n of loose) frag.appendChild(mapPlaceItem(make(n), [parentKey], 0));
+    const g1 = Array.from(tree.entries()).sort((a, b) => (a[1].rank - b[1].rank) || String(a[1].label).localeCompare(String(b[1].label)));
+    for (const [k1, g] of g1) {
+      const key1 = parentKey + '>' + k1;
+      frag.appendChild(mapGroupHdr(col, key1, g.label, 1, [parentKey]));
+      for (const n of g.direct) frag.appendChild(mapPlaceItem(make(n), [parentKey, key1], 1));
+      const g2 = Array.from(g.sub.entries()).sort((a, b) => String(a[1].label).localeCompare(String(b[1].label)));
+      for (const [k2, s] of g2) {
+        const key2 = parentKey + '>' + k2;
+        frag.appendChild(mapGroupHdr(col, key2, s.label, 2, [parentKey, key1]));
+        for (const n of s.items) frag.appendChild(mapPlaceItem(make(n), [parentKey, key1, key2], 2));
+      }
+    }
+  }
+  // An Azure scope path -> [management group] or [subscription(, resource group)]. A subscription path does not name its
+  // management group, so the two are separate top levels (management groups first).
+  function mapAzScopeOf(scopePath) {
+    const s = String(scopePath || '').trim();
+    if (!s) return null;
+    let mt = s.match(/\/managementGroups\/([^/]+)/i);
+    if (mt) return [{ key: 'mg:' + mt[1].toLowerCase(), label: 'Management group ' + mt[1], rank: 0 }];
+    mt = s.match(/\/subscriptions\/([^/]+)(?:\/resourceGroups\/([^/]+))?/i);
+    if (mt) {
+      const out = [{ key: 'sub:' + mt[1].toLowerCase(), label: 'Subscription ' + mt[1], rank: 1 }];
+      if (mt[2]) out.push({ key: 'rg:' + mt[2].toLowerCase(), label: 'Resource group ' + mt[2] });
+      return out;
+    }
+    if (s === '/') return [{ key: 'root', label: 'Tenant root', rank: 0 }];
+    return null;
+  }
+  // A permission group is filed under a scope when EVERY Azure grant it holds shares it (the longest common prefix of
+  // the scope paths of its Azure targets, one hop). A group with no Azure grant, or grants in two subscriptions, is not.
+  function mapAzScopeOfGroup(m, n) {
+    let common = null, any = false;
+    for (const e of (m.fwd[n.id] || [])) {
+      const t = m.byId[e.target];
+      if (!t || t.kind !== 'az-resource') continue;
+      const p = mapAzScopeOf(t.scopePath);
+      if (!p) return null;
+      if (!any) { common = p.slice(); any = true; continue; }
+      let k = 0; while (k < common.length && k < p.length && common[k].key === p[k].key) k++;
+      common = common.slice(0, k);
+      if (!common.length) return null;
+    }
+    return any ? common : null;
+  }
+
+  // Type (what it grants) and tier per box, built once per render. Types flow right to left: a target is its own kind, a
+  // permission group what its targets are (or Workload: app RBAC), a direct group what its permission groups are, a person
+  // what their direct groups are, an access package its groups plus "Access package".
+  const MAP_KIND_TYPE = { 'entra-role': 'entra', 'au-role': 'au', 'az-resource': 'azure', 'workload-target': 'workload' };
+  function mapTiersOf(n) {
+    const out = [];
+    const add = v => { v = String(v || '').trim().toUpperCase(); if (MAP_TIER_ORDER.indexOf(v) >= 0 && out.indexOf(v) < 0) out.push(v); };
+    add(n.tier); add(n.level && /^\d$/.test(String(n.level).trim()) ? 'L' + String(n.level).trim() : n.level);
+    // The box's own tier / level field wins; the name is read only for what the fields do not say.
+    const hasT = out.some(v => v[0] === 'T'), hasL = out.some(v => v[0] === 'L');
+    for (const s of [n.groupTag, n.label, n.kind === 'admin' ? n.id : '']) {
+      const str = String(s || '');
+      const t = hasT ? null : str.match(/(?:^|[-_ .])t([0-2])(?=$|[-_ .@])/i); if (t) add('T' + t[1]);
+      const l = hasL ? null : str.match(/(?:^|[-_ .])l([0-4])(?=$|[-_ .@])/i); if (l) add('L' + l[1]);
+    }
+    return out;
+  }
+  function mapComputeMeta(m, cols) {
+    const meta = {};
+    const uni = (into, from) => { for (const v of from) if (into.indexOf(v) < 0) into.push(v); };
+    for (const c of cols) for (const n of c) meta[n.id] = { types: [], tiers: mapTiersOf(n) };
+    for (const n of cols[3]) { const t = MAP_KIND_TYPE[n.kind]; if (t) meta[n.id].types.push(t); }
+    for (let ci = 2; ci >= 0; ci--) {
+      for (const n of cols[ci]) {
+        const mt = meta[n.id];
+        if (n.kind === 'access-package') mt.types.push('package');
+        if (m.workload.has(n.id)) uni(mt.types, ['workload']);
+        for (const e of (m.fwd[n.id] || [])) { const tm = meta[e.target]; if (tm && tm !== mt) uni(mt.types, tm.types); }
+      }
+    }
+    MAP.meta = meta;
+    MAP.colCount = cols.map(c => c.length);
+    // The per-render indexes the filter and the wires read (built here once, so a keystroke never queries the DOM per box).
+    MAP.elById = new Map();
+    MAP.colItems = []; MAP.colHdrs = [];
+    ['mapCol0', 'mapCol1', 'mapCol2', 'mapCol3'].forEach((cid, i) => {
+      const colEl = document.getElementById(cid);
+      const its = colEl ? Array.from(colEl.querySelectorAll('.map-item')) : [];
+      MAP.colItems[i] = its;
+      MAP.colHdrs[i] = colEl ? Array.from(colEl.querySelectorAll('.map-group-hdr, .map-az-hdr')) : [];
+      for (const el of its) {
+        MAP.elById.set(el.dataset.id, el);
+        // The text a column box is matched on (mapColTextMatch), from the node itself: its name, id, role, tag, scope and
+        // the type word its badge shows (central / access package / package group). No DOM read per keystroke.
+        const n = m.byId[el.dataset.id];
+        if (n) {
+          const words = [n.label || n.id, n.id, n.roleName, n.groupTag, n.scopePath];
+          if (n.central) words.push('central');
+          if (n.kind === 'access-package') words.push(n.paused ? 'package, paused' : 'access package');
+          else if (apIsLockedGroup(n)) words.push('package group');
+          el.__mapHay = words.filter(v => v != null && v !== '').map(v => String(v).toLowerCase()).join('\n');
+        }
+      }
+      const tot = {};
+      for (const el of its) for (const k of (el.__mapKeys || [])) tot[k] = (tot[k] || 0) + 1;
+      for (const h of MAP.colHdrs[i]) h.dataset.total = String(tot[h.dataset.gkey] || 0);
+    });
+  }
+
+  // ----- chips ---------------------------------------------------------------------------------------------------------
+  // One state per column: { type: [...], tier: [...], staged: bool }, remembered per viewer ('pim.map.colChips').
+  function mapChipState() {
+    if (!MAP.colChips) {
+      const s = mapLsGet('pim.map.colChips');
+      MAP.colChips = [0, 1, 2, 3].map(i => {
+        const c = (Array.isArray(s) && s[i] && typeof s[i] === 'object') ? s[i] : {};
+        return { type: Array.isArray(c.type) ? c.type.filter(v => MAP_TYPE_ORDER.indexOf(v) >= 0) : [],
+                 tier: Array.isArray(c.tier) ? c.tier.filter(v => MAP_TIER_ORDER.indexOf(v) >= 0) : [],
+                 staged: !!c.staged };
+      });
+    }
+    return MAP.colChips;
+  }
+  function mapSaveChips() {
+    const st = mapChipState();
+    mapLsSet('pim.map.colChips', st.some(c => c.type.length || c.tier.length || c.staged) ? st : null);
+  }
+  // The chips each column offers: only values its boxes carry, and a group of chips only when it can narrow the column
+  // (two values or more, or one value that not every box has). An active chip is always shown, so it can be switched off.
+  function mapRenderColChips(only) {
+    const m = MAP.model; if (!m) return;
+    const st = mapChipState(), meta = MAP.meta || {};
+    [0, 1, 2, 3].forEach(i => {
+      if (typeof only === 'number' && only !== i) return;
+      const body = document.getElementById('mapCol' + i);
+      const col = body && body.parentNode; if (!col) return;
+      // The column's own header children only (a query over the column would walk its 2000 boxes too).
+      const kid = (test) => { for (const c of col.children) if (test(c)) return c; return null; };
+      let row = kid(c => c.classList.contains('map-col-chips'));
+      if (!row) {
+        row = document.createElement('div'); row.className = 'map-col-chips'; row.dataset.col = String(i);
+        const bar = kid(c => c.classList.contains('map-col-tools'));
+        if (bar) bar.insertAdjacentElement('afterend', row); else { const h = kid(c => c.tagName === 'H3'); if (h) h.insertAdjacentElement('afterend', row); }
+      }
+      const items = (MAP.colItems && MAP.colItems[i]) || [];
+      const tc = {}, rc = {}; let staged = 0;
+      for (const el of items) {
+        const id = el.dataset.id, mt = meta[id]; if (!mt) continue;
+        for (const v of mt.types) tc[v] = (tc[v] || 0) + 1;
+        for (const v of mt.tiers) rc[v] = (rc[v] || 0) + 1;
+        if (m.pending.has(id) || m.removing.has(id)) staged++;
+      }
+      const c = st[i];
+      const useful = (counts, active) => { const vals = Object.keys(counts); return active.length > 0 || vals.length > 1 || (vals.length === 1 && counts[vals[0]] < items.length); };
+      let h = '';
+      const chip = (dim, val, label, n, on) => '<button type="button" class="map-chip' + (on ? ' on' : '') + '" data-col="' + i + '" data-dim="' + dim + '" data-val="' + escapeHtml(val) +
+        '" aria-pressed="' + (on ? 'true' : 'false') + '" title="Show only these (click again to show all)">' + escapeHtml(label) + '<span class="map-chip-n">' + n + '</span></button>';
+      if (useful(tc, c.type)) for (const v of MAP_TYPE_ORDER) { if (tc[v] || c.type.indexOf(v) >= 0) h += chip('type', v, MAP_TYPE_LABEL[v], tc[v] || 0, c.type.indexOf(v) >= 0); }
+      if (useful(rc, c.tier)) for (const v of MAP_TIER_ORDER) { if (rc[v] || c.tier.indexOf(v) >= 0) h += chip('tier', v, v, rc[v] || 0, c.tier.indexOf(v) >= 0); }
+      if (staged || c.staged) h += chip('staged', '1', 'Staged', staged, c.staged);
+      row.innerHTML = h;
+      row.querySelectorAll('.map-chip').forEach(b => {
+        b.onclick = (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); mapToggleChip(i, b.dataset.dim, b.dataset.val); };
+      });
+    });
+  }
+  function mapToggleChip(i, dim, val) {
+    const c = mapChipState()[i]; if (!c) return;
+    if (dim === 'staged') c.staged = !c.staged;
+    else if (dim === 'type' || dim === 'tier') { const a = c[dim], k = a.indexOf(val); if (k >= 0) a.splice(k, 1); else a.push(val); }
+    mapSaveChips();
+    mapRenderColChips(i);
+    mapApplyColFilter(i);
+    if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+  }
+
+  // ----- collapsible groups --------------------------------------------------------------------------------------------
+  // Remembered per viewer ('pim.map.collapse': { "<group key>": true|false }). Without a remembered choice a scope group
+  // (subscription, resource group, ...) is closed when its column holds more than MAP_COLLAPSE_AT boxes; a section heading
+  // (ENTRA ID ROLES, a tag prefix) is open.
+  function mapCollapseState() {
+    if (!MAP.collapse) { const s = mapLsGet('pim.map.collapse'); MAP.collapse = (s && typeof s === 'object' && !Array.isArray(s)) ? s : {}; }
+    return MAP.collapse;
+  }
+  function mapIsCollapsed(state, key, level, colCount) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) return !!state[key];
+    return level > 0 && colCount > MAP_COLLAPSE_AT;
+  }
+  function mapToggleCollapse(col, key, level) {
+    const st = mapCollapseState();
+    const now = mapIsCollapsed(st, key, level, MAP.colCount ? (MAP.colCount[col] || 0) : 0);
+    st[key] = !now;
+    const keys = Object.keys(st);
+    if (keys.length > 400) delete st[keys[0]];   // a bounded memory
+    mapLsSet('pim.map.collapse', st);
+    mapApplyColFilter(col);
+    if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+  }
+
+  // ----- pins ----------------------------------------------------------------------------------------------------------
+  // Remembered per viewer ('pim.map.pins': [ids]). A pin only keeps a box visible; it changes nothing.
+  function mapPinState() {
+    if (!MAP.pins) { const s = mapLsGet('pim.map.pins'); MAP.pins = new Set(Array.isArray(s) ? s.filter(v => typeof v === 'string').slice(0, 500) : []); }
+    return MAP.pins;
+  }
+  function mapTogglePin(id) {
+    const p = mapPinState();
+    if (p.has(id)) p.delete(id); else p.add(id);
+    mapLsSet('pim.map.pins', p.size ? Array.from(p) : null);
+    const el = MAP.elById ? MAP.elById.get(id) : null;
+    if (el) {
+      const on = p.has(id);
+      el.classList.toggle('pinned', on);
+      const b = el.querySelector('.map-pin');
+      if (b) { b.textContent = on ? '★' : '☆'; b.title = on ? 'Pinned: stays visible whatever the filters. Click to unpin.' : 'Pin: keep this box visible whatever the filters'; b.setAttribute('aria-label', on ? 'Unpin' : 'Pin'); }
+      const m = MAP.model, n = m && m.byId[id];
+      mapApplyColFilter(n ? m.colOf(n) : undefined);
+    }
+    mapScaleChrome();
+    if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+  }
+  function mapClearPins() {
+    const p = mapPinState();
+    if (!p.size) return;
+    const ids = Array.from(p);
+    p.clear(); mapLsSet('pim.map.pins', null);
+    for (const id of ids) {
+      const el = MAP.elById ? MAP.elById.get(id) : null;
+      if (el) { el.classList.remove('pinned'); const b = el.querySelector('.map-pin'); if (b) { b.textContent = '☆'; b.setAttribute('aria-label', 'Pin'); } }
+    }
+    mapApplyColFilter();
+    mapScaleChrome();
+    if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+  }
+
+  // ----- multi-selection -----------------------------------------------------------------------------------------------
+  // Only boxes that can be linked (people, direct groups, permission groups), in the SAME column as the selection.
+  function mapMultiCan(anchorId, id) {
+    const m = MAP.model; if (!m) return false;
+    const a = m.byId[anchorId], n = m.byId[id];
+    return !!(a && n && MAP_LINK_ACTIONS[a.kind] && MAP_LINK_ACTIONS[n.kind] && m.colOf(a) === m.colOf(n) && !mapPairMode(a.kind, n.kind));
+  }
+  function mapMultiToggle(id, range) {
+    const m = MAP.model; if (!m || !MAP.sel) return;
+    if (!MAP.multi) MAP.multi = new Set();
+    if (!MAP.multi.size) MAP.multi.add(MAP.sel);
+    if (range) {
+      // Shift+click: every VISIBLE linkable box of the column between the selection and this one.
+      const col = m.colOf(m.byId[MAP.sel]);
+      const items = ((MAP.colItems && MAP.colItems[col]) || []).filter(el => !mapTfHidden(el) && !(el.classList.contains('cf-hide') && !el.classList.contains('pinned')));
+      const ids = items.map(el => el.dataset.id);
+      let a = ids.indexOf(MAP.sel), b = ids.indexOf(id);
+      if (a >= 0 && b >= 0) { if (a > b) { const t = a; a = b; b = t; } for (let k = a; k <= b; k++) if (mapMultiCan(MAP.sel, ids[k])) MAP.multi.add(ids[k]); }
+      else MAP.multi.add(id);
+    } else if (MAP.multi.has(id)) { MAP.multi.delete(id); }
+    else { MAP.multi.add(id); }
+    if (MAP.multi.size < 2) MAP.multi.clear();
+    mapMultiPaint();
+    mapScaleChrome();
+  }
+  function mapMultiPaint() {
+    const s = MAP.multi || new Set();
+    if (MAP.elById) MAP.elById.forEach((el, id) => el.classList.toggle('msel', s.has(id)));
+  }
+  function mapMultiClear(quiet) {
+    if (MAP.multi) MAP.multi.clear();
+    mapMultiPaint();
+    if (!quiet) mapScaleChrome();
+  }
+
+  // The SAME check mapStageLink makes before it stages: is this pair already linked (committed) or already staged?
+  async function mapLinkState(from, to) {
+    const m = MAP.model;
+    const f = await mapEnsureLinkRows(from, to);
+    const edge = (m.fwd[from.id] || []).find(e => e.target === to.id) || (m.back[from.id] || []).find(e => e.source === to.id);
+    return {
+      committed: !!((f && f.committed) || (edge && !edge.pending && !(f && f.pendingIndex >= 0 && !f.committed))),
+      staged: !!(f && !f.committed && f.pendingIndex >= 0),
+      removing: !!(f && f.removing)
+    };
+  }
+  // The question asked before many links are staged at once (more than 10): the count and the first 15, in plain words.
+  async function mapBulkAsk(title, verbLine, pairs, danger, okLabel) {
+    const first = pairs.slice(0, 15).map(p => (p.from.label || p.from.id) + ' → ' + (p.to.label || p.to.id));
+    return await pimConfirm({
+      title: title + ' (' + pairs.length + ')',
+      body: verbLine + ' Each one is staged under Pending changes; nothing is written until you commit there.',
+      note: first.join('; ') + (pairs.length > 15 ? '; and ' + (pairs.length - 15) + ' more.' : '.'),
+      okLabel: okLabel || 'Stage them', danger: !!danger
+    });
+  }
+  // Link every box in `ids` to `toId`: once per box through mapStageLink, so the pair rule, the access-package lock, the
+  // nesting type and the staging are exactly a single drop's. A pair already linked or staged is left alone (a single
+  // drop on it would REMOVE or UNDO it -- a bulk give never does either).
+  // MAP-IMPACT 101.3 / 101.4: `opts.asked` = the caller already asked ONE question naming these (Make like); `opts.quiet` = the
+  // caller re-renders and reports itself; `opts.title` names the question. The impact of the whole set is in the one question.
+  async function mapBulkLink(ids, toId, opts) {
+    opts = opts || {};
+    const m = MAP.model; const to = m && m.byId[toId];
+    if (!to) return { ok: false };
+    const plan = [], skipped = [];
+    for (const id of ids) {
+      const from = m.byId[id];
+      if (!from || id === toId) continue;
+      if (!mapPairMode(from.kind, to.kind)) { skipped.push(from.label || from.id); continue; }
+      const s = await mapLinkState(from, to);
+      if (s.committed || s.staged) { skipped.push(from.label || from.id); continue; }
+      plan.push({ from: from, to: to });
+    }
+    if (!plan.length) {
+      if (!opts.quiet) mapDropResult({ ok: false, reason: 'nothing to stage: each selected box is already linked to "' + (to.label || to.id) + '", already staged, or cannot be linked to it.' });
+      return { ok: false, staged: 0, skipped: skipped.length };
+    }
+    // MAP-IMPACT 101.3: what they reach together goes into the bulk path's ONE question (never a second dialog per box);
+    // it is asked above 10 links, and also for fewer when they reach Tier-0 / L0 or more than 25 permissions.
+    const imp = mapImpactMany(m, plan);
+    const ask = !opts.asked && (plan.length > 10 || imp.t0 > 0 || imp.n > MAP_IMPACT_ASK_OVER);
+    if (ask && !(await mapBulkAsk(opts.title || 'Give access to many at once', 'This links ' + plan.length + ' selected boxes to "' + (to.label || to.id) + '". ' + mapImpactManyText(imp), plan, imp.t0 > 0))) {
+      if (!opts.quiet) mapDropResult({ ok: false, reason: 'nothing staged -- cancelled.' });
+      return { ok: false, cancelled: true, staged: 0 };
+    }
+    let ok = 0; const refused = [];
+    for (const p of plan) {
+      const res = await mapStageLink(p.from.id, toId, { impactAsked: true });
+      if (res && res.ok && !res.undone && !res.removed && !res.removeUndone) ok++;
+      else refused.push((p.from.label || p.from.id) + (res && res.reason ? ': ' + res.reason : ''));
+    }
+    if (opts.quiet) return { ok: ok > 0, staged: ok, skipped: skipped.length, refused: refused.length, refusedList: refused };
+    const keep = MAP.sel;
+    renderAccessMap();
+    if (keep && MAP.model && MAP.model.byId[keep]) mapSelect(keep, true);
+    mapBulkNote(ok + ' link' + (ok === 1 ? '' : 's') + ' staged to <b>' + escapeHtml(to.label || to.id) + '</b>' +
+      (skipped.length ? ' &middot; ' + skipped.length + ' already linked or staged, left as they are' : '') +
+      (refused.length ? ' &middot; ' + refused.length + ' not staged (' + escapeHtml(refused.slice(0, 3).join('; ')) + (refused.length > 3 ? '; ...' : '') + ')' : ''), false);
+    return { ok: ok > 0, staged: ok, skipped: skipped.length, refused: refused.length };
+  }
+  // Remove `toId` from every box in `ids` that is linked to it today: ONE question naming them (pimConfirm, the count and
+  // the first 15), then mapStageUnlink per link -- the same Action=Remove, central read-only refusal and managed-tenant
+  // question as the red Remove buttons. A link to a package group is left alone (Access packages own it).
+  async function mapBulkUnlink(ids, toId, opts) {
+    opts = opts || {};   // MAP-IMPACT 101.4: { asked, quiet } as mapBulkLink (Make like asks once for its gives and removals)
+    const m = MAP.model; const to = m && m.byId[toId];
+    if (!to) return { ok: false };
+    const plan = [];
+    for (const id of ids) {
+      const from = m.byId[id];
+      if (!from || !mapPairMode(from.kind, to.kind)) continue;
+      if (apIsLockedGroup(from) || apIsLockedGroup(to)) continue;
+      const s = await mapLinkState(from, to);
+      if (s.committed && !s.removing) plan.push({ from: from, to: to });
+    }
+    if (!plan.length) { if (!opts.quiet) mapBulkNote('nothing to remove: none of the selected is linked to <b>' + escapeHtml(to.label || to.id) + '</b> today.', true); return { ok: false, staged: 0 }; }
+    if (!opts.asked && !(await mapBulkAsk('Take this access away', 'This stages the removal of ' + plan.length + ' link' + (plan.length === 1 ? '' : 's') + ' to "' + (to.label || to.id) + '" (Action=Remove; the engine removes exactly these assignments after you commit).', plan, true, 'Stage the removals'))) {
+      mapBulkNote('nothing staged -- cancelled.', true);
+      return { ok: false, cancelled: true, staged: 0 };
+    }
+    let ok = 0; const refused = [];
+    for (const p of plan) {
+      const res = await mapStageUnlink(p.from, p.to, { confirmed: true });
+      if (res && res.ok && res.removed) ok++;
+      else refused.push((p.from.label || p.from.id) + (res && res.reason ? ': ' + res.reason : ''));
+    }
+    if (opts.quiet) return { ok: ok > 0, staged: ok, refused: refused.length, refusedList: refused };
+    const keep = MAP.sel;
+    renderAccessMap();
+    if (keep && MAP.model && MAP.model.byId[keep]) mapSelect(keep, true);
+    mapBulkNote(ok + ' link' + (ok === 1 ? '' : 's') + ' to <b>' + escapeHtml(to.label || to.id) + '</b> staged for removal' +
+      (refused.length ? ' &middot; ' + refused.length + ' not staged (' + escapeHtml(refused.slice(0, 3).join('; ')) + (refused.length > 3 ? '; ...' : '') + ')' : ''), true);
+    return { ok: ok > 0, staged: ok, refused: refused.length };
+  }
+  function mapBulkNote(html, rm) {
+    const d = document.getElementById('mapDetail'); if (!d) return;
+    d.querySelectorAll('.map-drop-note').forEach(x => x.remove());
+    const note = document.createElement('div');
+    note.className = 'map-drop-note map-bulk-note' + (rm ? ' rm' : '');
+    note.innerHTML = html + ' &mdash; undo per line under <a class="mapBulkTray">Staged links</a>, commit under <a class="mapBulkSave">Pending changes</a>';
+    d.insertBefore(note, d.firstChild);
+    const a = note.querySelector('.mapBulkTray'); if (a) a.onclick = () => mapTrayOpen(true);
+    const s = note.querySelector('.mapBulkSave'); if (s) s.onclick = () => switchTab('save');
+  }
+  // "Remove from N selected": what the selected boxes are linked to today, each with how many of them; a click stages
+  // those removals (mapBulkUnlink).
+  function mapBulkRemovePicker() {
+    const m = MAP.model; if (!m || !MAP.multi || MAP.multi.size < 2) return;
+    const ids = Array.from(MAP.multi);
+    const cnt = new Map();
+    for (const id of ids) {
+      const seen = new Set();
+      for (const e of (m.fwd[id] || []).concat(m.back[id] || [])) {
+        const other = e.source === id ? e.target : e.source;
+        if (e.pending || seen.has(other)) continue;
+        const o = m.byId[other], f = m.byId[id];
+        if (!o || !f || !mapPairMode(f.kind, o.kind)) continue;
+        seen.add(other); cnt.set(other, (cnt.get(other) || 0) + 1);
+      }
+    }
+    const d = document.getElementById('mapDetail'); if (!d) return;
+    d.querySelectorAll('.map-bulk-pick').forEach(x => x.remove());
+    const wrap = document.createElement('div');
+    wrap.className = 'map-pick rm map-bulk-pick';
+    const list = Array.from(cnt.entries()).map(([id, k]) => ({ id: id, k: k, label: (m.byId[id].label || id) }))
+      .sort((a, b) => (b.k - a.k) || String(a.label).localeCompare(String(b.label)));
+    wrap.innerHTML = '<div class="map-pick-title">Remove from the ' + ids.length + ' selected <span>&mdash; what they are linked to today; click one to stage its removal from each of them (one question first)</span></div>' +
+      '<div class="map-pick-list" id="mapBulkPickList">' + (list.length ? list.map(c =>
+        '<div class="map-pick-item linked" data-pick="' + escapeHtml(c.id) + '"><span>' + escapeHtml(c.label) + '</span><span class="mp-linked">linked to ' + c.k + ' of ' + ids.length + '</span></div>').join('')
+        : '<div class="map-pick-empty">None of the selected is linked to anything today.</div>') + '</div>';
+    d.insertBefore(wrap, d.firstChild);
+    wrap.querySelectorAll('.map-pick-item').forEach(el => { el.onclick = () => mapBulkUnlink(ids, el.dataset.pick); });
+  }
+
+  // ----- the staging tray ----------------------------------------------------------------------------------------------
+  // Every link staged to be given or removed, read from pendingChanges (the store Pending changes commits), with Undo per
+  // line through the existing paths: a staged give -> mapUnstageLink (takes the row back out), a staged removal ->
+  // mapStageUnlink (its own "click again" undo puts Action back to Assign / drops the delete).
+  function mapTrayItems() {
+    const m = MAP.model; if (!m) return [];
+    const upn = new Map(), tag = new Map();
+    for (const n of m.nodes) {
+      if (n.kind === 'admin') upn.set(String(n.id).toLowerCase(), n);
+      if (n.groupTag) tag.set(String(n.groupTag).toLowerCase(), n);
+    }
+    const out = [];
+    const scan = (base, keyOf, ends) => {
+      const p = pendingChanges[base]; if (!p || !Array.isArray(p.rows)) return;
+      const baseAct = new Map();
+      for (const b of (p.baseline || [])) { const k = keyOf(b); if (k) baseAct.set(k, String(b.Action || '').trim().toLowerCase()); }
+      p.rows.forEach((r, i) => {
+        const k = keyOf(r); if (!k) return;
+        const act = String(r.Action || '').trim().toLowerCase();
+        const del = !!(p.deletes && p.deletes.has(i));
+        let what = null;
+        if (del || (act === 'remove' && baseAct.get(k) !== 'remove')) what = 'remove';
+        else if (!baseAct.has(k)) what = 'add';
+        if (!what) return;
+        const e = ends(r);
+        out.push({ base: base, what: what, from: e[0], to: e[1], fromLabel: e[0] ? (e[0].label || e[0].id) : e[2], toLabel: e[1] ? (e[1].label || e[1].id) : e[3] });
+      });
+    };
+    scan('PIM-Assignments-Admins', r => (r.Username && r.GroupTag) ? String(r.Username).toLowerCase() + '>' + String(r.GroupTag).toLowerCase() : null,
+      r => [upn.get(String(r.Username).toLowerCase()), tag.get(String(r.GroupTag).toLowerCase()), r.Username, r.GroupTag]);
+    scan('PIM-Assignments-Groups', r => (r.TargetGroupTag && r.SourceGroupTag) ? String(r.TargetGroupTag).toLowerCase() + '>' + String(r.SourceGroupTag).toLowerCase() : null,
+      r => [tag.get(String(r.TargetGroupTag).toLowerCase()), tag.get(String(r.SourceGroupTag).toLowerCase()), r.TargetGroupTag, r.SourceGroupTag]);
+    return out;
+  }
+  function mapTrayOpen(open) {
+    MAP.trayOpen = (open === undefined) ? !MAP.trayOpen : !!open;
+    mapRenderTray();
+  }
+  function mapRenderTray() {
+    const tray = document.getElementById('mapTray'), btn = document.getElementById('mapTrayBtn');
+    const items = mapTrayItems();
+    if (btn) {
+      btn.textContent = 'Staged links (' + items.length + ')';
+      btn.setAttribute('aria-expanded', MAP.trayOpen ? 'true' : 'false');
+      btn.classList.toggle('on', !!MAP.trayOpen);
+    }
+    if (!tray) return;
+    tray.style.display = MAP.trayOpen ? 'block' : 'none';
+    if (!MAP.trayOpen) { tray.innerHTML = ''; return; }
+    const adds = items.filter(x => x.what === 'add').length, rms = items.length - adds;
+    let h = '<div class="mt-head">' + (items.length
+      ? (adds + ' to be given, ' + rms + ' to be removed. Nothing is written until you commit under <a id="mapTraySave" style="cursor:pointer;color:#0969da;">Pending changes</a>.')
+      : 'Nothing staged on the map.') + '</div>';
+    items.forEach((x, i) => {
+      const can = !!(x.from && x.to);
+      h += '<div class="mt-line' + (x.what === 'remove' ? ' rm' : '') + '" data-i="' + i + '">' +
+        '<span class="mt-sign">' + (x.what === 'remove' ? '−' : '+') + '</span>' +
+        '<span class="mt-what" title="' + escapeHtml(x.fromLabel + ' → ' + x.toLabel) + '">' + escapeHtml(x.fromLabel) + ' → ' + escapeHtml(x.toLabel) +
+        ' <span style="color:#57606a">(' + (x.what === 'remove' ? 'remove' : 'give') + ')</span></span>' +
+        (can ? '<button type="button" class="mt-undo" data-i="' + i + '">Undo</button>' : '<span style="color:#57606a">undo under Pending changes</span>') + '</div>';
+    });
+    tray.innerHTML = h;
+    const go = tray.querySelector('#mapTraySave'); if (go) go.onclick = () => switchTab('save');
+    tray.querySelectorAll('.mt-undo').forEach(b => {
+      b.onclick = async () => {
+        const x = items[parseInt(b.dataset.i, 10)]; if (!x) return;
+        if (x.what === 'add') mapUnstageLink(x.from, x.to);
+        else await mapStageUnlink(x.from, x.to);
+        const keep = MAP.sel;
+        renderAccessMap();
+        if (keep && MAP.model && MAP.model.byId[keep]) mapSelect(keep, true);
+      };
+    });
+  }
+  // Ctrl / Shift held with a selection (Admin, server): its column shows its other boxes, faded, to Ctrl / Shift+click.
+  function mapMultiKeys(on) {
+    const board = document.getElementById('mapBoard'); if (!board) return;
+    const m = MAP.model, n = (m && MAP.sel) ? m.byId[MAP.sel] : null;
+    const can = !!(on && n && isServer && roleAtLeast('Admin') && MAP_LINK_ACTIONS[n.kind]);
+    board.classList.toggle('multi-keys', can);
+    const ci = can ? m.colOf(n) : -1;
+    board.querySelectorAll('.map-col').forEach((c, i) => c.classList.toggle('sel-col', i === ci));
+  }
+  document.addEventListener('keydown', (e) => { if (e && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Meta')) mapMultiKeys(true); });
+  document.addEventListener('keyup', (e) => { if (e && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Meta')) mapMultiKeys(false); });
+  window.addEventListener('blur', () => mapMultiKeys(false));
+
+  // The toolbar pieces of the working set: Clear pins, the multi-selection bar, the tray button / panel.
+  function mapScaleChrome() {
+    const pins = mapPinState();
+    const pb = document.getElementById('mapPinsClear');
+    if (pb) {
+      pb.style.display = pins.size ? '' : 'none';
+      pb.textContent = 'Clear pins (' + pins.size + ')';
+      pb.onclick = () => mapClearPins();
+    }
+    const bar = document.getElementById('mapMultiBar');
+    if (bar) {
+      const n = MAP.multi ? MAP.multi.size : 0;
+      if (n > 1) {
+        bar.style.display = 'inline-flex';
+        bar.innerHTML = '<span><b>' + n + ' selected</b> &mdash; drag one of them onto a box (or Ctrl+click it) to link them all</span>' +
+          '<button type="button" id="mapMultiRemove" class="danger map-act-remove">Remove from ' + n + ' selected</button>' +
+          '<button type="button" id="mapMultiClear" class="ghost">Clear selection</button>';
+        bar.querySelector('#mapMultiRemove').onclick = () => mapBulkRemovePicker();
+        bar.querySelector('#mapMultiClear').onclick = () => mapMultiClear(false);
+      } else { bar.style.display = 'none'; bar.innerHTML = ''; }
+    }
+    const tb = document.getElementById('mapTrayBtn');
+    if (tb) tb.onclick = () => mapTrayOpen();
+    mapRenderTray();
+  }
+
+  // =====================================================================================================================
+  // MAP-IMPACT (REQUIREMENTS 101.3 + 101.4, owner 2026-11-16: "think as an admin, what does he need to delegate or remove
+  // permissions and show quick overview ... large enterprise install with many admins, many roles, many permission groups").
+  //   101.3 the impact of a give (mapImpact: the permissions the far end reaches, Tier-0 / L0 marked) -- one line after a
+  //         small give, ONE question before a give that reaches Tier-0 / L0 or more than 25 permissions (in mapStageLink, so
+  //         every route asks; the bulk path asks once for all of them); "Who has this" for a group or a permission: every
+  //         person with the shortest path, Remove = the person's own first hop.
+  //   101.4 the people x direct groups matrix (a tick = mapStageLink, exactly the board's Ctrl+click), "Make like" (the
+  //         bulk paths, one question), "Compare" (view only).
+  //   Nothing here writes a row: every change goes through mapStageLink / mapStageUnlink / mapUnstageLink / mapBulkLink /
+  //   mapBulkUnlink, so the access-package lock, central read-only, Action=Remove, the managed-tenant question and the
+  //   commit's SuperAdmin hold and approvals apply unchanged.
+  // =====================================================================================================================
+  const MAP_IMPACT_ASK_OVER = 25;
+  const MAP_MX_PAGE = 50;
+  const MAP_WHO_KINDS = { 'role-group': 1, 'permission-group': 1, 'entra-role': 1, 'au-role': 1, 'az-resource': 1, 'workload-target': 1 };
+  function mapLbl(n) { return n ? String(n.label || n.id) : ''; }
+  // Tier-0 / L0: the box's own tier / level (or its name, as the Tier chips read it). People and packages are never the reason.
+  function mapIsT0(n) {
+    if (!n || n.kind === 'admin' || n.kind === 'access-package') return false;
+    const t = mapTiersOf(n);
+    return t.indexOf('T0') >= 0 || t.indexOf('L0') >= 0;
+  }
+  // Every permission reachable from startId (the column-4 targets and the workload groups, as mapReachCount counts them),
+  // each marked Tier-0 / L0 when the permission itself, or a group on the way to it from startId, is T0 / L0. A link staged
+  // for removal is not followed: this is the access as it will be after the staged changes are committed.
+  function mapReachTiered(m, startId) {
+    const hot = new Map([[startId, mapIsT0(m.byId[startId])]]);
+    const q = [startId];
+    while (q.length) {
+      const cur = q.shift(), t = hot.get(cur);
+      for (const e of (m.fwd[cur] || [])) {
+        if (e.removing) continue;
+        const nt = t || mapIsT0(m.byId[e.target]);
+        if (!hot.has(e.target)) { hot.set(e.target, nt); q.push(e.target); }
+        else if (nt && !hot.get(e.target)) { hot.set(e.target, true); q.push(e.target); }
+      }
+    }
+    const out = new Map();
+    hot.forEach((t, id) => { const n = m.byId[id]; if (n && (m.colOf(n) === 3 || m.workload.has(id))) out.set(id, t); });
+    return out;
+  }
+  // A give links a receiver (the left end) to the box it is given (the right end): the receiver gets what the right end reaches.
+  function mapImpact(m, fromId, toId) {
+    const a = m && m.byId[fromId], b = m && m.byId[toId];
+    if (!a || !b) return null;
+    const recv = (m.colOf(a) <= m.colOf(b)) ? a : b, via = (recv === a) ? b : a;
+    const reach = mapReachTiered(m, via.id), had = mapReachTiered(m, recv.id);
+    const t0 = [], all = []; let fresh = 0;
+    reach.forEach((hot, id) => { const l = mapLbl(m.byId[id]); all.push(l); if (hot) t0.push(l); if (!had.has(id)) fresh++; });
+    t0.sort((x, y) => x.localeCompare(y)); all.sort((x, y) => x.localeCompare(y));
+    const people = recv.kind === 'role-group'
+      ? new Set((m.back[recv.id] || []).filter(e => !e.removing && m.byId[e.source] && m.byId[e.source].kind === 'admin').map(e => e.source)).size : 0;
+    return { recv: recv, via: via, n: all.length, t0: t0.length, fresh: fresh, t0List: t0, list: all, people: people,
+             ask: t0.length > 0 || all.length > MAP_IMPACT_ASK_OVER };
+  }
+  function mapImpactText(imp) {
+    if (!imp) return '';
+    return 'This gives ' + mapLbl(imp.recv) + (imp.people ? ' (and its ' + imp.people + ' ' + (imp.people === 1 ? 'person' : 'people') + ')' : '') + ' ' +
+      imp.n + ' permission' + (imp.n === 1 ? '' : 's') + (imp.t0 ? ' (' + imp.t0 + ' of them Tier-0 / L0)' : '') + ', via ' + mapLbl(imp.via) +
+      ((imp.n && imp.fresh < imp.n) ? ' -- ' + imp.fresh + ' of them new' : '') + '.';
+  }
+  async function mapImpactAsk(imp) {
+    const src = imp.t0 ? imp.t0List : imp.list;
+    const first = src.slice(0, 15);
+    return await pimConfirm({
+      title: imp.t0 ? 'Give Tier-0 access?' : 'Give ' + imp.n + ' permissions at once?',
+      body: mapImpactText(imp) + ' It is staged under Pending changes; nothing is written until you commit there.',
+      note: (imp.t0 ? 'Tier-0 / L0: ' : 'Among them: ') + first.join('; ') + (src.length > first.length ? '; and ' + (src.length - first.length) + ' more.' : '.'),
+      okLabel: 'Stage it', danger: imp.t0 > 0
+    });
+  }
+  // The union over many pairs (a bulk give, Make like): every permission any of them reaches, Tier-0 / L0 if it is on any path.
+  function mapImpactMany(m, plan) {
+    const all = new Map(), cache = new Map();
+    for (const p of (plan || [])) {
+      const via = (m.colOf(p.from) <= m.colOf(p.to)) ? p.to : p.from;
+      let r = cache.get(via.id); if (!r) { r = mapReachTiered(m, via.id); cache.set(via.id, r); }
+      r.forEach((hot, id) => all.set(id, !!(all.get(id) || hot)));
+    }
+    const t0 = []; all.forEach((hot, id) => { if (hot) t0.push(mapLbl(m.byId[id])); });
+    t0.sort((x, y) => x.localeCompare(y));
+    return { n: all.size, t0: t0.length, t0List: t0 };
+  }
+  function mapImpactManyText(imp) {
+    return 'Together they reach ' + imp.n + ' permission' + (imp.n === 1 ? '' : 's') +
+      (imp.t0 ? ' (' + imp.t0 + ' of them Tier-0 / L0: ' + imp.t0List.slice(0, 5).join(', ') + (imp.t0 > 5 ? ', ...' : '') + ')' : '') + '.';
+  }
+
+  // ----- 101.3 who has it ----------------------------------------------------------------------------------------------
+  // Every person (and access package) that reaches `id`, each with ONE shortest path (a walk back from `id`), the first hop
+  // (the person's own direct assignment -- the one link a Remove here stages) and how many OTHER direct groups also lead
+  // to it (then removing this one hop does not take the access away).
+  function mapWhoHas(m, id) {
+    const next = new Map(), seen = new Set([id]), q = [id];
+    while (q.length) {
+      const cur = q.shift();
+      for (const e of (m.back[cur] || [])) { if (!seen.has(e.source)) { seen.add(e.source); next.set(e.source, e); q.push(e.source); } }
+    }
+    const rows = [];
+    seen.forEach(s => {
+      const n = m.byId[s];
+      if (!n || (n.kind !== 'admin' && n.kind !== 'access-package')) return;
+      const first = next.get(s); if (!first) return;
+      const via = [], edges = [];
+      let e = first, guard = 0;
+      while (e && guard++ < 20) { edges.push(e); if (e.target === id) break; via.push(e.target); e = next.get(e.target); }
+      const routes = new Set();
+      for (const r of (m.fwd[s] || [])) { if (!r.removing && r.target !== first.target && (r.target === id || seen.has(r.target))) routes.add(r.target); }
+      rows.push({ id: s, node: n, label: mapLbl(n), first: first, firstTo: m.byId[first.target], direct: first.target === id,
+                  via: via.map(x => mapLbl(m.byId[x])), others: routes.size, pending: edges.some(x => x.pending), removing: !!first.removing,
+                  central: !!first.central });
+    });
+    return rows;
+  }
+  function mapWhoState(id) {
+    if (!MAP.who || MAP.who.id !== id) MAP.who = { id: id, q: '', desc: false };
+    return MAP.who;
+  }
+  function mapWhoSorted(rows, st) {
+    const q = String(st.q || '').trim().toLowerCase();
+    const out = rows.filter(r => !q || r.label.toLowerCase().includes(q) || String(r.id).toLowerCase().includes(q));
+    out.sort((a, b) => a.label.localeCompare(b.label) * (st.desc ? -1 : 1));
+    return out;
+  }
+  function mapWhoHow(r) {
+    return r.direct ? 'direct' : ('through ' + r.via.join(' → '));
+  }
+  function mapWhoHasCsv(m, id) {
+    const rows = mapWhoSorted(mapWhoHas(m, id), { q: '', desc: false });
+    return { headers: ['Person', 'Account', 'How', 'Removing the first hop', 'Other direct groups that also give it', 'Staged'],
+             rows: rows.map(r => [r.label, r.node.kind === 'access-package' ? 'access package' : r.id, mapWhoHow(r),
+                                  r.node.kind === 'access-package' ? '' : (mapLbl(r.node) + ' → ' + mapLbl(r.firstTo)), String(r.others),
+                                  r.removing ? 'staged remove' : (r.pending ? 'staged add' : '')]) };
+  }
+  function mapWhoHasRender(m, id, d) {
+    const n = m.byId[id]; if (!n || !d) return;
+    const st = mapWhoState(id);
+    const all = mapWhoHas(m, id);
+    const wrap = document.createElement('div');
+    wrap.className = 'map-who';
+    const people = all.filter(r => r.node.kind === 'admin').length;
+    wrap.innerHTML = '<div class="map-who-head"><span>Who has this (' + people + ' ' + (people === 1 ? 'person' : 'people') +
+      (all.length > people ? ', ' + (all.length - people) + ' access package' + (all.length - people === 1 ? '' : 's') : '') + ')</span>' +
+      (all.length > 20 ? '<input type="text" class="map-who-q" placeholder="Filter by name..." aria-label="Filter who has this" autocomplete="off">' : '') +
+      (all.length ? '<button type="button" class="ghost map-who-sort" title="Sort by name">Name ' + (st.desc ? '▼' : '▲') + '</button>' +
+                    '<button type="button" class="ghost map-who-csv" title="Download this list as CSV">Export CSV</button>' : '') +
+      '</div><div class="map-who-list"></div>';
+    d.appendChild(wrap);
+    const qi = wrap.querySelector('.map-who-q');
+    if (qi) { qi.value = st.q || ''; qi.oninput = () => { st.q = qi.value; mapWhoRows(m, id, wrap, all); }; }
+    else st.q = '';
+    const sb = wrap.querySelector('.map-who-sort');
+    if (sb) sb.onclick = () => { st.desc = !st.desc; sb.textContent = 'Name ' + (st.desc ? '▼' : '▲'); mapWhoRows(m, id, wrap, all); };
+    const cb = wrap.querySelector('.map-who-csv');
+    if (cb) cb.onclick = () => { const x = mapWhoHasCsv(m, id); downloadCsv('who-has-' + mapLbl(n).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60) + '.csv', x.headers, x.rows); };
+    mapWhoRows(m, id, wrap, all);
+  }
+  function mapWhoRows(m, id, wrap, all) {
+    const list = wrap.querySelector('.map-who-list'); if (!list) return;
+    const st = mapWhoState(id);
+    const rows = mapWhoSorted(all, st);
+    const canEdit = isServer && roleAtLeast('Admin');
+    if (!all.length) { list.innerHTML = '<div class="empty">Nobody has this today.</div>'; return; }
+    if (!rows.length) { list.innerHTML = '<div class="empty">Nobody matches the filter.</div>'; return; }
+    list.innerHTML = rows.map((r, i) => {
+      let act = '';
+      if (r.node.kind === 'access-package') act = '<span class="pt-scope">access package &middot; change it under Access packages</span>';
+      else if (r.central) act = '<span class="pt-scope" style="color:#1b7c83;">central &middot; read-only</span>';
+      else if (apIsLockedGroup(r.firstTo)) act = '<span class="pt-scope">package group &middot; change it under Access packages</span>';
+      else if (canEdit) {
+        act = r.removing ? '<button type="button" class="ghost map-who-rm" data-i="' + i + '" title="Take the staged removal back">Undo removal</button>'
+          : (r.first.pending ? '<button type="button" class="ghost map-who-rm" data-i="' + i + '" title="Take this staged give back out (nothing was committed)">Undo</button>'
+          : '<button type="button" class="danger map-act-remove map-who-rm" data-i="' + i + '" title="Stage the removal of ' + escapeHtml(mapLbl(r.node) + ' → ' + mapLbl(r.firstTo)) +
+              ' (asked first). Commit it under Pending changes.">Remove</button>');
+      }
+      return '<div class="map-who-row" data-id="' + escapeHtml(r.id) + '"><span class="mw-name" title="' + escapeHtml(r.id) + '">' + escapeHtml(r.label) + '</span>' +
+        '<span class="mw-how">' + escapeHtml(mapWhoHow(r)) +
+        (r.removing ? ' <span class="map-staged map-removing">staged remove</span>' : (r.pending ? ' <span class="map-staged">staged add</span>' : '')) +
+        (r.others ? ' <span class="mw-multi">&middot; also through ' + r.others + ' other group' + (r.others === 1 ? '' : 's') + ': removing this one does not take it away</span>' : '') +
+        '</span>' + act + '</div>';
+    }).join('');
+    list.querySelectorAll('.map-who-rm').forEach(b => {
+      b.onclick = () => { const r = rows[parseInt(b.dataset.i, 10)]; if (r) mapWhoRemove(r.id, r.first.target); };
+    });
+  }
+  // Remove = the person's OWN first hop: a staged give is taken back out (mapUnstageLink), anything else goes through
+  // mapStageUnlink with its normal per-link question (a staged removal there is its own undo). A package group is locked.
+  async function mapWhoRemove(personId, groupId) {
+    const m = MAP.model; const p = m && m.byId[personId], g = m && m.byId[groupId];
+    if (!p || !g) return null;
+    let res;
+    if (apIsLockedGroup(p) || apIsLockedGroup(g)) {
+      res = { ok: false, reason: '"' + mapLbl(g) + '" belongs to an access package -- change it under Access > Access packages.' };
+    } else {
+      const e = (m.fwd[personId] || []).find(x => x.target === groupId);
+      if (e && e.pending && !e.removing) {
+        res = mapUnstageLink(p, g) ? { ok: true, undone: true, fromLabel: mapLbl(p), toLabel: mapLbl(g) }
+                                   : { ok: false, reason: 'that staged link could not be found to undo -- reload the page.' };
+      } else {
+        res = await mapStageUnlink(p, g);
+      }
+    }
+    const keep = MAP.sel;
+    if (res && res.ok) { renderAccessMap(); if (keep && MAP.model && MAP.model.byId[keep]) mapSelect(keep, true); }
+    mapDropResult(res);
+    return res;
+  }
+
+  // ----- 101.4 a person's direct groups, Make like, Compare --------------------------------------------------------------
+  // group id -> { pending, removing, central } for each direct group (column 2) the person is linked to, committed or staged.
+  function mapDirectState(m, id) {
+    const out = new Map();
+    for (const e of (m.fwd[id] || [])) {
+      const t = m.byId[e.target]; if (!t || t.kind !== 'role-group') continue;
+      const prev = out.get(t.id);
+      out.set(t.id, { pending: !!e.pending && !(prev && !prev.pending), removing: !!e.removing || !!(prev && prev.removing), central: !!e.central || !!(prev && prev.central) });
+    }
+    return out;
+  }
+  function mapHasDirect(s) { return !!s && !s.removing; }
+  // Make `target` like `source`: every direct group the source has (committed or staged) and the target lacks is given;
+  // with alsoRemove, every committed direct group of the target the source does not have is removed. A package group, a
+  // central link and a link already staged for removal are left alone and named.
+  function mapMakeLikePlan(m, targetId, sourceId, alsoRemove) {
+    const src = mapDirectState(m, sourceId), tgt = mapDirectState(m, targetId);
+    const add = [], remove = [], skipped = [];
+    src.forEach((s, gid) => {
+      if (!mapHasDirect(s)) return;
+      const t = tgt.get(gid), g = m.byId[gid];
+      if (mapHasDirect(t)) return;
+      if (t && t.removing) { skipped.push(mapLbl(g) + ' (staged for removal)'); return; }
+      if (apIsLockedGroup(g)) { skipped.push(mapLbl(g) + ' (package group)'); return; }
+      add.push(g);
+    });
+    if (alsoRemove) {
+      tgt.forEach((t, gid) => {
+        if (t.pending || t.removing || mapHasDirect(src.get(gid))) return;
+        const g = m.byId[gid];
+        if (apIsLockedGroup(g)) { skipped.push(mapLbl(g) + ' (package group)'); return; }
+        if (t.central) { skipped.push(mapLbl(g) + ' (central, read-only)'); return; }
+        remove.push(g);
+      });
+    }
+    const by = (a, b) => mapLbl(a).localeCompare(mapLbl(b));
+    return { add: add.sort(by), remove: remove.sort(by), skipped: skipped };
+  }
+  async function mapMakeLike(targetId, sourceId, alsoRemove) {
+    const m = MAP.model; const t = m && m.byId[targetId], s = m && m.byId[sourceId];
+    if (!t || !s || t.kind !== 'admin' || s.kind !== 'admin' || t.id === s.id) return { ok: false };
+    const plan = mapMakeLikePlan(m, targetId, sourceId, !!alsoRemove);
+    if (!plan.add.length && !plan.remove.length) {
+      mapDropResult({ ok: false, reason: 'nothing to change: ' + mapLbl(t) + ' already has every direct group ' + mapLbl(s) + ' has' +
+        (alsoRemove ? ' and nothing more' : '') + (plan.skipped.length ? ' (left alone: ' + plan.skipped.join(', ') + ')' : '') + '.' });
+      return { ok: false, staged: 0 };
+    }
+    const imp = mapImpactMany(m, plan.add.map(g => ({ from: t, to: g })));
+    const lines = plan.add.map(g => '+ ' + mapLbl(g)).concat(plan.remove.map(g => '− ' + mapLbl(g)));
+    const ok = await pimConfirm({
+      title: 'Make ' + mapLbl(t) + ' like ' + mapLbl(s) + ' (' + lines.length + ')',
+      body: (plan.add.length ? 'This gives ' + mapLbl(t) + ' the ' + plan.add.length + ' direct group' + (plan.add.length === 1 ? '' : 's') + ' ' + mapLbl(s) +
+              ' has and ' + mapLbl(t) + ' lacks. ' + mapImpactManyText(imp) + ' ' : '') +
+            (plan.remove.length ? 'It removes ' + plan.remove.length + ' direct group' + (plan.remove.length === 1 ? '' : 's') + ' ' + mapLbl(s) + ' does not have (Action=Remove). ' : '') +
+            'Each one is staged under Pending changes; nothing is written until you commit there.',
+      note: lines.slice(0, 30).join('; ') + (lines.length > 30 ? '; and ' + (lines.length - 30) + ' more.' : '.') +
+            (plan.skipped.length ? ' Left alone: ' + plan.skipped.join(', ') + '.' : ''),
+      okLabel: 'Stage them', danger: plan.remove.length > 0 || imp.t0 > 0
+    });
+    if (!ok) { mapDropResult({ ok: false, reason: 'nothing staged -- cancelled.' }); return { ok: false, cancelled: true, staged: 0 }; }
+    const a = plan.add.length ? await mapBulkLink(plan.add.map(g => g.id), targetId, { asked: true, quiet: true }) : { staged: 0, refused: 0 };
+    const r = plan.remove.length ? await mapBulkUnlink(plan.remove.map(g => g.id), targetId, { asked: true, quiet: true }) : { staged: 0, refused: 0 };
+    renderAccessMap();
+    if (MAP.model && MAP.model.byId[targetId]) mapSelect(targetId, true);
+    const refused = (a.refused || 0) + (r.refused || 0);
+    mapBulkNote('Make like <b>' + escapeHtml(mapLbl(s)) + '</b>: ' + (a.staged || 0) + ' give' + (a.staged === 1 ? '' : 's') +
+      (plan.remove.length ? ', ' + (r.staged || 0) + ' removal' + (r.staged === 1 ? '' : 's') : '') + ' staged for <b>' + escapeHtml(mapLbl(t)) + '</b>' +
+      (refused ? ' &middot; ' + refused + ' not staged' : ''), plan.remove.length > 0);
+    return { ok: true, added: a.staged || 0, removed: r.staged || 0 };
+  }
+  // Compare two people: direct groups and effective permissions (staged changes included), only A / both / only B.
+  function mapCompare(m, aId, bId) {
+    const split = (A, B, label, t0) => {
+      const out = { onlyA: [], both: [], onlyB: [] };
+      const keys = new Set(Array.from(A.keys()).concat(Array.from(B.keys())));
+      keys.forEach(k => {
+        const inA = A.has(k), inB = B.has(k);
+        const it = { id: k, label: label(k), t0: t0(k) };
+        (inA && inB ? out.both : inA ? out.onlyA : out.onlyB).push(it);
+      });
+      for (const x of Object.keys(out)) out[x].sort((p, q) => p.label.localeCompare(q.label));
+      return out;
+    };
+    const keep = mp => { const o = new Map(); mp.forEach((s, k) => { if (mapHasDirect(s)) o.set(k, s); }); return o; };
+    const da = keep(mapDirectState(m, aId)), db = keep(mapDirectState(m, bId));
+    const pa = mapReachTiered(m, aId), pb = mapReachTiered(m, bId);
+    return {
+      direct: split(da, db, k => mapLbl(m.byId[k]), k => mapIsT0(m.byId[k])),
+      perms: split(pa, pb, k => mapLbl(m.byId[k]), k => !!(pa.get(k) || pb.get(k)))
+    };
+  }
+  function mapCompareHtml(m, aId, bId) {
+    const c = mapCompare(m, aId, bId);
+    const A = escapeHtml(mapLbl(m.byId[aId])), B = escapeHtml(mapLbl(m.byId[bId]));
+    const col = (list, head, key) => {
+      const t0 = list.filter(x => x.t0).length;
+      return '<div class="mc-col" data-b="' + key + '"><h4>' + head + ' (' + list.length + ')' + (t0 ? ' <span class="map-t0" title="Tier-0 / L0">' + t0 + ' Tier-0</span>' : '') + '</h4>' +
+        (list.length ? '<ul>' + list.slice(0, 200).map(x => '<li data-id="' + escapeHtml(x.id) + '">' + escapeHtml(x.label) +
+          (x.t0 ? ' <span class="map-t0" title="Tier-0 / L0">T0</span>' : '') + '</li>').join('') +
+          (list.length > 200 ? '<li>and ' + (list.length - 200) + ' more</li>' : '') + '</ul>' : '<div class="empty">none</div>') + '</div>';
+    };
+    const sec = (title, s, key) => '<div class="mc-sec">' + title + '</div>' +
+      col(s.onlyA, 'Only ' + A, key + '-onlyA') + col(s.both, 'Both', key + '-both') + col(s.onlyB, 'Only ' + B, key + '-onlyB');
+    return '<div class="map-cmp">' + sec('Direct groups', c.direct, 'direct') + sec('Effective permissions (staged changes included)', c.perms, 'perms') + '</div>';
+  }
+  // The person's detail panel: "Make like..." (Admin) and "Compare with..." (every role), each opening one small panel.
+  function mapPersonTools(m, id, d) {
+    const others = m.nodes.filter(x => x.kind === 'admin' && x.id !== id);
+    if (!others.length || !d) return;
+    others.sort((a, b) => mapLbl(a).localeCompare(mapLbl(b)));
+    const canEdit = isServer && roleAtLeast('Admin');
+    const wrap = document.createElement('div');
+    wrap.className = 'map-mk';
+    wrap.innerHTML = '<div class="map-mk-bar">' +
+      (canEdit ? '<button type="button" class="ghost" id="mapMkLike" title="Give this person the direct groups another person has (staged, one question first)">Make like&hellip;</button>' : '') +
+      '<button type="button" class="ghost" id="mapMkCompare" title="Compare this person with another: direct groups and effective permissions">Compare with&hellip;</button></div>' +
+      '<div class="map-mk-body"></div>';
+    d.appendChild(wrap);
+    const open = (mode) => { MAP.mk = (MAP.mk && MAP.mk.target === id && MAP.mk.mode === mode) ? null : { target: id, mode: mode, other: (MAP.mk && MAP.mk.other) || '', alsoRm: false }; mapPersonToolBody(m, id, wrap, others); };
+    const bl = wrap.querySelector('#mapMkLike'); if (bl) bl.onclick = () => open('like');
+    const bc = wrap.querySelector('#mapMkCompare'); if (bc) bc.onclick = () => open('compare');
+    mapPersonToolBody(m, id, wrap, others);
+  }
+  function mapPersonToolBody(m, id, wrap, others) {
+    const body = wrap.querySelector('.map-mk-body'); if (!body) return;
+    const st = MAP.mk;
+    if (!st || st.target !== id || (st.mode === 'like' && !(isServer && roleAtLeast('Admin')))) { body.innerHTML = ''; return; }
+    if (st.other && (!m.byId[st.other] || st.other === id)) st.other = '';
+    const me = escapeHtml(mapLbl(m.byId[id]));
+    const opts = '<option value="">Pick a person...</option>' + others.map(o => '<option value="' + escapeHtml(o.id) + '"' + (o.id === st.other ? ' selected' : '') + '>' + escapeHtml(mapLbl(o)) + '</option>').join('');
+    if (st.mode === 'like') {
+      body.innerHTML = '<div><b>Make ' + me + ' like</b> <select id="mapMkPick" aria-label="The person to copy direct groups from">' + opts + '</select> ' +
+        '<label><input type="checkbox" id="mapMkAlsoRm"' + (st.alsoRm ? ' checked' : '') + '> also remove what ' + me + ' has that they do not</label> ' +
+        '<button type="button" class="primary" id="mapMkGo"' + (st.other ? '' : ' disabled') + '>Stage&hellip;</button></div><div class="map-mk-prev" style="color:#57606a;margin-top:4px;"></div>';
+      const prev = body.querySelector('.map-mk-prev');
+      const paint = () => {
+        if (!st.other) { prev.textContent = 'Copies the direct groups (second column) of the person you pick. One question first; staged under Pending changes.'; return; }
+        const p = mapMakeLikePlan(m, id, st.other, st.alsoRm);
+        prev.textContent = p.add.length + ' to give' + (st.alsoRm ? ', ' + p.remove.length + ' to remove' : '') + (p.skipped.length ? ', ' + p.skipped.length + ' left alone' : '') + '.';
+      };
+      body.querySelector('#mapMkPick').onchange = (ev) => { st.other = ev.target.value; body.querySelector('#mapMkGo').disabled = !st.other; paint(); };
+      body.querySelector('#mapMkAlsoRm').onchange = (ev) => { st.alsoRm = !!ev.target.checked; paint(); };
+      body.querySelector('#mapMkGo').onclick = () => { if (st.other) mapMakeLike(id, st.other, st.alsoRm); };
+      paint();
+    } else {
+      body.innerHTML = '<div><b>Compare ' + me + ' with</b> <select id="mapMkPick" aria-label="The person to compare with">' + opts + '</select></div><div class="map-mk-cmp"></div>';
+      const out = body.querySelector('.map-mk-cmp');
+      const paint = () => { out.innerHTML = st.other ? mapCompareHtml(m, id, st.other) : ''; };
+      body.querySelector('#mapMkPick').onchange = (ev) => { st.other = ev.target.value; paint(); };
+      paint();
+    }
+  }
+
+  // ----- 101.4 the matrix ----------------------------------------------------------------------------------------------
+  // Rows = the people column, columns = the direct groups column, each as the board shows it now: its text box, chips and
+  // Assigned select apply, a pinned box always stays (pinned first). Closed groups are a board view and do not apply here.
+  // A tick box = a DIRECT assignment; a click = mapStageLink, the board's Ctrl+click: give (Tier-0 / > 25 asked first), undo
+  // a staged give, remove a committed one (its per-link question), undo a staged removal. "+ all" in a column header =
+  // mapBulkLink for every person in the list: one question above 10 (or Tier-0), already linked / staged skipped.
+  // Rows are paged (MAP_MX_PAGE per page): 300 people x 200 groups renders 50 x 200 tick boxes at a time.
+  function mapMatrixAxis(i, kind) {
+    const m = MAP.model; const items = (MAP.colItems && MAP.colItems[i]) || [];
+    const pinned = [], rest = [];
+    for (const el of items) {
+      const n = m && m.byId[el.dataset.id]; if (!n || n.kind !== kind) continue;
+      if (el.classList.contains('pinned')) { pinned.push(n); continue; }
+      if (el.classList.contains('tf-hide') || el.classList.contains('ch-hide') || el.classList.contains('cf-hide')) continue;
+      rest.push(n);
+    }
+    return pinned.concat(rest);
+  }
+  function mapMatrixOn(on) {
+    MAP.matrixOn = (on === undefined) ? !MAP.matrixOn : !!on;
+    MAP.mxPage = 0;
+    mapRenderMatrix();
+  }
+  function mapRenderMatrix() {
+    const host = document.getElementById('mapMatrix'), scroll = document.getElementById('mapScroll'), btn = document.getElementById('mapMatrixBtn');
+    if (btn) { btn.innerHTML = (MAP.matrixOn ? '&#x2611;' : '&#x2610;') + ' Matrix'; btn.setAttribute('aria-pressed', MAP.matrixOn ? 'true' : 'false'); btn.classList.toggle('on', !!MAP.matrixOn); }
+    if (scroll) scroll.classList.toggle('mx-on', !!MAP.matrixOn);
+    if (!host) return;
+    if (!MAP.matrixOn || !MAP.model) { host.style.display = 'none'; return; }
+    host.style.display = 'block';
+    const m = MAP.model;
+    if (!host.__mxBar) {
+      const tx = mapColTextState();
+      host.innerHTML = '<div class="mx-bar"><label>People <input type="text" class="mx-q" data-col="0" placeholder="Filter people..." aria-label="Filter the people in the matrix" autocomplete="off"></label>' +
+        '<label>Direct groups <input type="text" class="mx-q" data-col="1" placeholder="Filter groups..." aria-label="Filter the direct groups in the matrix" autocomplete="off"></label>' +
+        '<span class="mx-count"></span><span class="mx-pager"></span><span class="mx-note"></span></div><div class="mx-body"></div>';
+      host.querySelectorAll('.mx-q').forEach(inp => {
+        const i = parseInt(inp.dataset.col, 10);
+        inp.value = tx[i] || '';
+        inp.oninput = () => { mapSetColText(i, inp.value); MAP.mxPage = 0; mapRenderMatrix(); };
+      });
+      host.onclick = (ev) => {
+        const t = ev && ev.target; if (!t || !t.closest) return;
+        const cb = t.closest('.mx-cb');
+        if (cb) { if (ev.preventDefault) ev.preventDefault(); mapMatrixToggle(parseInt(cb.dataset.p, 10), parseInt(cb.dataset.j, 10)); return; }
+        const all = t.closest('.mx-all');
+        if (all) { mapMatrixColumn(parseInt(all.dataset.j, 10)); return; }
+        const pg = t.closest('.mx-pg');
+        if (pg && !pg.disabled) { MAP.mxPage = (MAP.mxPage || 0) + parseInt(pg.dataset.d, 10); mapRenderMatrix(); }
+      };
+      host.__mxBar = true;
+    }
+    const txNow = mapColTextState();
+    host.querySelectorAll('.mx-q').forEach(inp => { const i = parseInt(inp.dataset.col, 10); if (document.activeElement !== inp && inp.value !== (txNow[i] || '')) inp.value = txNow[i] || ''; });
+    const people = mapMatrixAxis(0, 'admin'), groups = mapMatrixAxis(1, 'role-group');
+    const pages = Math.max(1, Math.ceil(people.length / MAP_MX_PAGE));
+    const pg = Math.max(0, Math.min(MAP.mxPage || 0, pages - 1)); MAP.mxPage = pg;
+    const rows = people.slice(pg * MAP_MX_PAGE, (pg + 1) * MAP_MX_PAGE);
+    MAP.mxRows = rows; MAP.mxCols = groups;
+    const canEdit = isServer && roleAtLeast('Admin');
+    const gl = groups.map(g => escapeHtml(mapLbl(g)));
+    const glock = groups.map(g => apIsLockedGroup(g));
+    let h = '<div class="mx-wrap"><table class="mx-table"><thead><tr><th class="mx-corner" scope="col">Person / direct group</th>';
+    groups.forEach((g, j) => {
+      h += '<th class="mx-col" scope="col" title="' + gl[j] + (glock[j] ? ' (package group: change it under Access packages)' : '') + '"><span class="mx-col-t">' + gl[j] + '</span>' +
+        (canEdit && !glock[j] ? '<button type="button" class="mx-all" data-j="' + j + '" title="Tick this group for every person in the list (one question first above 10, or for Tier-0)" aria-label="Tick ' + gl[j] + ' for every person in the list">+ all</button>' : '') + '</th>';
+    });
+    h += '</tr></thead><tbody>';
+    rows.forEach((p, i) => {
+      const st = mapDirectState(m, p.id), pl = escapeHtml(mapLbl(p));
+      h += '<tr><th class="mx-row" scope="row" title="' + escapeHtml(p.id) + '">' + pl + '</th>';
+      for (let j = 0; j < groups.length; j++) {
+        const s = st.get(groups[j].id);
+        const cls = !s ? '' : s.removing ? ' mx-rm' : s.pending ? ' mx-add' : s.central ? ' mx-central' : ' mx-on';
+        const dis = !canEdit || glock[j] || (s && s.central && !s.pending);
+        h += '<td class="mx-c' + cls + '"><input type="checkbox" class="mx-cb" data-p="' + i + '" data-j="' + j + '"' + (s ? ' checked' : '') + (dis ? ' disabled' : '') +
+          ' aria-label="' + pl + ' in ' + gl[j] + '"></td>';
+      }
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+    if (!people.length || !groups.length) h = '<div class="empty" style="padding:10px;">' + (!people.length ? 'No person matches the filters.' : 'No direct group matches the filters.') + '</div>';
+    host.querySelector('.mx-body').innerHTML = h;
+    const cnt = host.querySelector('.mx-count');
+    if (cnt) cnt.textContent = people.length + ' people x ' + groups.length + ' direct groups (the board filters, chips and pins apply)';
+    const pager = host.querySelector('.mx-pager');
+    if (pager) pager.innerHTML = pages > 1 ? ('<button type="button" class="ghost mx-pg" data-d="-1"' + (pg ? '' : ' disabled') + ' aria-label="Previous people">&lsaquo;</button> people ' +
+      (pg * MAP_MX_PAGE + 1) + '-' + Math.min(people.length, (pg + 1) * MAP_MX_PAGE) + ' of ' + people.length +
+      ' <button type="button" class="ghost mx-pg" data-d="1"' + (pg < pages - 1 ? '' : ' disabled') + ' aria-label="Next people">&rsaquo;</button>') : '';
+  }
+  async function mapMatrixToggle(pi, j) {
+    const p = MAP.mxRows && MAP.mxRows[pi], g = MAP.mxCols && MAP.mxCols[j];
+    if (!p || !g) return null;
+    const res = await mapStageLink(p.id, g.id);
+    if (res && res.ok) { const keep = MAP.sel; renderAccessMap(); if (keep && MAP.model && MAP.model.byId[keep]) mapSelect(keep, true); }
+    else mapRenderMatrix();   // a refused or cancelled click: the box goes back to what is staged
+    mapDropResult(res);
+    mapMatrixNote();
+    return res;
+  }
+  async function mapMatrixColumn(j) {
+    const g = MAP.mxCols && MAP.mxCols[j]; if (!g) return null;
+    const ids = mapMatrixAxis(0, 'admin').map(p => p.id);
+    const res = await mapBulkLink(ids, g.id, { title: 'Tick "' + mapLbl(g) + '" for everyone in the list' });
+    mapRenderMatrix();
+    mapMatrixNote();
+    return res;
+  }
+  function mapMatrixNote() {
+    const host = document.getElementById('mapMatrix'), d = document.getElementById('mapDetail');
+    const out = host && host.querySelector('.mx-note'); if (!out) return;
+    const n = d && d.querySelector('.map-drop-note');
+    out.textContent = n ? n.textContent : '';
+  }
+  (document.getElementById('mapMatrixBtn') || {}).onclick = () => mapMatrixOn();
+
   // Export the WHOLE delegation map (every admin -> every reachable target, with
   // the path) -- REQUIREMENTS §26a "export everywhere" for the delegation map.
   // Traverses the SAME engine-backed map model the board renders.

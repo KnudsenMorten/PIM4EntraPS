@@ -1,5 +1,32 @@
 # What's new in PIM Manager
 
+## 3.1.38 · 2026-11-16 · Feature update
+
+The Access page shows what a change gives before you make it, who has a permission, a people-by-groups grid, and can copy one admin's access to another.
+
+### New features
+
+- **See the impact before you give** - Each give says how many permissions it reaches and how many are Tier 0. A give that reaches Tier 0 or many permissions asks first.
+- **Who has this** - Click a group or permission to see everyone who has it and how, with a remove per person and a CSV export.
+- **Matrix, make like and compare** - A people-by-groups grid with tick boxes, Make like to copy one admin's access to another, and Compare to see two admins side by side. Every change still goes through Pending changes.
+
+### Fixes
+
+None in this version.
+
+## 3.1.37 · 2026-11-16 · Feature update
+
+The Access page handles large installs: quick filters per column, Azure items grouped by scope, pins, and giving or removing access for many boxes at once.
+
+### New features
+
+- **Quick filters and Azure grouping** - Each column has filters for type, tier and staged changes. Azure items are grouped by management group, subscription and resource group, closed by default on long lists.
+- **Pins and many at once** - Pin the boxes you work on so they stay visible. Select several boxes in one column and drop them on a target, or remove them together. A tray lists staged changes with undo.
+
+### Fixes
+
+None in this version.
+
 ## 3.1.36 · 2026-11-16 · Feature update
 
 The Admin accounts page has one search, filters by type, company and department, and actions for many accounts at once. Warning mails about unread assignments now say what happened in plain words.

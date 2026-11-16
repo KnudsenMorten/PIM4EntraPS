@@ -1,0 +1,5 @@
+{"version":"3.1.37","date":"2026-11-16","type":"feature",
+ "summary":"The Access page handles large installs: quick filters per column, Azure items grouped by scope, pins, and giving or removing access for many boxes at once.",
+ "new":[{"title":"Quick filters and Azure grouping","text":"Each column has filters for type, tier and staged changes. Azure items are grouped by management group, subscription and resource group, closed by default on long lists."},
+        {"title":"Pins and many at once","text":"Pin the boxes you work on so they stay visible. Select several boxes in one column and drop them on a target, or remove them together. A tray lists staged changes with undo."}],
+ "fixes":[]}

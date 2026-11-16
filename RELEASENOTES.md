@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.38 -- 2026-11-16
+
+- Access page: impact before a give (permissions reached, Tier-0 count; a Tier-0 or large give asks first), who has a group or permission (path, remove first hop, CSV), a people x groups matrix with tick boxes, Make like (copy one admin's direct access), and Compare two admins -- all through the existing staging and guards.
+
+## 3.1.37 -- 2026-11-16
+
+- Access page at enterprise scale: per-column chips (type, tier, staged), Azure items grouped by management group / subscription / resource group (collapsed on long columns), faster filtering, pins, multi-select give/remove through the existing staging, and a staged-links tray with undo.
+
 ## 3.1.36 -- 2026-11-16
 
 - Admin accounts page: one search box, office users hidden by default, filters by type / company / department / tasks, a bulk bar (disable, enable, reset TAP, revoke sessions, give access, export) through the existing staging and guards, and a compact Actions menu per row; the active-assignments warning mail says in plain words what was not read, why, and what is kept.
