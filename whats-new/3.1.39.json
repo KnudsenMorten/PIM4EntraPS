@@ -1,0 +1,5 @@
+{"version":"3.1.39","date":"2026-11-16","type":"security",
+ "summary":"Each update now checks that the web app's identity holds only the rights it needs, and reports anything extra.",
+ "new":[],
+ "fixes":[{"title":"Web identity checked on every update","text":"After each update, PIM compares the web app's identity with its approved rights. Anything extra is reported in the update run, mailed to the admins once, and sent to support. Nothing is added."},
+          {"title":"Support change notices","text":"Changes made by support now have their own mail level, and a failed step after an approved change is recorded instead of hidden."}]}

@@ -1289,6 +1289,9 @@ function Get-PimMailSeverityCatalog {
         [pscustomobject]@{ kind = 'owner-review';        source = 'alert'; severity = 'Action needed'; old = 'Action needed'; rule = 'the owner confirms their people' }
         [pscustomobject]@{ kind = 'autoextend-report';   source = 'alert'; severity = 'Information';   old = 'Warning';       rule = 'permissions will be extended by themselves; nothing to do' }
         [pscustomobject]@{ kind = 'mail-test';           source = 'alert'; severity = 'Information';   old = 'Information';   rule = 'a test mail' }
+        # 3.1.31 (SUPPORT-DIRECT-GRANT-1): the admin mail for a change Invardia support made or proposed on a ticket
+        # (tools\pim-manager\_appapi.ps1, Support route /api/support/change) -- raised since 3.1.31, never catalogued
+        [pscustomobject]@{ kind = 'support-change';      source = 'alert'; severity = 'By status';     old = 'By status';     rule = 'a change support made on a ticket = Warning (the admins check it was asked for); a change waiting for the install''s approval (SupportFixMode = approve) = Action needed' }
     )
 }
 

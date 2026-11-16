@@ -1,5 +1,18 @@
 # What's new in PIM Manager
 
+## 3.1.39 · 2026-11-16 · Security
+
+Each update now checks that the web app's identity holds only the rights it needs, and reports anything extra.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Web identity checked on every update** - After each update, PIM compares the web app's identity with its approved rights. Anything extra is reported in the update run, mailed to the admins once, and sent to support. Nothing is added.
+- **Support change notices** - Changes made by support now have their own mail level, and a failed step after an approved change is recorded instead of hidden.
+
 ## 3.1.38 · 2026-11-16 · Feature update
 
 The Access page shows what a change gives before you make it, who has a permission, a people-by-groups grid, and can copy one admin's access to another.

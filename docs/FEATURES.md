@@ -866,6 +866,13 @@ deployment is a supported choice) and no credentials lying around.
   When a Defender XDR role that your PIM definition names is missing, support can create it on a ticket with exactly the
   permissions your definition lists. Support never changes your security settings. Support is on by default; your admin
   runs `Set-PimManagerApiAuth.ps1 -SupportApp` once to let it in.
+- **The web app's identity keeps only the rights it needs, on every update.** 🟡 built, not released — After every update
+  has rolled and is healthy, the updater checks the rights of the identity the PIM Manager web app signs in as against the
+  list of rights PIM approves for it. It only ever takes rights away, never adds one. A right it is allowed to remove is
+  removed and checked; one it may not remove itself is listed in the update run and handed to Invardia support. The same
+  check lists database access that support holds outside a support session and database users of identities that no
+  longer exist (listed only). Your admins get one mail when something is removed or found for the first time. The check
+  never stops or rolls back an update. `PIM_WEB_TRIM=off` on the update job switches it off.
 
 ## 10. Delegation model
 - **Existing accounts get delegations only.** ✅ 2026-11-12 — An administrator of the type "Existing account (office user)" receives PIM delegations, and nothing else: PIM Manager never creates, renames, changes, disables or deletes the account, and the hybrid worker never touches it in Active Directory. PIM Manager also never changes any account it did not create itself.

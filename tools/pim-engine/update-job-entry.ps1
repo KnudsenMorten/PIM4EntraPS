@@ -102,6 +102,9 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 . (Join-Path $solRoot 'engine\_shared\PIM-RunningImages.ps1')    # SEC-LANE-1: the images the install runs NOW (digest + .NET) -> heartbeat Update.runningImages
 . (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
+. (Join-Path $solRoot 'engine\_shared\PIM-RightsList.ps1')       # WEB-TRIM-1: the approved rights list (the web identity's approved set, step 2h)
+. (Join-Path $solRoot 'engine\_shared\PIM-JobLanes.ps1')         # WEB-TRIM-1: Register-PimTrustStaleReport -- ONE fix request per reported item (step 2h)
+. (Join-Path $solRoot 'engine\_shared\PIM-WebIdentityTrim.ps1')  # WEB-TRIM-1: id-pim-web trimmed to its approved set, removals only (step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-ManagerApiApps.ps1')   # SUPPORT-FIX-API-1 (framework 12.30 / 12.31): enrol the tagged support app (role Support) + READ the API app hardening (step 2d-api)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -718,6 +721,79 @@ function Invoke-PimUpdaterConvergeStep {
             Say $rrRep.text $(switch ($rrRep.state) { 'missing' { 'Yellow' } 'unknown' { 'Yellow' } default { 'DarkGray' } })
         }
     } catch { Say "  return route not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2h on the 'ahead' exit: no roll there, so the web identity trim (WEB-TRIM-1, below) runs after this converge.
+    # After a roll it is NOT run here (that call waits for the jobs and this job to be rolled: after "done").
+    if ($When -eq 'ahead of the ring') { try { Invoke-PimUpdaterWebTrimStep -When $When } catch { Say "  web identity not trimmed (the update is unaffected): $($_.Exception.Message)" 'Yellow' } }
+}
+
+# ---- 2h. WEB-TRIM-1 (REQUIREMENTS 102, owner 2026-11-16 "Auto-remove excess") -- THE WEB IDENTITY TRIMMED TO ITS APPROVED SET ----
+# On EVERY update, ONCE per run, and only AFTER the roll: called after the Manager rolled healthy and every job was rolled
+# (step "done", before the outcome is recorded) and on the 'ahead' exit -- never before or during a roll, so a trim never
+# blocks or rolls back an update. REMOVALS ONLY, of the internet-facing id-pim-web (resolved from the Manager app, never by
+# name alone; a Manager not moved to it = nothing). What this updater's OWN rights already allow is removed and read back;
+# the rest is REPORTED: a yellow line, ONE admin mail (queued for the engine: the SECURE-WEB-1 notify path), ONE fix request
+# per item (register-once). It grants nothing (engine/_shared/PIM-WebIdentityTrim.ps1). PIM_WEB_TRIM=off on this job switches
+# it off; dryrun = read and classify only. A trim problem is a warning, never a failed update.
+$script:PimWebTrimRan = $false
+$script:PimWebTrimResult = $null
+function Invoke-PimUpdaterWebTrimStep {
+    param([string]$When = 'update')
+    if ($script:PimWebTrimRan) { return }
+    $script:PimWebTrimRan = $true
+    try {
+        $wtCs = ''; try { $wtCs = "$(Get-PimSqlConnectionString)" } catch { $wtCs = '' }
+        $wtMe = Get-PimWebTrimTokenFacts -Token $(try { "$(Get-PimRestToken -Resource 'graph')" } catch { '' })
+        $wtArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        $wtGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+        $wtStore = $null; $wtQueue = $null; $wtFix = $null; $wtAi = $null
+        $wtTo = @("$($env:PIM_AlertRecipient)" -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($wtCs.Trim()) {
+            $wtStore = { param($op, $name, $value)
+                if ($op -eq 'get') { return (Get-PimSqlSetting -ConnectionString $wtCs -Name $name) }
+                if ($op -eq 'set') { Set-PimSqlSetting -ConnectionString $wtCs -Name $name -ValueJson (ConvertTo-Json -InputObject $value -Depth 8 -Compress) } }
+            # the admins = the alert recipients (pim.Settings 'Alerting', kept to the SuperAdmins by the converge step 2d)
+            try { $al = Get-PimSqlSetting -ConnectionString $wtCs -Name 'Alerting'; foreach ($x in @($al.recipients)) { if ("$x".Trim() -and $wtTo -notcontains "$x".Trim()) { $wtTo += "$x".Trim() } } } catch { }
+            # the AI chat state decides whether Cognitive Services OpenAI User is approved; unread = that role is KEPT
+            try {
+                $ac = Get-PimSqlSetting -ConnectionString $wtCs -Name 'AiChat'; if ($ac -is [string]) { $ac = $(if ("$ac".Trim()) { $ac | ConvertFrom-Json } else { $null }) }
+                $acOn = $false; $acHost = ''
+                if ($ac) { $acOn = ("$($ac.enabled)" -match '^(?i:true|1)$'); try { $acHost = ([uri]"$($ac.endpoint)".Trim()).Host } catch { $acHost = '' } }
+                $wtAi = @{ known = $true; enabled = $acOn; host = $acHost }
+            } catch { $wtAi = $null }
+            # the admin mail: ONE queued notify request, committed at once; the ENGINE sends it as its own identity (this job
+            # holds no mail right and gets none)
+            $wtQueue = { param($pl)
+                $ch = New-PimChange -Entity 'PIM-Action-NotifyMail' -Key ('alert-notice|web-identity-trim|' + [guid]::NewGuid().ToString('N').Substring(0, 8)) -Op 'Update' -Payload ([pscustomobject]$pl) `
+                          -By "$selfJob" -Kind 'Action' -Origin 'Authorised' -Justification "mail 'alert-notice' (web-identity-trim) raised by the update run; the engine sends it"
+                Add-PimSqlQueueChange -ConnectionString $wtCs -Change $ch
+                $cm = @(Set-PimSqlQueueCommitted -ConnectionString $wtCs -Ids @("$($ch.id)") -By "$selfJob")
+                if (@($cm | Where-Object { $_.committed }).Count) { return @{ queued = $true; id = "$($ch.id)"; reason = '' } }
+                return @{ queued = $false; id = "$($ch.id)"; reason = "queued as $($ch.id) but not committed ($(@($cm | ForEach-Object { $_.reason }) -join '; '))" } }
+            # ONE fix request per item: the register-once / sent-once run report the engine's uplink sends (PIM-JobLanes.ps1)
+            $wtFix = { param($part, $code)
+                Register-PimTrustStaleReport -Job (Get-PimWebTrimFixJob) -Part $part -Code $code -SinceUtc '' `
+                    -GetSetting { param($n) Get-PimSqlSettingRaw -ConnectionString $wtCs -Name $n } `
+                    -SetSetting { param($n, $v) Set-PimSqlSetting -ConnectionString $wtCs -Name $n -ValueJson (ConvertTo-Json -InputObject $v -Depth 6 -Compress) } }
+        }
+        $wtVer = ''; try { $wtVer = "$(Get-Content -LiteralPath (Join-Path $solRoot 'VERSION') -Raw -ErrorAction Stop)".Trim() } catch { $wtVer = '' }
+        $wtName = 'id-pim-web'; try { $wtName = "$((Get-PimInstallIdentityNames).web)" } catch { }
+        # the database half (REPORT ONLY): ONE scalar as this job's own database user -- the signed READ procedures it already
+        # holds EXECUTE on ([pimsupport].[usp_SupportState], [pim].[usp_AccessFacts]); no security statement is ever sent here
+        $wtSql = $null; if ($wtCs.Trim()) { $wtSql = { param($q, $p) if ($p -and $p.Count) { Invoke-PimSqlScalar -ConnectionString $wtCs -Sql $q -Parameters $p } else { Invoke-PimSqlScalar -ConnectionString $wtCs -Sql $q } } }
+        $wtSupApp = ''; try { if ($scRun) { $wtSupApp = "$($scRun.appId)".Trim() } } catch { $wtSupApp = '' }
+        $wtUsers = @(); try { $wtUsers = @(Get-PimWebTrimCandidateUsers -NameMap (Get-PimSqlAccessInstallNameMap) -IdentityNames @((Get-PimInstallIdentityNames).Values) -RoleWords @((Get-PimRightsIdentityCatalog) | ForEach-Object { $_.role; $_.codeRole })) } catch { $wtUsers = @() }
+        $r = Invoke-PimWebIdentityTrim -Arm $wtArm -Graph $wtGraph -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Mode "$($env:PIM_WEB_TRIM)" `
+                 -Version $wtVer -UpdaterObjectId "$($wtMe.oid)" -UpdaterGraphRoles @($wtMe.roles) -AiChat $wtAi -Store $wtStore -QueueMail $wtQueue -FixRequest $wtFix `
+                 -Recipients $wtTo -WebName $wtName -AcaApi $script:PimAcaApi -SqlScalar $wtSql -SupportAppId $wtSupApp -CandidateUsers $wtUsers
+        $script:PimWebTrimResult = $r
+        foreach ($l in @($r.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        Say ("web identity ($When): $($r.detail)") $(if ([int]$r.warnings) { 'Yellow' } elseif (@($r.removed).Count) { 'Cyan' } else { 'DarkGray' })
+        # the run record (UpdateState.setupFacts, written by the outcome after this step): state + what was removed / reported
+        if ($script:PimSetupFacts -is [System.Collections.IDictionary]) {
+            $script:PimSetupFacts['webIdentityTrim'] = "$($r.state)"
+            $script:PimSetupFacts['webIdentityTrimDetail'] = ("$($r.detail)" + $(if (@($r.removed).Count) { '; removed: ' + (@($r.removed | ForEach-Object { $_.text }) -join ' | ') }) + $(if (@($r.reported).Count) { '; reported: ' + (@($r.reported | ForEach-Object { $_.text }) -join ' | ') }))
+        }
+    } catch { Say "  web identity not trimmed (the update is unaffected): $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.
@@ -1687,7 +1763,7 @@ if ($isAhead) {
     Say "  It takes the ring's next release once that is newer than $aheadFrom." 'DarkGray'
     # 100.40: no version moves, but the install defaults still converge (sizing, database, 2d) -- an environment kept ahead
     # of its ring used to exit before any of that ran, so it never got them.
-    Invoke-PimUpdaterConvergeStep -When 'ahead of the ring'
+    Invoke-PimUpdaterConvergeStep -When 'ahead of the ring'   # ... which also runs the web identity trim (2h) on this exit
     # CR7: an opted-in install that is ahead still gets its front image -- from the source of the version it RUNS (an
     # Invardia source serves only the ring's version: then the next release builds it). Never changes this exit.
     if ($sfOpt.optIn) { [void](Invoke-PimUpdaterSigninFrontStep -Version $aheadFrom) }
@@ -2477,6 +2553,9 @@ if ($selfJob) {
 }
 
 Say "done: $($roll.from) -> $($roll.to) (healthy=$($roll.healthy)); jobs rolled by discovery: $discovered" 'Green'
+# WEB-TRIM-1 (step 2h): AFTER the roll -- the Manager reached a healthy revision (an unhealthy roll exited above) and the jobs
+# and this job were rolled; before the outcome, so the run record carries what was removed / reported. Never fails the run.
+Invoke-PimUpdaterWebTrimStep -When 'after the roll'
 if ($jobFailed.Count) {
     Say "NOT FULLY UPDATED -- these are still on the previous build: $($jobFailed -join ', ')" 'Red'
     Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($roll.to)" -ErrorText "still on the previous build: $($jobFailed -join ', ')"

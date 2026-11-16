@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.39 -- 2026-11-16
+
+- Security: on every update the updater compares the web identity (id-pim-web) with its approved rights after the roll and removes excess only where it already holds the right to (on a standard install every item is reported: run warning, one admin mail, one fix request); the Support app's db_owner outside an open session and contained users of identities that no longer exist are reported; support-change mail severity, and a failed mark-executed after an approved app proposal is recorded.
+
 ## 3.1.38 -- 2026-11-16
 
 - Access page: impact before a give (permissions reached, Tier-0 count; a Tier-0 or large give asks first), who has a group or permission (path, remove first hop, CSV), a people x groups matrix with tick boxes, Make like (copy one admin's direct access), and Compare two admins -- all through the existing staging and guards.

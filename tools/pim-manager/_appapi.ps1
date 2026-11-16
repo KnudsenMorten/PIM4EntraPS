@@ -251,9 +251,14 @@ function Invoke-PimManagerAppChangeExecute {
         # an approved Support proposal to create a Defender XDR role: the ENGINE action is queued now (its own identity)
         $qd = Add-PimManagerDefenderRoleCreateAction -Payload $req.detail.payload
         if (-not $qd.ok) { return (& $mk 500 @{ ok = $false; error = "the engine action could not be queued: $($qd.reason)" }) }
-        try { [void](Set-PimApprovalRequestExecuted -Id $Id) } catch { }
-        try { Write-PimManagerAuditEvent -Action 'api.app.change.executed' -Target 'DefenderXdrRoles' -Result 'ok' -After ([ordered]@{ id = $Id; maker = "$($req.requestor)"; approver = "$($me.identity)"; ticket = "$($req.ticket)"; queueId = "$($qd.id)" }) } catch { }
-        return (& $mk 202 @{ ok = $true; queued = $true; queueId = "$($qd.id)"; note = 'approved: the engine creates the role now' })
+        # 3.1.31 (code audit SWALLOWED-MUTATION): a proposal that could not be marked executed is SAID (response + audit), never
+        # silent -- it still reads Approved; a second execute queues one more create, which the engine finds done (idempotent)
+        $exNote = ''
+        try { [void](Set-PimApprovalRequestExecuted -Id $Id) } catch { $exNote = "the proposal could not be marked executed ($((("$($_.Exception.Message)") -split "`n")[0])) -- it still reads Approved" }
+        try { Write-PimManagerAuditEvent -Action 'api.app.change.executed' -Target 'DefenderXdrRoles' -Result $(if ($exNote) { 'partial' } else { 'ok' }) -After ([ordered]@{ id = $Id; maker = "$($req.requestor)"; approver = "$($me.identity)"; ticket = "$($req.ticket)"; queueId = "$($qd.id)"; markExecuted = $(if ($exNote) { $exNote } else { 'ok' }) }) } catch { }
+        $res202 = @{ ok = $true; queued = $true; queueId = "$($qd.id)"; note = 'approved: the engine creates the role now' }
+        if ($exNote) { $res202['warning'] = $exNote }
+        return (& $mk 202 $res202)
     }
     $base = "$($req.detail.base)"
     $spec = Get-PimCsvSpec -BaseName $base
@@ -269,8 +274,11 @@ function Invoke-PimManagerAppChangeExecute {
     $st = 500
     try { $st = Invoke-PimManagerCsvPut -base $base -spec $spec -resp $cap -PutBody $body } catch { Write-JsonResponse -Response $cap -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; $st = 500 }
     $txt = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray())
-    if ([int]$st -ge 200 -and [int]$st -lt 300 -and [int]$st -ne 202) { try { [void](Set-PimApprovalRequestExecuted -Id $Id) } catch { } }
-    try { Write-PimManagerAuditEvent -Action 'api.app.change.executed' -Target $base -Result $(if ([int]$st -eq 200) { 'ok' } elseif ([int]$st -in @(202, 409)) { 'held' } else { 'denied' }) -After ([ordered]@{ id = $Id; maker = "$($req.requestor)"; makerApp = $req.detail.maker; approver = "$($me.identity)"; status = [int]$st }) } catch { }
+    # 3.1.31 (code audit SWALLOWED-MUTATION): a failed "mark executed" is recorded in the audit, never silent (the rows ARE
+    # saved; the proposal still reads Approved, and a second apply is refused as stale by Merge-PimManagerAppRowChanges)
+    $exNote = ''
+    if ([int]$st -ge 200 -and [int]$st -lt 300 -and [int]$st -ne 202) { try { [void](Set-PimApprovalRequestExecuted -Id $Id) } catch { $exNote = "the proposal could not be marked executed ($((("$($_.Exception.Message)") -split "`n")[0])) -- it still reads Approved" } }
+    try { Write-PimManagerAuditEvent -Action 'api.app.change.executed' -Target $base -Result $(if ([int]$st -eq 200 -and $exNote) { 'partial' } elseif ([int]$st -eq 200) { 'ok' } elseif ([int]$st -in @(202, 409)) { 'held' } else { 'denied' }) -After ([ordered]@{ id = $Id; maker = "$($req.requestor)"; makerApp = $req.detail.maker; approver = "$($me.identity)"; status = [int]$st; markExecuted = $(if ($exNote) { $exNote } else { 'ok' }) }) } catch { }
     return [pscustomobject]@{ status = [int]$st; bodyText = $txt }
 }
 

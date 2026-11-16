@@ -269,6 +269,10 @@ function New-PimStallRunReportRecord {
         $cls = "$(Get-PimUplinkField $Entry 'errorClass')".ToLowerInvariant(); if ($cls -notmatch '^[a-z0-9-]{1,40}$') { return $null }
         if ($step -notmatch '^[a-z0-9][a-z0-9.-]{0,59}$') { return $null }
         $stxt = "source not read for more than a week (TRUST-1 point 8): job $job, part $step (not read since $(Get-PimUplinkField $Entry 'sinceUtc')). Its last findings stay listed with their date; nothing was resolved."
+        # WEB-TRIM-1 (REQUIREMENTS 102): the same register-once channel carries a right of the internet-facing web identity
+        # that the updater found outside its approved set and may not remove itself (engine\_shared\PIM-WebIdentityTrim.ps1)
+        if ($cls -eq 'web-identity-excess') { $stxt = "the internet-facing web identity holds a right outside its approved set that the updater may not remove: job $job, item $step. Remove it through the Support app; the update run lists it." }
+        if ($cls -eq 'sql-support-owner') { $stxt = "the Support app's database user holds db_owner outside an open support session: job $job, item $step. The updater may not change db_owner membership; remove it through the Support app." }
         return (New-AitUplinkReport -Kind run @Common -Job $job -Outcome 'warning' -ErrorClass $cls -ErrorText $stxt -FailedStep $step)
     }
     if ($jn -notmatch '^[a-z0-9-]{1,60}$') { $jn = $job }
