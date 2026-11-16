@@ -110,22 +110,26 @@ function Get-PimWorkloadPrereqCatalog {
            fix = ''
            manualStep = 'Microsoft Defender portal > System > Permissions > Microsoft Defender XDR > Roles > Workload settings: turn on every workload PIM delegates (Endpoint, Identity, Office 365, Sentinel workspaces via View Workspaces) > Activate. Portal only: no API exposes the activation state, so PIM reports what the live roles imply ("inferred") and you confirm it with Confirm on this prerequisite in PIM Manager.'
            learn = $L.urbacActivate }
+        # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "we need to redesign the defender as not all customers apply
+        # sentinel, but the run defender with rbac. sentinel is optional."): the three Data Operations checks below are an
+        # OPTIONAL group (required = $false, group = 'dataOps') -- never part of the DefenderXdr state; their own state
+        # (Get-PimDefenderDataOpsState: inPlace / notSetUp / notUsed) holds only a role that uses microsoft.xdr/dataops/.
         # Measured by the lead on internal 2026-09-19 (read-only): the catalog GET beta/roleManagement/defender/
         # resourceNamespaces?$expand=resourceActions answers 200 with 77 actions, microsoft.xdr/dataops/*/read|manage among
         # them -- and a tenant WITHOUT the Sentinel prerequisite still LISTS them but REFUSES to store a role using them
         # (POST roleDefinitions -> 400 "... is not a valid permission for storage"). So "Data Operations available" =
         # this catalog check AND the Sentinel checks below. Never probed by creating a role (no probe writes).
-        @{ id = 'defender.dataOpsCatalog'; name = 'Data Operations permissions are in the Defender permission catalog (beta resourceNamespaces lists microsoft.xdr/dataops/)'; kind = 'api'; required = $true; fixable = $false; dataOperations = $true
+        @{ id = 'defender.dataOpsCatalog'; name = 'Data Operations permissions are in the Defender permission catalog (beta resourceNamespaces lists microsoft.xdr/dataops/)'; kind = 'api'; required = $false; group = 'dataOps'; fixable = $false; dataOperations = $true
            fix = ''
            manualStep = 'Data Operations (Preview) is a Unified RBAC permission group that follows Microsoft Sentinel: measured on three tenants, the catalog listed microsoft.xdr/dataops/ only where Sentinel was enabled. Not listed? Do the Sentinel checks below (enable Sentinel on a workspace, connect it to the Defender portal), then press Check again. Listed but a role using it is refused? The Defender-portal connection below is missing.'
            learn = $L.urbacPerms }
         # confirmable 'notChecked' (§97.1): the engine's self-check only sees the workspaces it has Reader on, so "none
         # found" is NOT CHECKED there -- an administrator who knows the security workspace has Sentinel confirms it.
-        @{ id = 'defender.sentinelEnabled'; name = 'Microsoft Sentinel is enabled on a Log Analytics workspace (ARM onboardingStates/default = 200)'; kind = 'api'; required = $true; fixable = $false; dataOperations = $true; confirmable = 'notChecked'
+        @{ id = 'defender.sentinelEnabled'; name = 'Microsoft Sentinel is enabled on a Log Analytics workspace (ARM onboardingStates/default = 200)'; kind = 'api'; required = $false; group = 'dataOps'; fixable = $false; dataOperations = $true; confirmable = 'notChecked'
            fix = ''
            manualStep = "Azure portal > Microsoft Sentinel > Create > choose the Log Analytics workspace > Add; then onboard it to the Defender portal (next check). If PIM cannot see your security workspace, press Confirm on this prerequisite in PIM Manager. Or run the published Initialize-PimWorkloadPrereqs.ps1 with -EnableSentinel (opt-in, because Sentinel bills per GB the workspace ingests): it enables Sentinel on a dedicated security workspace -- -SentinelWorkspaceId, else law-sentinel-<suffix> in the PIM resource group, created empty -- and refuses PIM's own log workspace. Pass -SentinelWorkspaceId <workspace resource id> to check or enable a specific one. Data Operations prerequisites: $($L.urbacPerms) and $($L.sentinelDefender)"
            learn = $L.sentinelOnboard }
-        @{ id = 'defender.sentinelInDefender'; name = 'Data Operations: a Sentinel workspace is connected to the Defender portal (or the Sentinel data lake is onboarded)'; kind = 'portal'; required = $true; fixable = $false; dataOperations = $true
+        @{ id = 'defender.sentinelInDefender'; name = 'Data Operations: a Sentinel workspace is connected to the Defender portal (or the Sentinel data lake is onboarded)'; kind = 'portal'; required = $false; group = 'dataOps'; fixable = $false; dataOperations = $true
            fix = ''
            manualStep = "Microsoft Defender portal > System > Settings > Microsoft Sentinel > Workspaces > Connect a workspace (pick the primary workspace), or onboard the Microsoft Sentinel data lake from the Defender portal. Portal only (no public API). Until this is done the tenant LISTS the Data Operations permissions but refuses to store a role that uses them. Then press Confirm on this prerequisite in PIM Manager. Not using Data Operations roles? Press Not used. Learn: $($L.urbacPerms)"
            learn = $L.sentinelDefender }
@@ -266,10 +270,21 @@ function Get-PimWorkloadAssignmentGate {
         NEVER    for EntraRoles (Get-PimWorkloadPrereqUngated) and for a workload with no prerequisite definition ('').
       Returns @{ workload; held; state; reason; reasons = @(); command }. The engine (IntuneRoles, DefenderXdrRoles,
       WorkloadConnectors, AzRes -- CREATE only), /api/templates and the GUI's held note all apply this one rule.
+      DEFENDER-DATAOPS-SCOPE-1 (internal 2026-11-16, owner decision "Confirm (1) + fix product"): a not-green check that
+      is a Data Operations check (catalog dataOperations = $true) holds ONLY an assignment whose role uses Data Operations
+      permissions -- the caller says so with -DataOperations (Test-PimDefenderRowUsesDataOperations). Without it,
+      dataops-only reasons do NOT hold: held stays $false and dataOpsHeld = $true + dataOpsReasons name what the Data
+      Operations assignments wait for. Non-dataops reasons hold everything as before (their reasons then list only
+      the non-dataops checks).
+      DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16, "sentinel is optional"): the Data Operations checks are no longer in
+      the DefenderXdr state; the view carries them as the optional group view.dataOps (state inPlace | notSetUp |
+      notUsed). With the core green and dataOps notSetUp: -DataOperations -> held, dataOpsOnly = $true, reason = the calm
+      Get-PimDefenderDataOpsWaitText; without it -> not held, dataOpsHeld = $true. A core that is not green holds every
+      Defender assignment as before.
     #>
-    param([AllowEmptyString()][string]$Workload, [object[]]$View = @(), [string]$StoreError = '')
+    param([AllowEmptyString()][string]$Workload, [object[]]$View = @(), [string]$StoreError = '', [switch]$DataOperations)
     $w = "$Workload".Trim()
-    $out = [ordered]@{ workload = $w; held = $false; state = ''; reason = ''; reasons = @(); command = ''; next = '' }
+    $out = [ordered]@{ workload = $w; held = $false; state = ''; reason = ''; reasons = @(); command = ''; next = ''; dataOpsHeld = $false; dataOpsOnly = $false; dataOpsReasons = @(); dataOpsReason = '' }
     if (-not $w -or (Get-PimWorkloadPrereqUngated) -contains $w -or (Get-PimWorkloadPrereqWorkloads) -notcontains $w) { return $out }
     $v = @($View | Where-Object { $_ -and "$($_.workload)" -eq $w })[0]
     $st = if ("$StoreError".Trim()) { 'unreadable' } elseif ($v) { "$($v.state)" } else { 'notRun' }
@@ -279,12 +294,53 @@ function Get-PimWorkloadAssignmentGate {
     # step in words (PIM checks itself / confirm the portal step). Never a script to "record" a check PIM can make itself.
     $out.command = if ($v -and "$($v.command)".Trim()) { "$($v.command)" } else { '' }
     $out.next = if ($v -and $v.PSObject.Properties['next'] -and "$($v.next)".Trim()) { "$($v.next)" } else { Get-PimWorkloadPrereqNextStep -State $st }
-    if ($st -in @('ok', 'stale')) { return $out }
+    if ($st -in @('ok', 'stale')) {
+        # DEFENDER-SENTINEL-OPTIONAL-1: the core is green; the OPTIONAL Data Operations group (view.dataOps) may still be
+        # not set up -- then only a role that uses microsoft.xdr/dataops/ (-DataOperations) waits, with the calm text.
+        $dg = Get-PimWorkloadPrereqRecordField -Object $v -Name 'dataOps'
+        if ($dg -and "$(Get-PimWorkloadPrereqRecordField -Object $dg -Name 'state')" -eq 'notSetUp') {
+            $open = @(@(Get-PimWorkloadPrereqRecordField -Object $dg -Name 'open') | Where-Object { $_ })
+            $out.dataOpsReasons = @($open | ForEach-Object { "not in place: $_" })
+            $out.dataOpsReason = Get-PimDefenderDataOpsWaitText
+            if ($DataOperations) {
+                $out.held = $true; $out.dataOpsOnly = $true
+                $out.reasons = @($out.dataOpsReasons)
+                $out.reason = $out.dataOpsReason
+            } else { $out.dataOpsHeld = $true }
+        }
+        return $out
+    }
     # Lead decision 2026-09-19 (operator: "you decide"): AZURE is held only when the script RAN and found it not ready
     # (failed / incomplete). Never checked or unreadable is NOT a hold for Azure: v1 assigned Azure roles with no
     # prerequisite script at all, so holding an upgraded environment's new Azure assignments until someone runs a new
     # script would be a v1 -> v2 regression. Intune / Defender / Power BI keep the operator's rule (not prepped = held).
     if ($w -eq 'AzureRbac' -and $st -in @('notRun', 'unreadable')) { return $out }
+    # DEFENDER-DATAOPS-SCOPE-1: split the not-green checks into Data Operations ones and the rest. (Since
+    # DEFENDER-SENTINEL-OPTIONAL-1 the view no longer lists a Data Operations check here -- this keeps a view built from
+    # an older shape, or by hand, judged by the same rule.)
+    if ($v -and $st -in @('failed', 'incomplete')) {
+        $fAll = @(@($v.failed) | Where-Object { $_ }); $pAll = @(@($v.pending) | Where-Object { $_ })
+        $fDo = @($fAll | Where-Object { Test-PimWorkloadPrereqCheckIsDataOps -Workload $w -Name "$_" })
+        $pDo = @($pAll | Where-Object { Test-PimWorkloadPrereqCheckIsDataOps -Workload $w -Name "$_" })
+        if (($fDo.Count + $pDo.Count) -gt 0) {
+            $out.dataOpsReasons = @(@($fDo | ForEach-Object { "missing: $_" }) + @($pDo | ForEach-Object { "not confirmed: $_" }))
+            $out.dataOpsReason = Get-PimDefenderDataOpsWaitText
+            $fNon = @($fAll | Where-Object { $fDo -notcontains $_ }); $pNon = @($pAll | Where-Object { $pDo -notcontains $_ })
+            $non = if ($fNon.Count) { @($fNon | ForEach-Object { "missing: $_" }) } else { @($pNon | ForEach-Object { "not confirmed: $_" }) }
+            if (-not @($non).Count) {
+                # only Data Operations checks are open: only a Data Operations assignment waits
+                if ($DataOperations) { $out.held = $true; $out.dataOpsOnly = $true; $out.reasons = @($out.dataOpsReasons); $out.reason = $out.dataOpsReason }
+                else { $out.dataOpsHeld = $true }
+                return $out
+            }
+            if (-not $DataOperations) {
+                $out.held = $true
+                $out.reasons = @($non)
+                $out.reason = ("{0} prerequisites not green ({1}): {2}" -f $w, $st, (@($non) -join '; '))
+                return $out
+            }
+        }
+    }
     $reasons = switch ($st) {
         'failed'     { @(@($v.failed) | Where-Object { $_ } | ForEach-Object { "missing: $_" }) }
         'incomplete' { @(@($v.pending) | Where-Object { $_ } | ForEach-Object { "not confirmed: $_" }) }
@@ -302,17 +358,169 @@ function Get-PimTemplateAssignmentGate {
     <#
       /api/templates: which workload ASSIGNMENTS of a pack would be held (Get-PimWorkloadAssignmentGate per workload the
       pack maps to). Never refuses the pack -- it only says what waits.
-      Returns @{ workloads = @(ids); held = @( @{ workload; state; reason; reasons; command } ) }.
+      Returns @{ workloads = @(ids); held = @( @{ workload; state; reason; reasons; command } ); dataOpsHeld = @( same shape ) }.
+      DEFENDER-DATAOPS-SCOPE-1 (internal 2026-11-16): a workload whose open checks are ALL Data Operations checks is not
+      in held (most of the pack's roles assign); it is reported separately in dataOpsHeld (only its Data Operations
+      roles wait).
     #>
     param([Parameter(Mandatory)][string]$TemplateId, [object[]]$View = @(), [string]$StoreError = '')
     $map = Get-PimWorkloadPrereqTemplateMap
     $ws = @(); if ($map.Contains($TemplateId)) { $ws = @($map[$TemplateId]) }
     $held = New-Object System.Collections.Generic.List[object]
+    $doHeld = New-Object System.Collections.Generic.List[object]
     foreach ($w in $ws) {
         $g = Get-PimWorkloadAssignmentGate -Workload $w -View $View -StoreError $StoreError
         if ($g.held) { $held.Add([ordered]@{ workload = $w; state = $g.state; reason = $g.reason; reasons = @($g.reasons); command = $g.command; next = $g.next }) }
+        elseif ($g.dataOpsHeld) { $doHeld.Add([ordered]@{ workload = $w; state = $g.state; reason = $g.dataOpsReason; reasons = @($g.dataOpsReasons); command = $g.command; next = $g.next; dataOperationsOnly = $true }) }
     }
-    return [ordered]@{ workloads = @($ws); held = @($held.ToArray()) }
+    return [ordered]@{ workloads = @($ws); held = @($held.ToArray()); dataOpsHeld = @($doHeld.ToArray()) }
+}
+
+function Test-PimWorkloadPrereqCheckIsDataOps {
+    <#
+      PURE. DEFENDER-DATAOPS-SCOPE-1 (internal 2026-11-16). Is the check -Id, or the check whose catalog NAME is -Name
+      (a stored record's failed / pending lists carry names), of -Workload a Data Operations check (dataOperations = $true)?
+      An unknown name (e.g. 'the stored run has no readable date') is NOT a Data Operations check -- it holds everything.
+    #>
+    param([AllowEmptyString()][string]$Workload, [string]$Id = '', [string]$Name = '')
+    $cat = Get-PimWorkloadPrereqCatalog
+    if (-not "$Workload".Trim() -or -not $cat.Contains("$Workload".Trim())) { return $false }
+    foreach ($d in @($cat["$Workload".Trim()].checks)) {
+        $hit = ("$Id".Trim() -and "$($d.id)" -ieq "$Id".Trim()) -or ("$Name".Trim() -and "$($d.name)" -ieq "$Name".Trim())
+        if ($hit) { return [bool]($d.ContainsKey('dataOperations') -and $d.dataOperations) }
+    }
+    return $false
+}
+
+function Test-PimDefenderRowUsesDataOperations {
+    <#
+      PURE. DEFENDER-DATAOPS-SCOPE-1 (internal 2026-11-16, owner decision "Confirm (1) + fix product"). Does the Defender
+      XDR assignment of this binding row use a role with Data Operations permissions (any allowedResourceAction starting
+      microsoft.xdr/dataops/, case-insensitive)? Only such an assignment waits for the Data Operations prerequisites.
+        1. the row's own spec (Permissions / AllowedResourceActions), else
+        2. the live role in -Catalog (Get-PimDefenderRoleCatalog shape: byId / byName -> { actions }) by the row's
+           RoleDefinitionId, else by its RoleDefinitionName / RoleName;
+        3. permissions unknown: the role / group NAME -- 'DataOperations' in it = $true; one of PIM's own non-dataops
+           template names (Defender-XDR-SecurityOperations- / -SecurityPosture- / -AuthorizationAndSettings-) = $false;
+        4. still unknown = $true (fail closed: held).
+    #>
+    param([AllowNull()][object]$Row, [AllowNull()][object]$Catalog)
+    $f = { param($n) $x = Get-PimWorkloadPrereqRecordField -Object $Row -Name $n; if ($null -eq $x) { '' } else { "$x".Trim() } }
+    $acts = New-Object System.Collections.Generic.List[string]
+    $perm = & $f 'Permissions'; if (-not $perm) { $perm = & $f 'AllowedResourceActions' }
+    foreach ($a in @("$perm" -split '[;,|\r\n]+')) { if ("$a".Trim()) { $acts.Add("$a".Trim()) } }
+    if (-not $acts.Count -and $Catalog) {
+        $byId = Get-PimWorkloadPrereqRecordField -Object $Catalog -Name 'byId'
+        $byName = Get-PimWorkloadPrereqRecordField -Object $Catalog -Name 'byName'
+        $rid = (& $f 'RoleDefinitionId').ToLowerInvariant()
+        $roles = @()
+        if ($rid -and $byId -is [System.Collections.IDictionary] -and $byId.Contains($rid)) { $roles = @($byId[$rid]) }
+        if (-not $roles.Count -and $byName -is [System.Collections.IDictionary]) {
+            foreach ($n in @((& $f 'RoleDefinitionName'), (& $f 'RoleName'))) {
+                $k = "$n".ToLowerInvariant(); if ($k -and $byName.Contains($k)) { $roles = @($byName[$k]); break }
+            }
+        }
+        foreach ($r in $roles) { foreach ($a in @(Get-PimWorkloadPrereqRecordField -Object $r -Name 'actions')) { if ("$a".Trim()) { $acts.Add("$a".Trim()) } } }
+    }
+    if ($acts.Count) { return [bool](@($acts | Where-Object { $_ -match '^microsoft\.xdr/dataops/' }).Count) }
+    $names = @(@((& $f 'RoleDefinitionName'), (& $f 'RoleName'), (& $f 'GroupName'), (& $f 'GroupTag')) | Where-Object { $_ -and $_ -notmatch '\{' })
+    if (@($names | Where-Object { $_ -match 'DataOperations' }).Count) { return $true }
+    if (@($names | Where-Object { $_ -match 'Defender-XDR-(SecurityOperations|SecurityPosture|AuthorizationAndSettings)-' }).Count) { return $false }
+    return $true
+}
+
+function Get-PimDefenderDataOpsRoleEvidence {
+    <#
+      PURE. DEFENDER-DATAOPS-INFERRED-1 (internal 2026-11-16, owner: "if we can avoid manually press i prefer that"). The
+      live Defender role definitions (beta roleManagement/defender/roleDefinitions rows) that carry an allowedResourceAction
+      under microsoft.xdr/dataops/ (case-insensitive). Measured 2026-09-19 (catalog comment above): a tenant WITHOUT the
+      Sentinel-in-Defender prerequisite REFUSES to store such a role ("... is not a valid permission for storage"), so a
+      stored one is proof the Data Operations group is in place. Returns @( role display names ) (id when unnamed).
+    #>
+    param([object[]]$RoleDefinitions = @())
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($RoleDefinitions)) {
+        if (-not $r) { continue }
+        $hit = $false
+        foreach ($p in @(Get-PimWorkloadPrereqRecordField -Object $r -Name 'rolePermissions')) {
+            foreach ($a in @(Get-PimWorkloadPrereqRecordField -Object $p -Name 'allowedResourceActions')) { if ("$a".Trim() -match '^microsoft\.xdr/dataops/') { $hit = $true } }
+        }
+        if ($hit) { $n = "$(Get-PimWorkloadPrereqRecordField -Object $r -Name 'displayName')".Trim(); if (-not $n) { $n = "$(Get-PimWorkloadPrereqRecordField -Object $r -Name 'id')" }; $names.Add($n) }
+    }
+    return @($names.ToArray())
+}
+
+function Get-PimDefenderInferredChecks {
+    <#
+      PURE. The ONE inference rule over the live Defender role definitions (Graph shape: displayName, rolePermissions.
+      allowedResourceActions), used by the prerequisite runner AND -- DEFENDER-INFER-AT-RUN-1 (internal 2026-11-16, owner:
+      "upd it at <customer> so it clears", "keep pushing") -- by the engine at assignment time over the roles it already read:
+        DEFENDER-URBAC-INFERRED-1   a live role with a microsoft.xdr/ permission -> defender.urbacWorkloads ok (inferred)
+                                    when it is manual / notChecked;
+        DEFENDER-DATAOPS-INFERRED-1 a live role with microsoft.xdr/dataops/ -> defender.sentinelInDefender (manual /
+                                    notChecked), an UNREADABLE defender.sentinelEnabled (notChecked) and a not-ok
+                                    defender.dataOpsCatalog -> ok (inferred).
+      A check that is already ok / fixed / confirmed / skipped is never touched (a person's Confirm / Not used wins), and a
+      read-and-confirmed failed Sentinel check is never overridden. Returns the checks (copies where changed), in order.
+    #>
+    param([object[]]$Checks = @(), [object[]]$RoleDefinitions = @())
+    $inf = Get-PimDefenderUrbacInference -RoleDefinitions @($RoleDefinitions)
+    $doLive = @(Get-PimDefenderDataOpsRoleEvidence -RoleDefinitions @($RoleDefinitions))
+    $why = if ($doLive.Count) { "inferred: live role '$($doLive[0])'$(if ($doLive.Count -gt 1) { " (+$($doLive.Count - 1) more)" }) uses Data Operations permissions, which Defender stores only when Sentinel is connected" } else { '' }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($Checks)) {
+        if ($null -eq $c) { continue }
+        $id = "$($c.id)"; $st = "$($c.status)"
+        $set = $null
+        if (-not (Test-PimWorkloadPrereqStatusOk -Status $st)) {
+            if ($id -eq 'defender.urbacWorkloads' -and $inf.inUse -and $st -in @('manual', 'notChecked')) { $set = @{ detail = "$($inf.detail)" } }
+            elseif ($doLive.Count) {
+                if ($id -eq 'defender.sentinelInDefender' -and $st -in @('manual', 'notChecked')) { $set = @{ detail = "$why. Before: $($c.detail)" } }
+                elseif ($id -eq 'defender.sentinelEnabled' -and $st -eq 'notChecked') { $set = @{ detail = "$why. Before: $($c.detail)" } }
+                elseif ($id -eq 'defender.dataOpsCatalog') { $set = @{ detail = "$why. Before: $($c.detail)" } }
+            }
+        }
+        if ($set) {
+            $set['status'] = 'ok'; $set['ok'] = $true; $set['inferred'] = $true; $set['manualStep'] = ''
+            $out.Add((Copy-PimWorkloadPrereqCheck -Check $c -Set $set))
+        } else { $out.Add($c) }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimDefenderDataOpsWaitText {
+    # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16): the ONE calm text for a Data Operations role that waits.
+    'waits for Microsoft Sentinel: this Defender role uses Data Operations permissions, which Microsoft allows only when a Sentinel workspace is connected to the Defender portal. Optional -- connect Sentinel, or press Not used.'
+}
+
+function Get-PimDefenderDataOpsState {
+    <#
+      PURE. DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "sentinel is optional"). The OPTIONAL Data Operations group of
+      DefenderXdr (the catalog checks with dataOperations = $true), judged from -Checks (a record's checks; $null / none =
+      nothing known yet):
+        inPlace  -- every Data Operations check is ok / fixed / confirmed
+        notUsed  -- none is open and a person pressed Not used (skipped) on at least one
+        notSetUp -- at least one is open (failed / manual / notChecked / missing) -- only a role that uses
+                    microsoft.xdr/dataops/ waits (Get-PimWorkloadAssignmentGate -DataOperations); never red, never part
+                    of the workload state.
+      Returns [ordered]@{ title; state; open = @(check names); detail }.
+    #>
+    param([object[]]$Checks = @())
+    $defs = @(@((Get-PimWorkloadPrereqCatalog -Workload 'DefenderXdr')['DefenderXdr'].checks) | Where-Object { $_.ContainsKey('dataOperations') -and $_.dataOperations })
+    $open = New-Object System.Collections.Generic.List[string]; $skip = $false
+    foreach ($d in $defs) {
+        $c = @(@($Checks) | Where-Object { $_ -and "$($_.id)" -eq "$($d.id)" })[0]
+        $s = if ($c) { "$($c.status)" } else { 'notChecked' }
+        if ($s -eq 'skipped') { $skip = $true }
+        if (-not (Test-PimWorkloadPrereqStatusOk -Status $s)) { $open.Add("$($d.name)") }
+    }
+    $state = if ($open.Count) { 'notSetUp' } elseif ($skip) { 'notUsed' } else { 'inPlace' }
+    $detail = switch ($state) {
+        'inPlace'  { 'Data Operations roles can be assigned: Microsoft Sentinel is connected to the Defender portal.' }
+        'notUsed'  { 'Marked as not used: no Data Operations role is delegated.' }
+        default    { 'Not set up (optional). Only a Defender role that uses Data Operations permissions waits; every other Defender role is assigned. Connect Microsoft Sentinel to the Defender portal, or press Not used.' }
+    }
+    return [ordered]@{ title = 'Data Operations (optional -- needs Microsoft Sentinel connected to Defender)'; state = $state; open = @($open.ToArray()); detail = $detail }
 }
 
 function Get-PimWorkloadPrereqConnectorMap {
@@ -417,7 +625,11 @@ function Get-PimWorkloadPrereqResult {
           [string]$RanBy = '', [string]$ToolVersion = '', [string]$TenantId = '', [string]$EngineIdentity = '',
           # §97.1: the engine's service principal object id -- the fix command (Grant-PimEnginePermissions) needs it.
           [string]$EngineObjectId = '')
-    $all = @($Checks | Where-Object { $_ })
+    # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16): a check the catalog now calls OPTIONAL (the Data Operations group)
+    # is optional in a record stored before that too -- its stored required = $true never decides the state again.
+    $all = @(@($Checks | Where-Object { $_ }) | ForEach-Object {
+        $d = Get-PimWorkloadPrereqCheckDef -Id "$($_.id)"
+        if ($d -and $d.ContainsKey('required') -and -not [bool]$d.required -and [bool]$_.required) { Copy-PimWorkloadPrereqCheck -Check $_ -Set @{ required = $false } } else { $_ } })
     $req = @($all | Where-Object { $_.required })
     $failed  = @($req | Where-Object { $_.status -eq 'failed' })
     $pending = @($req | Where-Object { -not $_.ok -and $_.status -ne 'failed' })
@@ -498,24 +710,36 @@ function Get-PimDefenderUrbacInference {
       Defender permission namespaces are in use -- evidence that Unified RBAC is live, not proof a given workload is
       activated. -RoleDefinitions = beta roleManagement/defender/roleDefinitions rows (rolePermissions.allowedResourceActions).
     #>
+    # DEFENDER-URBAC-INFERRED-1 (internal 2026-11-16, owner decision "Confirm (1) + fix product"): inUse = at least one
+    # live role carries a microsoft.xdr/ permission -- the runner then records defender.urbacWorkloads 'ok' (inferred)
+    # instead of a portal step to confirm. No such role = inUse $false (the admin confirms, as before).
     param([object[]]$RoleDefinitions = @())
     $labels = @{ 'secops' = 'Security operations'; 'securityposture' = 'Security posture'; 'configuration' = 'Authorization and settings' }
     $ns = New-Object System.Collections.Generic.SortedSet[string]
     $custom = 0
+    $xdrRoles = New-Object System.Collections.Generic.List[string]
     foreach ($r in @($RoleDefinitions)) {
         if (-not $r) { continue }
         if ($r.PSObject.Properties['isBuiltIn'] -and -not [bool]$r.isBuiltIn) { $custom++ }
+        $xdr = $false
         foreach ($p in @($r.rolePermissions)) {
             foreach ($a in @($p.allowedResourceActions)) {
                 $seg = @("$a".ToLowerInvariant().Split('/') | Where-Object { $_ })
                 if ($seg.Count -ge 2) { [void]$ns.Add("$($seg[0])/$($seg[1])") }
+                if ($seg.Count -ge 2 -and $seg[0] -eq 'microsoft.xdr') { $xdr = $true }
             }
         }
+        if ($xdr) { $xdrRoles.Add($(if ("$($r.displayName)".Trim()) { "$($r.displayName)".Trim() } else { "$($r.id)" })) }
     }
     $named = @($ns | ForEach-Object { $t = ($_ -split '/')[1]; if ($labels.ContainsKey($t)) { "$_ ($($labels[$t]))" } else { $_ } })
-    $detail = if ($named.Count) { "inferred from $(@($RoleDefinitions).Count) live role(s) ($custom custom): permission namespaces in use = $($named -join ', '). This shows Unified RBAC is live; it cannot show which workloads are activated." }
+    $inUse = ($xdrRoles.Count -gt 0)
+    $detail = if ($inUse) {
+                  $shown = @($xdrRoles | Select-Object -First 5); $more = $xdrRoles.Count - $shown.Count
+                  "inferred from $($xdrRoles.Count) live role(s): $($shown -join ', ')$(if ($more -gt 0) { " (+$more more)" }) -- Unified RBAC is in use (permission namespaces: $($named -join ', '))."
+              }
+              elseif ($named.Count) { "inferred from $(@($RoleDefinitions).Count) live role(s) ($custom custom): permission namespaces in use = $($named -join ', '). This shows Unified RBAC is live; it cannot show which workloads are activated." }
               else { 'inferred: no live role carries a permission yet -- nothing to infer from.' }
-    return @{ namespaces = @($ns); customRoles = $custom; detail = $detail }
+    return @{ namespaces = @($ns); customRoles = $custom; inUse = $inUse; xdrRoles = @($xdrRoles.ToArray()); detail = $detail }
 }
 
 function Test-PimAzureScopeIsWithin {
@@ -1131,7 +1355,11 @@ function Merge-PimWorkloadPrereqRecord {
         if (-not $c) { continue }
         $s = $storedChecks["$($c.id)"]
         $keep = $false
-        if ($s -and -not [bool]$c.ok) {
+        # DEFENDER-URBAC-INFERRED-1: a stored person's CONFIRMATION wins over an INFERRED ok (both are green; the
+        # confirmation names who attested it).
+        # DEFENDER-DATAOPS-INFERRED-1: the same for a Data Operations check -- a person's Confirm or Not used (skipped) wins.
+        if ($s -and [bool]$c.ok -and [bool](Get-PimWorkloadPrereqRecordField -Object $c -Name 'inferred') -and "$($s.status)" -in @('confirmed', 'skipped')) { $keep = $true }
+        elseif ($s -and -not [bool]$c.ok) {
             $ss = "$($s.status)"; $def = Get-PimWorkloadPrereqCheckDef -Id "$($c.id)"
             if ($ss -eq 'confirmed' -and (Test-PimWorkloadPrereqConfirmable -Id "$($c.id)" -Status "$($c.status)")) { $keep = $true }
             elseif ($ss -eq 'skipped' -and $def -and $def.ContainsKey('dataOperations') -and $def.dataOperations) { $keep = $true }
@@ -1301,6 +1529,19 @@ function Get-PimWorkloadPrereqView {
         # assignment gate -- is unchanged.
         $v = [ordered]@{ workload = $w; title = $cat[$w].title; command = ''; next = ''; state = 'notRun'; chip = 'amber'; ranUtc = ''; ranBy = ''; selfChecked = $false
                          ageDays = $null; failed = @(); pending = @(); checks = @(); engineObjectId = ''; ready = $false; notReady = ''; confirmation = $null }
+        # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "sentinel is optional"): a DefenderXdr record is judged on its CORE
+        # checks alone (re-judged here, so a record stored before 3.1.28 -- whose state counted Sentinel -- is not amber for
+        # it), and the Data Operations checks are the optional group dataOps (information, never red, never the state).
+        if ($w -eq 'DefenderXdr') {
+            $rc = @(@(Get-PimWorkloadPrereqRecordField -Object $r -Name 'checks') | Where-Object { $_ })
+            if ($r -and $rc.Count) {
+                $nr = Get-PimWorkloadPrereqResult -Workload $w -Checks $rc -RanUtc $NowUtc
+                $r = Copy-PimWorkloadPrereqCheck -Check $r -Set @{ state = $nr.state; ok = $nr.ok; failed = @($nr.failed); pending = @($nr.pending); checks = @($nr.checks) }
+            }
+            # a record WITHOUT checks says nothing about the group: $null = no Data Operations hold beyond the state itself
+            # (never run = the whole workload is held as notRun anyway)
+            $v['dataOps'] = $(if ($rc.Count) { Get-PimDefenderDataOpsState -Checks $rc } else { $null })
+        }
         if ($r) {
             # 🪤 pwsh 7's ConvertFrom-Json turns an ISO string into a [datetime] (the Manager's read), PS 5.1 leaves it a
             # string (the setup script's read). Take either; never stringify a [datetime] and re-parse it.
@@ -1321,6 +1562,8 @@ function Get-PimWorkloadPrereqView {
                     canSkip     = ([bool]($d -and $d.ContainsKey('dataOperations') -and $d.dataOperations) -and $s -ne 'skipped' -and -not [bool]$_.ok)
                     canWithdraw = ($s -in @('confirmed', 'skipped'))
                     kind        = $(if ($d) { "$($d.kind)" } else { '' })
+                    # DEFENDER-SENTINEL-OPTIONAL-1: the optional group a check belongs to ('' = a core check)
+                    group       = $(if ($d -and $d.ContainsKey('group')) { "$($d.group)" } else { '' })
                 } })
             $st = "$($r.state)"
             if (-not $st) { $st = $(if ([bool]$r.ok) { 'ok' } else { 'failed' }) }

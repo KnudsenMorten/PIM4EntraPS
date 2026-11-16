@@ -190,19 +190,21 @@ function Test-PimIdentityModelSelfCheck {
     <#
       WEB-AUTH-SELF-CHECK-1 (framework, binding): run at the Manager's START (before the HTTP listener opens) and in the engine's
       job entry (before it verifies signed requests), with no person. Checks the pinned hashes and loads Microsoft.IdentityModel
-      (Initialize-PimIdentityModel), then sends three made-up tokens through the SAME function a request takes
+      (Initialize-PimIdentityModel), then sends four made-up tokens through the SAME function a request takes
       (Resolve-PimAccessTokenCaller -> Invoke-PimTokenValidation), with a throwaway RSA key and a made-up tenant / app that match
       nothing real (never the live config):
         1. signed with the throwaway key (given as the JWKS) -> must be ACCEPTED (the whole path works end to end)
         2. signed with ANOTHER key                           -> must be REFUSED by Microsoft's library
         3. alg none                                          -> must be REFUSED
-      @{ ok; passed (0-3); line } -- line = the one log line ("[auth] token library self-check OK (Microsoft.IdentityModel
-      8.23.0, 3/3)" or "... FAILED ..."). Not ok = the caller exits non-zero (fail closed: an unhealthy revision / a failed job).
+        4. signed with the throwaway key but EXPIRED (exp 1 h in the past, far beyond the clock skew) -> must be REFUSED by
+           Microsoft's library (SELF-CHECK-EXPIRED-1)
+      @{ ok; passed (0-4); line } -- line = the one log line ("[auth] token library self-check OK (Microsoft.IdentityModel
+      8.23.0, 4/4)" or "... FAILED ..."). Not ok = the caller exits non-zero (fail closed: an unhealthy revision / a failed job).
       -Dir: the library folder (tests). Never throws.
     #>
     param([string]$Dir = '')
     $ver = Get-PimIdentityModelVersion
-    $fail = { param([int]$n, [string]$why) @{ ok = $false; passed = $n; line = "[auth] token library self-check FAILED (Microsoft.IdentityModel $ver, $n/3): $why -- refusing to start (fail closed)" } }
+    $fail = { param([int]$n, [string]$why) @{ ok = $false; passed = $n; line = "[auth] token library self-check FAILED (Microsoft.IdentityModel $ver, $n/4): $why -- refusing to start (fail closed)" } }
     $st = if ("$Dir".Trim()) { Initialize-PimIdentityModel -Dir $Dir -Force } else { Initialize-PimIdentityModel }
     if (-not $st.ok) { return (& $fail 0 "$($st.reason)") }
     if (-not (Get-Command Resolve-PimAccessTokenCaller -ErrorAction SilentlyContinue)) { return (& $fail 0 'the request validation path (PIM-HostedAuth.ps1) is not loaded') }
@@ -214,9 +216,14 @@ function Test-PimIdentityModelSelfCheck {
         $rp = $good.ExportParameters($false)
         $jwks = @{ keys = @(@{ kid = 'pim-selfcheck'; kty = 'RSA'; use = 'sig'; n = (& $b64u $rp.Modulus); e = (& $b64u $rp.Exponent) }) }
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $body = & $b64u ([Text.Encoding]::UTF8.GetBytes(([ordered]@{ iss = "https://login.microsoftonline.com/$tid/v2.0"; tid = $tid; aud = $app; scp = 'user_impersonation'
-                    oid = [guid]::NewGuid().ToString(); preferred_username = 'selfcheck@example.invalid'; iat = $now - 60; nbf = $now - 60; exp = $now + 600 } | ConvertTo-Json -Compress)))
-        $make = { param($key, [string]$alg)
+        $oidSc = [guid]::NewGuid().ToString()
+        $mkBody = { param([long]$iat, [long]$exp)
+            & $b64u ([Text.Encoding]::UTF8.GetBytes(([ordered]@{ iss = "https://login.microsoftonline.com/$tid/v2.0"; tid = $tid; aud = $app; scp = 'user_impersonation'
+                    oid = $oidSc; preferred_username = 'selfcheck@example.invalid'; iat = $iat; nbf = $iat; exp = $exp } | ConvertTo-Json -Compress))) }
+        $liveBody = & $mkBody ($now - 60) ($now + 600)
+        # SELF-CHECK-EXPIRED-1: expired 1 h ago (12x the largest clock skew Invoke-PimTokenValidation allows, 300 s)
+        $expiredBody = & $mkBody ($now - 7200) ($now - 3600)
+        $make = { param($key, [string]$alg, [string]$body = $liveBody)
             $h = & $b64u ([Text.Encoding]::UTF8.GetBytes((@{ alg = $alg; typ = 'JWT'; kid = 'pim-selfcheck' } | ConvertTo-Json -Compress)))
             if (-not $key) { return "$h.$body.AA" }   # alg none with a junk signature segment: it must reach the library and be refused there
             "$h.$body." + (& $b64u ($key.SignData([Text.Encoding]::ASCII.GetBytes("$h.$body"), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1))) }
@@ -228,7 +235,9 @@ function Test-PimIdentityModelSelfCheck {
         if ($r2.trusted -or "$($r2.reason)" -notmatch 'Microsoft\.IdentityModel') { return (& $fail 1 "the other-key case was not refused by Microsoft's library: $($r2.reason)") }
         $r3 = & $chk (& $make $null 'none')
         if ($r3.trusted) { return (& $fail 2 'the alg none case was accepted') }
-        return @{ ok = $true; passed = 3; line = "[auth] token library self-check OK (Microsoft.IdentityModel $ver, 3/3)" }
+        $r4 = & $chk (& $make $good 'RS256' $expiredBody)
+        if ($r4.trusted -or "$($r4.reason)" -notmatch 'Microsoft\.IdentityModel') { return (& $fail 3 "the expired case was not refused by Microsoft's library: $($r4.reason)") }
+        return @{ ok = $true; passed = 4; line = "[auth] token library self-check OK (Microsoft.IdentityModel $ver, 4/4)" }
     } catch {
         return (& $fail 0 ("the self-check errored: " + $_.Exception.Message))
     } finally {

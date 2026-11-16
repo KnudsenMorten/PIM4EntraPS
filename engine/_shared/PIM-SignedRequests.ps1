@@ -744,7 +744,8 @@ function Initialize-PimSignedRequestRun {
     $st = @{ run = $corr; mode = $cfg.mode; unknown = $cfg.unknown; raw = $cfg.raw; audiences = @($cfg.audiences); issuers = @(); jwks = $null; keysError = ''
              roleMap = @{}; sigs = @{}; verdicts = @{}; tokenChecks = @{}; adoption = $null; adoptionNote = ''; rowHashes = $null
              counts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0 }; reasons = @{}
-             runCounts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0 }; lines = (New-Object System.Collections.Generic.List[string]) }
+             runCounts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0; remembered = 0 }; lines = (New-Object System.Collections.Generic.List[string])
+             judged = $null; judgedDirty = $false }
     $global:PIM_SignedRequestRun = $st
     if ($st.mode -eq 'off') { return $st }
     if ($st.unknown) { $st.lines.Add("signed requests: the mode '$($cfg.raw)' is not off / observe / enforce -- treated as OBSERVE (nothing is refused)") }
@@ -789,19 +790,110 @@ function Get-PimSignedRequestRunSignatures {
     return $rows
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# SIGNED-REQ-STUCK-1: a commit's refusal is judged ONCE. A change the engine plans on every run (its handler does not land
+# it -- e.g. a create the handler declines) used to be re-judged and re-logged every 5 minutes for the same commit. The
+# refusal is remembered in pim.Settings 'SignedRequestJudged' keyed by the commit, the people it names, the change, the mode
+# and the adoption in force; the next run takes the remembered outcome without re-reading or re-checking anything and logs
+# nothing (observe: applied as today; enforce: still held, never applied). A NEW commit, another approver, a new adoption or
+# a mode switch is a new key -- judged afresh. Not remembered (judged again next run): a change no commit names, and a
+# verdict that could not be reached (no published keys / no audience / no issuer pinned / the check errored).
+# ---------------------------------------------------------------------------------------------------------------------
+
+function Get-PimSignedRequestJudgedKey {
+    <# PURE. The remembered-refusal key of one change; '' when it may not be remembered (no commit names it). #>
+    param([AllowNull()][object]$Commit, [string]$Scope = '', [string]$Op = '', [string]$Key = '', [string]$Mode = '', [string]$AdoptionId = '')
+    if ($null -eq $Commit -or -not "$($Commit.CommitId)".Trim() -or "$($Commit.via)" -eq 'attribution') { return '' }
+    return (@("$($Commit.CommitId)".Trim(), "$($Commit.InitiatedBy)".Trim(), "$($Commit.ApprovedBy)".Trim(), "$Scope".Trim(), "$Op".Trim(), "$Key".Trim(), "$Mode".Trim(), "$AdoptionId".Trim()) -join '|').ToLowerInvariant()
+}
+
+function Test-PimSignedRequestJudgedFinal {
+    <# PURE. May this refusal be remembered? Only a verdict the check actually reached: never a run without the published
+       keys, a missing audience / issuer pin (configuration, fixed by an admin) or a check that errored. #>
+    param([string]$Reason = '', [hashtable]$State = $null)
+    if ($State -and ($null -eq $State.jwks -or "$($State.keysError)".Trim())) { return $false }
+    return ((Get-PimSignedRequestReasonClass -Reason $Reason) -notin @('keys-unavailable', 'no-audience', 'no-issuer', 'check-error'))
+}
+
+function Get-PimSignedRequestJudged {
+    <# The remembered refusals (key -> @{ judgedUtc; reason; mode }), read ONCE per run into the run state. Test seam:
+       $global:PIM_SignedRequestSettingSeam['SignedRequestJudged']. A read failure = nothing remembered (judged again). #>
+    param([Parameter(Mandatory)][hashtable]$State)
+    if ($State.judged -is [hashtable]) { return $State.judged }
+    $h = @{}
+    $raw = $null
+    try {
+        if ($global:PIM_SignedRequestSettingSeam -is [hashtable]) { $raw = $global:PIM_SignedRequestSettingSeam['SignedRequestJudged'] }
+        else { $cs = Get-PimSignedRequestStoreCs; if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $raw = Get-PimSqlSetting -ConnectionString $cs -Name 'SignedRequestJudged' } }
+    } catch { Write-Warning "[signed-requests] the remembered outcomes could not be read (each change is judged again): $($_.Exception.Message)"; $raw = $null }
+    $o = $raw; if ($o -is [string]) { try { $o = $o | ConvertFrom-Json } catch { $o = $null } }
+    $items = $null
+    if ($o -is [System.Collections.IDictionary]) { $items = $o['items'] } elseif ($o -and $o.PSObject.Properties['items']) { $items = $o.items }
+    # PS 7 ConvertFrom-Json turns an ISO time into a [datetime]: kept as the round-trip string so the newest-first cut sorts right
+    $ju = { param($x) if ($x -is [datetime]) { $x.ToUniversalTime().ToString('o') } else { "$x" } }
+    if ($items -is [System.Collections.IDictionary]) { foreach ($k in @($items.Keys)) { $v = $items[$k]; $h["$k"] = @{ judgedUtc = (& $ju $v.judgedUtc); reason = "$($v.reason)"; mode = "$($v.mode)" } } }
+    elseif ($items) { foreach ($p in $items.PSObject.Properties) { $h["$($p.Name)"] = @{ judgedUtc = (& $ju $p.Value.judgedUtc); reason = "$($p.Value.reason)"; mode = "$($p.Value.mode)" } } }
+    $State.judged = $h
+    return $h
+}
+
+function ConvertTo-PimSignedRequestJudgedValue {
+    <# PURE. The stored record: { v = 1; items = { key = { judgedUtc; reason; mode } } }, the newest -Max (500) kept. #>
+    param([hashtable]$Judged = @{}, [int]$Max = 500)
+    $items = [ordered]@{}
+    foreach ($k in @(@($Judged.Keys) | Sort-Object { "$($Judged[$_].judgedUtc)" } -Descending | Select-Object -First $Max)) {
+        $r = "$($Judged[$k].reason)"; if ($r.Length -gt 400) { $r = $r.Substring(0, 400) }
+        $items["$k"] = [ordered]@{ judgedUtc = "$($Judged[$k].judgedUtc)"; reason = $r; mode = "$($Judged[$k].mode)" }
+    }
+    return [ordered]@{ v = 1; items = $items }
+}
+
+function Save-PimSignedRequestJudged {
+    <# Writes the run's NEW remembered refusals to pim.Settings 'SignedRequestJudged' (only when something new was judged).
+       Never throws. #>
+    param([hashtable]$State = $null)
+    if ($null -eq $State) { $State = $global:PIM_SignedRequestRun }
+    if (-not ($State -is [hashtable]) -or -not $State.judgedDirty -or -not ($State.judged -is [hashtable])) { return $false }
+    try {
+        $val = ConvertTo-PimSignedRequestJudgedValue -Judged $State.judged
+        if ($global:PIM_SignedRequestSettingSeam -is [hashtable]) { $global:PIM_SignedRequestSettingSeam['SignedRequestJudged'] = ($val | ConvertTo-Json -Depth 6 -Compress) }
+        else {
+            $cs = Get-PimSignedRequestStoreCs
+            if (-not $cs -or -not (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) { return $false }
+            Set-PimSqlSetting -ConnectionString $cs -Name 'SignedRequestJudged' -Value $val
+        }
+        $State.judgedDirty = $false
+        return $true
+    } catch { Write-Warning "[signed-requests] the judged outcomes were not saved (they are judged again next run): $($_.Exception.Message)"; return $false }
+}
+
 function Test-PimEngineSignedRequest {
     <#
       THE ENGINE CHECK for one change, right before its handler acts. -Commit: Resolve-PimEngineChangeCommit's answer (or
-      $null); -Refs: Get-PimEngineItemStoreRefs. Returns @{ mode; ok; refuse; reason; commitId; via }:
+      $null); -Refs: Get-PimEngineItemStoreRefs; -Scope / -Key: the change (the remembered-refusal key, SIGNED-REQ-STUCK-1).
+      Returns @{ mode; ok; refuse; reason; commitId; via; remembered; judgedUtc }:
         mode off              -> ok, nothing checked (and nothing counted);
         observe / unknown     -> ok = the verdict; refuse = $false ALWAYS (applied as today, reported when not ok);
         enforce               -> refuse = -not ok.
+        remembered = $true    -> this commit's refusal of this change was judged on an earlier run (judgedUtc): nothing is
+                                 read or checked again, the stored reason is returned.
       Never throws: a fault in the check itself is a verdict "the check could not run: ..." (refused only in enforce).
     #>
-    param([AllowNull()][object]$Commit, [object[]]$Refs = @(), [string]$Op = '', [hashtable]$State = $null)
+    param([AllowNull()][object]$Commit, [object[]]$Refs = @(), [string]$Op = '', [hashtable]$State = $null, [string]$Scope = '', [string]$Key = '')
     if ($null -eq $State) { $State = Initialize-PimSignedRequestRun }
-    if ($State.mode -eq 'off') { return @{ mode = 'off'; ok = $true; refuse = $false; reason = ''; commitId = ''; via = '' } }
+    if ($State.mode -eq 'off') { return @{ mode = 'off'; ok = $true; refuse = $false; reason = ''; commitId = ''; via = ''; remembered = $false; judgedUtc = '' } }
     $ok = $false; $reason = ''; $cid = ''; $via = ''
+    $jk = ''
+    try {
+        $jk = Get-PimSignedRequestJudgedKey -Commit $Commit -Scope $Scope -Op $Op -Key $Key -Mode "$($State.mode)" -AdoptionId $(if ($null -ne $State.adoption) { "$($State.adoption.commitId)" } else { '' })
+        if ($jk) {
+            $jm = Get-PimSignedRequestJudged -State $State
+            if ($jm.ContainsKey($jk)) {
+                return @{ mode = $State.mode; ok = $false; refuse = ($State.mode -eq 'enforce'); reason = "$($jm[$jk].reason)"; commitId = "$($Commit.CommitId)".Trim(); via = ''
+                          remembered = $true; judgedUtc = "$($jm[$jk].judgedUtc)" }
+            }
+        }
+    } catch { $jk = '' }
     try {
         $verify = {
             param($sig, $user, $position)
@@ -836,7 +928,15 @@ function Test-PimEngineSignedRequest {
             } else { $reason = "$reason; no verified adoption of the existing desired state" }
         }
     } catch { $ok = $false; $reason = "the check could not run: $($_.Exception.Message)" }
-    return @{ mode = $State.mode; ok = $ok; refuse = ($State.mode -eq 'enforce' -and -not $ok); reason = $reason; commitId = $cid; via = $via }
+    # SIGNED-REQ-STUCK-1: a reached refusal of a commit is remembered -- the next run does not judge it again
+    if (-not $ok -and $jk -and (Test-PimSignedRequestJudgedFinal -Reason $reason -State $State)) {
+        try {
+            $jm = Get-PimSignedRequestJudged -State $State
+            $jm[$jk] = @{ judgedUtc = [datetime]::UtcNow.ToString('o'); reason = $reason; mode = "$($State.mode)" }
+            $State.judgedDirty = $true
+        } catch { }
+    }
+    return @{ mode = $State.mode; ok = $ok; refuse = ($State.mode -eq 'enforce' -and -not $ok); reason = $reason; commitId = $cid; via = $via; remembered = $false; judgedUtc = '' }
 }
 
 function Get-PimSignedRequestReasonClass {
@@ -872,13 +972,18 @@ function Add-PimSignedRequestObservation {
     param([Parameter(Mandatory)][hashtable]$Verdict, [string]$Scope = '', [string]$Op = '', [string]$Key = '', [hashtable]$State = $null)
     if ($null -eq $State) { $State = $global:PIM_SignedRequestRun }
     if ($null -eq $State -or "$($Verdict.mode)" -eq 'off') { return '' }
+    # SIGNED-REQ-STUCK-1: judged on an earlier run -- not counted again, no line (its one line was written when it was judged)
+    if ($Verdict.remembered) { if ($State.runCounts -is [hashtable]) { $State.runCounts['remembered'] = 1 + [int]$State.runCounts['remembered'] }; return '' }
     # .counts = not yet saved (Save-PimSignedRequestStats empties it); .runCounts = this run, for its log line
     $bump = { param($n) foreach ($c in @($State.counts, $State.runCounts)) { if ($c -is [hashtable]) { $c[$n] = 1 + [int]$c[$n] } } }
     & $bump 'checked'
     if ($Verdict.ok) { & $bump 'verified'; if ("$($Verdict.via)" -eq 'adoption') { & $bump 'adopted' }; return '' }
     $cls = Get-PimSignedRequestReasonClass -Reason "$($Verdict.reason)"
     $State.reasons[$cls] = 1 + [int]$State.reasons[$cls]
-    if ($Verdict.refuse) { & $bump 'refused'; $word = 'REFUSED (not applied)' } else { & $bump 'wouldRefuse'; $word = 'would have refused' }
+    # the change's STATE in plain words (SIGNED-REQ-STUCK-1): applied or held, and that it is judged once per commit
+    $once = if ("$($Verdict.commitId)") { '; judged once for this commit' } else { '' }
+    if ($Verdict.refuse) { & $bump 'refused'; $word = "REFUSED (not applied) -- the change is HELD until a new signed commit asks for it$once" }
+    else { & $bump 'wouldRefuse'; $word = "would have refused (observe mode: the change IS applied as today$once)" }
     $line = ("signed request {0}: {1} {2} {3}{4} -- {5}" -f $word, $Scope, $Op, $Key, $(if ("$($Verdict.commitId)") { " (commit $($Verdict.commitId))" } else { '' }), "$($Verdict.reason)")
     if ($State.lines.Count -lt 200) { $State.lines.Add($line) } elseif ($State.lines.Count -eq 200) { $State.lines.Add('signed requests: more changes did not verify -- see the counts') }
     return $line
@@ -890,7 +995,8 @@ function Get-PimSignedRequestRunLogLines {
     if (-not ($st -is [hashtable]) -or "$($st.mode)" -eq 'off') { return @() }
     $c = $st.runCounts
     if ([int]$c.checked -eq 0 -and $st.lines.Count -eq 0) { return @() }
-    $out = @(("signed requests ({0}): {1} change(s) checked, {2} verified ({3} by the adoption), {4} would have been refused, {5} refused" -f $st.mode, [int]$c.checked, [int]$c.verified, [int]$c.adopted, [int]$c.wouldRefuse, [int]$c.refused))
+    $out = @(("signed requests ({0}): {1} change(s) checked, {2} verified ({3} by the adoption), {4} would have been refused, {5} refused{6}" -f $st.mode, [int]$c.checked, [int]$c.verified, [int]$c.adopted, [int]$c.wouldRefuse, [int]$c.refused,
+                $(if ([int]$c.remembered -gt 0) { ", $([int]$c.remembered) judged on an earlier run (not checked again$(if ($st.mode -eq 'enforce') { '; still held' } else { '' }))" } else { '' })))
     $out += @($st.lines.ToArray())
     $st.lines.Clear()
     foreach ($k in @($c.Keys)) { $c[$k] = 0 }
@@ -923,6 +1029,8 @@ function Save-PimSignedRequestStats {
        nothing written. Never throws. Test seam: $global:PIM_SignedRequestSettingSeam (the record is kept there). #>
     param([hashtable]$State = $null)
     if ($null -eq $State) { $State = $global:PIM_SignedRequestRun }
+    # SIGNED-REQ-STUCK-1: the refusals judged this pass are remembered first (independent of the counts)
+    if ($State -is [hashtable] -and "$($State.mode)" -ne 'off') { [void](Save-PimSignedRequestJudged -State $State) }
     if (-not ($State -is [hashtable]) -or "$($State.mode)" -eq 'off' -or [int]$State.counts.checked -eq 0) { return $false }
     try {
         if ($global:PIM_SignedRequestSettingSeam -is [hashtable]) {

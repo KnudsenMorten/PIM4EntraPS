@@ -1,0 +1,6 @@
+{"version":"3.1.29","date":"2026-11-16","type":"fix-only",
+ "summary":"An open PIM Manager page keeps its sign-in fresh, refused calls name who sent them, and a role deleted in a workload no longer fails every run.",
+ "new":[],
+ "fixes":[{"title":"Sign-in stays fresh on an open page","text":"The page renews its sign-in before it ends. When renewal is not possible, it stops its background calls and shows the sign-in bar once, instead of trying every minute."},
+          {"title":"Refused calls say who and from where","text":"A refused call is logged with the signed-in user, the address it came from and the browser type, at most once per 10 minutes. The token itself is never logged."},
+          {"title":"A role deleted in the workload","text":"When a role that PIM Manager had assigned is deleted in the workload, the row shows a calm warning (delete the row or recreate the role) instead of failing every run."}]}

@@ -34,7 +34,8 @@
         "displayName": "PIM4EntraPS: {groupTag} -> {roleName}",
         "roleDefinitionId": "{roleId}",
         "principalIds": ["{groupId}"],
-        "directoryScopeIds": ["{scope|/}"]
+        "directoryScopeIds": ["{scope|/}"],
+        "appScopeIds": ["/"]
       }
     },
     "remove": {

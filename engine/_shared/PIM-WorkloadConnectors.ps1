@@ -531,7 +531,7 @@ function ConvertTo-PimWorkloadRow {
     if (-not $wl -or -not $rn -or -not $gt) { return $null }
     $act = Get-PimWorkloadRowField -Row $Row -Names @('Action')
     if (-not $act) { $act = 'Assign' }
-    return [pscustomobject]@{
+    $o = [pscustomobject]@{
         Workload = $wl
         RoleName = $rn
         GroupTag = $gt
@@ -541,6 +541,32 @@ function ConvertTo-PimWorkloadRow {
         Action   = $act
         Notes    = (Get-PimWorkloadRowField -Row $Row -Names @('Notes'))
     }
+    # WORKLOAD-DUPKEY-1: the live role's id, when the row names one (Discovery & gaps / the role picker store it for a name
+    # several live roles share). Resolve-PimWorkloadBinding then binds THAT role, never the first of the name. Added only
+    # when present, so a row without one keeps exactly today's shape.
+    $rid = Get-PimWorkloadRowField -Row $Row -Names @('RoleDefinitionId', 'RoleId')
+    if ($rid) { $o | Add-Member -NotePropertyName RoleDefinitionId -NotePropertyValue $rid }
+    return $o
+}
+
+function Select-PimWorkloadConnectorRole {
+    <#
+      PURE. WORKLOAD-DUPKEY-1. The live role a binding row names, from a role listing (@{ id; name }):
+        -RoleId given      -> the role with that id (by id ONLY; '' when the listing has none -- the caller reports it)
+        no -RoleId, 1 name -> that role (today's behaviour, unchanged)
+        no -RoleId, 2+     -> NOTHING: { ambiguous = $true; ids } -- the row is reported, never resolved to one of them
+      Returns { role; ambiguous; ids; byId }.
+    #>
+    param([AllowNull()][object[]]$Roles, [AllowNull()][string]$RoleName, [AllowNull()][string]$RoleId)
+    $rid = "$RoleId".Trim(); $rn = "$RoleName".Trim()
+    if ($rid) {
+        $hit = @(@($Roles) | Where-Object { $_ -and "$($_.id)".Trim() -ieq $rid }) | Select-Object -First 1
+        return [pscustomobject]@{ role = $hit; ambiguous = $false; ids = @(); byId = $true }
+    }
+    $named = @(@($Roles) | Where-Object { $_ -and "$($_.name)" -ieq $rn })
+    $ids = @($named | ForEach-Object { "$($_.id)".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($ids.Count -gt 1) { return [pscustomobject]@{ role = $null; ambiguous = $true; ids = @($ids); byId = $false } }
+    return [pscustomobject]@{ role = ($named | Select-Object -First 1); ambiguous = $false; ids = @($ids); byId = $false }
 }
 
 function Get-PimWorkloadConnectorKey {
@@ -745,7 +771,23 @@ function Resolve-PimWorkloadBinding {
         $b.error = ("workload '{0}' role listing failed: {1}" -f $wid, $rc.error)
         return $b
     }
-    $role = @($rc.roles | Where-Object { "$($_.name)" -ieq "$($Row.RoleName)".Trim() }) | Select-Object -First 1
+    # WORKLOAD-DUPKEY-1: by the stored role id when the row has one; a name several live roles share and NO id is reported
+    # (DEFENDER-ROLE-AMBIGUOUS for Defender XDR), never resolved to the first role of that name.
+    $__rid = Get-PimWorkloadRowField -Row $Row -Names @('RoleDefinitionId', 'RoleId')
+    $__sel = Select-PimWorkloadConnectorRole -Roles @($rc.roles) -RoleName "$($Row.RoleName)" -RoleId $__rid
+    if ($__sel.ambiguous) {
+        if ((ConvertTo-PimWorkloadBindingKind -Workload $wid) -eq 'defender') {
+            $b.error = ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) and the row names no role id -- PIM will not pick one. Stage the role again from Discovery & gaps (it stores the role id), or rename or delete the extra role in the Defender portal (Settings > Permissions > Roles)." -f @($__sel.ids).Count, $Row.RoleName, (@($__sel.ids) -join ', '))
+        } else {
+            $b.error = ("WORKLOAD-ROLE-NOT-FOUND: workload '{0}' has {1} roles named '{2}' (ids {3}) and the row names no role id (RoleDefinitionId) -- PIM will not pick one." -f $wid, @($__sel.ids).Count, $Row.RoleName, (@($__sel.ids) -join ', '))
+        }
+        return $b
+    }
+    $role = $__sel.role
+    if (-not $role -and $__sel.byId) {
+        $b.error = ("WORKLOAD-ROLE-NOT-FOUND: workload '{0}' has no role with the id '{1}' (the row's RoleDefinitionId, role '{2}') -- the role was deleted or the id is wrong." -f $wid, $__rid, $Row.RoleName)
+        return $b
+    }
     if (-not $role) {
         $valid = @($rc.roles | ForEach-Object { "$($_.name)" } | Select-Object -First 25) -join ', '
         $b.error = ("WORKLOAD-ROLE-NOT-FOUND: workload '{0}' has no role named '{1}'{2}. Valid: {3}" -f $wid, $Row.RoleName, $(if ("$($Row.Resource)".Trim()) { " on resource '$($Row.Resource)'" } else { '' }), $valid)
@@ -881,6 +923,54 @@ function Format-PimWorkloadRemoveNeedsData {
     return ("WORKLOAD-REMOVE-NEEDS-DATA: removing this binding has to call {0}, and the row lacks what that call needs. {1}. Fix: {2}. Or remove the access in {0} yourself and then stop managing the binding (delete this row). Cause: {3}" -f $name, $why, $fix, "$Message")
 }
 
+# ---------------------------------------------------------------------------
+# WORKLOAD-ROLE-GONE-1 (internal 2026-11-16, owner: "fix it so i dont have to click"). Two Assign rows bound Defender
+# roles that were deleted in Defender AFTER PIM Manager had applied them; every run then FAILED with
+# WORKLOAD-ROLE-NOT-FOUND and alerted. When the engine's own records (the same ledger + applied outcomes 100.27 reads,
+# Get-PimEverAppliedKeys) show the binding WAS applied, a role that is no longer in the workload is not a failure: there
+# is nothing to assign. It is a WARNING (WORKLOAD-ROLE-GONE) -- the job does not fail and does not alert. A role never
+# applied before, or records that cannot be read, still fail as WORKLOAD-ROLE-NOT-FOUND.
+# ---------------------------------------------------------------------------
+function Test-PimWorkloadRoleGoneCandidate {
+    # PURE. TRUE for the WORKLOAD-ROLE-NOT-FOUND a DELETED role produces: the workload's live role listing has no role of
+    # that name (or of the row's stored role id). Never the ambiguous-name case (the role exists, several times) and never a
+    # custom workload's own role list (that is the customer's definition, not a role deleted in a workload).
+    param([string]$Message)
+    return [bool]("$Message" -match "^WORKLOAD-ROLE-NOT-FOUND: workload '[^']+' has no role (named|with the id) '")
+}
+
+function Format-PimWorkloadRoleGone {
+    <#
+      PURE. The warning for a binding whose role was deleted in the workload after PIM Manager had applied it.
+      -AppliedBy: the record that proves it was applied ('ledger' | 'created' | 'updated' | 'already present').
+    #>
+    param([string]$RoleName, [AllowNull()][object]$Connector, [string]$Workload = '', [string]$GroupTag = '', [string]$AppliedBy = '', [string]$Key = '')
+    $name = if ($Connector -and "$($Connector.name)".Trim()) { "$($Connector.name)" } elseif ("$Workload".Trim()) { "$Workload" } else { 'the workload' }
+    $grp = if ("$GroupTag".Trim()) { " for group '$GroupTag'" } else { '' }
+    $rec = if ("$AppliedBy".Trim()) { " (PIM Manager's records: $AppliedBy)" } else { '' }
+    $k = if ("$Key".Trim()) { " [binding $Key]" } else { '' }
+    return ("WORKLOAD-ROLE-GONE: the role '{0}'{1} this row binds was deleted in {2} after PIM Manager had assigned it{3} -- nothing to assign. Delete the row to stop managing it, or recreate the role.{4}" -f "$RoleName", $grp, $name, $rec, $k)
+}
+
+function Resolve-PimWorkloadRoleGone {
+    <#
+      PURE. Splits role-not-found Assign bindings into GONE (applied before -> a warning) and the rest (still failing).
+      -Candidates: @{ key; ... } items; -EverApplied: the Get-PimEverAppliedKeys result (@{ ok; applied; error }).
+      Returns @{ gone = @(@{ candidate; appliedBy }); failing = @(candidates) }. Records unreadable (ok false / $null) =
+      every candidate keeps failing (the fail-safe: "applied before" is only concluded from a complete read).
+    #>
+    param([object[]]$Candidates = @(), [AllowNull()][object]$EverApplied)
+    $gone = New-Object System.Collections.Generic.List[object]; $failing = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($Candidates)) {
+        if ($null -eq $c) { continue }
+        $k = "$($c.key)".Trim().ToLowerInvariant()
+        if ($k -and $EverApplied -and $EverApplied.ok -and $EverApplied.applied -and $EverApplied.applied.ContainsKey($k)) {
+            $gone.Add([pscustomobject]@{ candidate = $c; appliedBy = "$($EverApplied.applied[$k])" })
+        } else { $failing.Add($c) }
+    }
+    return [pscustomobject]@{ gone = @($gone.ToArray()); failing = @($failing.ToArray()) }
+}
+
 function Invoke-PimWorkloadBindingAssign {
     # Create the binding (v1 L2921-2926 membership, L2967-2976 flat).
     param([Parameter(Mandatory)][object]$Binding)
@@ -891,7 +981,48 @@ function Invoke-PimWorkloadBindingAssign {
     $tokens['newId'] = [guid]::NewGuid().ToString()
     $body = $null
     if ($conn.api.assign -and $null -ne $conn.api.assign.body) { $body = New-PimWorkloadConnectorBody -Template $conn.api.assign.body -Tokens $tokens }
-    return (Invoke-PimWorkloadConnectorApi -Connector $conn -Op $conn.api.assign -Tokens $tokens -Body $body)
+    # CONNECTOR-REDIRECT-1 (internal 2026-11-16, 3.1.27): Graph answers a SUCCESSFUL Defender XDR assignment POST with a
+    # redirect to an http:// location, which pwsh 7 refuses to follow ("Cannot follow an insecure redirection") -- the same
+    # answer Invoke-PimDefenderAssignmentCreate (PIM-WorkloadRoles.ps1) already handles. The insecure hop is never followed:
+    # the assignment is READ BACK through the connector's own listAssignments (role + group), and only a read-back that
+    # finds nothing is a failure.
+    try { return (Invoke-PimWorkloadConnectorApi -Connector $conn -Op $conn.api.assign -Tokens $tokens -Body $body) }
+    catch {
+        $m = "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })"
+        if ($m -notmatch '(?i)insecure redirection') { throw }
+    }
+    return (Find-PimWorkloadAssignedAfterRedirect -Connector $conn -Tokens $tokens)
+}
+
+function Find-PimWorkloadAssignedAfterRedirect {
+    <#
+      CONNECTOR-REDIRECT-1. After an assign POST answered with a redirect the engine does not follow: list the connector's
+      assignments (listAssignments) and return the one that binds -Tokens' roleId to its groupId. Up to -Tries reads,
+      -WaitSeconds apart (the workload may list the new assignment a moment later). None found -> throws a plain message;
+      the next run retries (an assign of a binding that exists is reported as already present).
+    #>
+    param([Parameter(Mandatory)][object]$Connector, [hashtable]$Tokens = @{}, [int]$Tries = 4, [int]$WaitSeconds = 3)
+    $la = $Connector.api.listAssignments
+    $rid = "$($Tokens['roleId'])"; $gid = "$($Tokens['groupId'])"
+    if (-not $la -or -not $rid -or -not $gid) {
+        throw ("connector '{0}': the assignment was answered with a redirect PIM does not follow, and the connector has no way to read it back (listAssignments, roleId, groupId) -- the next run retries" -f "$($Connector.id)")
+    }
+    $roleField = if ("$($la.roleId)".Trim()) { "$($la.roleId)" } else { 'roleDefinitionId' }
+    $prinField = if ("$($la.principalIds)".Trim()) { "$($la.principalIds)" } elseif ("$($la.principalId)".Trim()) { "$($la.principalId)" } else { 'principalIds' }
+    for ($i = 0; $i -lt [Math]::Max(1, $Tries); $i++) {
+        if ($i -and $WaitSeconds -gt 0) { Start-Sleep -Seconds $WaitSeconds }
+        $items = @()
+        try {
+            $resp = Invoke-PimWorkloadConnectorApi -Connector $Connector -Op $la -Tokens $Tokens
+            $items = if ("$($la.itemsPath)".Trim() -and $resp -and $resp.PSObject.Properties["$($la.itemsPath)"]) { @($resp."$($la.itemsPath)") } else { @($resp) }
+        } catch { $items = @() }
+        $hit = @($items | Where-Object {
+            $_ -and $_.PSObject.Properties[$roleField] -and "$($_.$roleField)" -ieq $rid -and
+            $_.PSObject.Properties[$prinField] -and @(@($_.$prinField) | Where-Object { "$_" -ieq $gid }).Count
+        }) | Select-Object -First 1
+        if ($hit) { return $hit }
+    }
+    throw ("connector '{0}': the assignment of role {1} to group {2} was answered with a redirect PIM does not follow, and it could not be read back -- the next run retries" -f "$($Connector.id)", $rid, $gid)
 }
 
 function Invoke-PimWorkloadBindingRemove {

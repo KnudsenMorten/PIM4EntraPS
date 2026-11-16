@@ -3751,8 +3751,8 @@ Container Apps provides (built-in authentication). In plain words:
   (`engine/_shared/vendor/identitymodel`). The image build checks each file's SHA-256. The Manager and the
   engine check every file against the SHA-256 written in their own code before they load it. A file that
   is missing or differs means no token is accepted at all. At every start, before it serves a request,
-  the Manager also proves the library works: it checks three made-up tokens (one that must be accepted,
-  one signed with another key and one without a signature, which must both be refused). If any answer
+  the Manager also proves the library works: it checks four made-up tokens (one that must be accepted,
+  one signed with another key, one without a signature and one that has expired, which must all be refused). If any answer
   is wrong, the Manager does not start. The engine does the same before it checks signed changes.
 * **The browser keeps a valid token without a new sign-in.** The access token lasts about an hour; the
   sign-in asks for `offline_access`, and the page renews the token a few minutes before it ends (and
@@ -3778,9 +3778,29 @@ Container Apps provides (built-in authentication). In plain words:
   only way in.
 
 The installation sets all of this up and reads every part back before it reports success. The nightly
-update checks the same settings on every run and **reports** any difference (it never changes sign-in
-settings or rights itself); the fix is a setup step. An installation that chose the optional sign-in
-front (`Set-PimManagerSigninFront.ps1`) keeps it -- an update never moves it back.
+update checks the same settings on every run and reports what it finds. On an installation that is already
+on the built-in sign-in, the update also keeps the sign-in at the current standard by itself (3.1.27), with
+the installation's own update identity and only the rights that identity already has:
+* **The scope comes first.** On the sign-in app registration the update identity owns, it makes sure the
+  Manager's scope `user_impersonation` is exposed and the Azure CLI is pre-authorised for it, and reads that
+  back. Only then does the sign-in ask for an access token for that scope (with `offline_access`) and show
+  the account picker -- the sign-in is never asked for a scope that is not there yet.
+* **Exactly two open paths.** The only paths the platform lets through without a sign-in are the two
+  protected-resource metadata documents. Any other open path is closed again; none is ever added.
+* **Nothing new to protect.** No client secret, no password credential and no new right is ever created. An
+  app registration the update identity does not own is left as it is and reported, and every change is read
+  back before it is reported as done. Turning the built-in sign-in on stays a setup step.
+
+**The retired sign-in front leaves nothing behind.** Once the update reads back that no role assignment
+remains on the front's Key Vault key, it removes what is left of the front with the installation's own
+identity: the front's stored sessions and key ring in the database, the Manager's front-only settings, the
+old reply address on an app registration it owns (the built-in sign-in's own address is kept) and, last,
+the key itself (a recoverable delete; the vault's retention and purge protection stay in force). While any
+role assignment remains on the key, or the front still runs in front of the Manager, nothing is removed. Every
+step is read back and reported; a step the update identity has no right to do is reported, never forced.
+
+An installation that chose the optional sign-in front (`Set-PimManagerSigninFront.ps1`) keeps it -- an
+update never moves it back.
 
 The **access request portal** (the separate request app) uses the same built-in sign-in, also without
 a secret: its API answers `401` to anyone without a valid Microsoft Entra token, and the request app
@@ -4210,6 +4230,12 @@ failure. Now:
   5-minute cron, a Run now start); two runs on the same area never do. At most **4** run side by side
   (Graph throttling, CPU, SQL; `PIM_SCHED_MAX_PARALLEL`, 1–8). A due job whose area is held, or that
   finds no free slot, is not run and not recorded — it stays due and a later pass runs it.
+- **The Invardia support link has its own slot.** The uplink (the install's report to Invardia) never
+  counts against the side-by-side limit and never waits for it, and a pass through the due jobs runs
+  it first; one lock keeps two uplink runs from ever running at once. The first engine run on a new
+  version reads every step once: only one such run goes at a time across executions, under a lock
+  that expires when its holder stops, so a fresh update can never fill every slot. On the first pass
+  on a new version the install's report goes out at once, one extra report, then the normal cadence.
 - **One area at a time for a long run.** The daily full reconcile (and a trigger over every scope)
   holds only its job area plus the area of the scope it is on: the engine asks the scope gate before
   each scope, which releases the previous area first and takes the next one — waiting up to
@@ -10419,6 +10445,12 @@ chat completions with function tools, validated against the deployment in use). 
 - **Ops proof.** `GET /api/chat/status` tells every role whether the chat is on for it; Admin and up also see the endpoint
   host and deployment, and `?check=1` gets a token and asks for one tiny fixed test answer (no tenant data). Settings
   (`AiChat`: on, endpoint, deployment, api-version) are changed by a SuperAdmin and audited; a Pro setup step writes the same settings by parameters and grants no Azure role.
+- **Set by the installation itself (3.1.27).** Where the installation's update job is given the chat's endpoint and
+  deployment in its own configuration, the update writes the same settings with the installation's own identity: the
+  same address check and the same input check as the page, so an address that is not an Azure OpenAI resource, a key or
+  an unknown setting is refused and nothing is written. Switching the chat on also switches its feature on (every other
+  feature stays as it is; the MCP server switch it builds on is never changed by the update). Every change is read back
+  and audited with the update job as the actor; with nothing given, nothing is touched.
 
 **The API and MCP reference (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** The reference is generated from the code of the running version,
 never kept by hand: every route with its method, path, the role its body checks first and its Pro feature, and every

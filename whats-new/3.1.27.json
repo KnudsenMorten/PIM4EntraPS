@@ -1,0 +1,8 @@
+{"version":"3.1.27","date":"2026-11-16","type":"security",
+ "summary":"Each install now keeps itself on the sign-in and AI chat standard, the support heartbeat is never delayed by other work, and discovery handles two roles with the same name.",
+ "new":[],
+ "fixes":[{"title":"Sign-in standard applied by the update","text":"Each update applies the sign-in standard to your install itself, including a long-lived session that renews on its own, and removes what the retired sign-in front left behind."},
+          {"title":"Status reports are never delayed","text":"The report to support has its own slot, is sent right after an update, and only one full first run follows an update."},
+          {"title":"Roles with the same name","text":"When two roles share a name, discovery gives each its own key and stores the role id, so approving gaps never creates a duplicate and the engine never guesses."},
+          {"title":"Stronger start-up check","text":"The start-up check of Microsoft's token library also proves that an expired token is refused."},
+          {"title":"Smaller fixes","text":"A refused change is judged once instead of on every run, the request API's app is pinned by its id, and AI chat settings can be set by the update."}]}

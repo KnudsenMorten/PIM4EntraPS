@@ -365,6 +365,64 @@ function Get-PimUplinkHeartbeatDue {
     return $true
 }
 
+# ---- UPLINK-SLOT-1 (c): the first report after an update goes out AT ONCE ------------------------------------------------
+# UplinkState records the version of the last LANDED heartbeat (lastHeartbeatVersion) and the version of the last cycle
+# (lastCycleVersion). On the first tick on a new version the uplink job is due at once (the scheduler's due-now resolver,
+# Get-PimUplinkDueNowAfterUpdate) and its cycle sends the heartbeat whatever the hourly cadence says -- ONE extra send; after
+# it the normal cadence. Same version = nothing extra. A state that names no version yet (written before this rule) is
+# not treated as a change: it starts the record with its next heartbeat.
+function Get-PimUplinkStateValue {
+    # PURE. One field of the stored UplinkState (an object or a dictionary), as trimmed text; '' when absent.
+    param([AllowNull()][object]$State, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $State) { return '' }
+    if ($State -is [System.Collections.IDictionary]) { if ($State.Contains($Name)) { return "$($State[$Name])".Trim() }; return '' }
+    if ($State -is [string]) { return '' }
+    $p = $State.PSObject.Properties[$Name]
+    if ($p) { return "$($p.Value)".Trim() }
+    return ''
+}
+function Test-PimUplinkHeartbeatVersionChanged {
+    # PURE. True when the running -Version differs from the version of the last landed heartbeat. No version, no state or no
+    # recorded version = $false (never an extra send on a doubt).
+    param([AllowNull()][object]$State, [string]$Version = '')
+    $v = "$Version".Trim(); if (-not $v) { return $false }
+    $last = Get-PimUplinkStateValue -State $State -Name 'lastHeartbeatVersion'
+    if (-not $last) { return $false }
+    return ($last -ne $v)
+}
+function Test-PimUplinkVersionReportDue {
+    # PURE. The scheduler side: the version changed (Test-PimUplinkHeartbeatVersionChanged) AND no uplink cycle has run on
+    # this version yet (lastCycleVersion) -- so the job is due at once ONCE per version, never on every tick.
+    param([AllowNull()][object]$State, [string]$Version = '')
+    if (-not (Test-PimUplinkHeartbeatVersionChanged -State $State -Version $Version)) { return $false }
+    return ((Get-PimUplinkStateValue -State $State -Name 'lastCycleVersion') -ne "$Version".Trim())
+}
+function Get-PimUplinkDueNowAfterUpdate {
+    <#
+      The scheduler's due-now resolver for the job 'uplink' (registered in Start-PimScheduler.ps1). Reads UplinkState once and
+      the running version; $true only while telemetry is on and Test-PimUplinkVersionReportDue says so. NEVER throws: $false.
+      -GetState / -Version are test seams.
+    #>
+    param([datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][scriptblock]$GetState = $null, [AllowNull()][object]$Version = $null)
+    try {
+        if (-not ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.uplink' -Quiet))) { return $false }
+        $ver = ''
+        if ($null -ne $Version) { $ver = "$Version".Trim() }
+        elseif (Get-Command Get-PimRunningVersion -ErrorAction SilentlyContinue) { $ver = "$(Get-PimRunningVersion)".Trim() }
+        if (-not $ver) { return $false }
+        $st = $null
+        if ($GetState) { $st = & $GetState }
+        else {
+            if (-not (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { return $false }
+            $cs = Get-PimSqlSettingsConnectionString
+            if (-not $cs) { return $false }
+            $st = Get-PimSqlSetting -ConnectionString $cs -Name 'UplinkState'
+        }
+        if ($st -is [string]) { try { $st = $st | ConvertFrom-Json } catch { $st = $null } }
+        return [bool](Test-PimUplinkVersionReportDue -State $st -Version $ver)
+    } catch { return $false }
+}
+
 function Get-PimUplinkReleaseWindow {
     <#
       PIM 100.158 (a): the release window NOW (PIM-ReleaseControl.ps1 Get-PimReleaseModeWindow over the engine's Strict start,
@@ -3557,6 +3615,10 @@ function Invoke-PimUplinkCycle {
     if ($iid -notmatch '^[0-9a-fA-F-]{36}$') { $iid = [guid]::NewGuid().ToString(); & $SetSetting 'TelemetryInstallId' $iid }
     $state = & $GetSetting 'UplinkState'
     $lastHb = if ($state -and $state.PSObject.Properties['lastHeartbeatUtc']) { $state.lastHeartbeatUtc } else { $null }
+    # UPLINK-SLOT-1 (c): a heartbeat on a new version goes at once (whatever the hourly cadence); the version it reports is
+    # recorded when it lands (lastHeartbeatVersion), the version of every cycle in lastCycleVersion.
+    $hbVerChanged = Test-PimUplinkHeartbeatVersionChanged -State $state -Version $Version
+    $hbVerOut = Get-PimUplinkStateValue -State $state -Name 'lastHeartbeatVersion'
     # The FLOOR: the first cycle starts it at NOW-24h, so switching telemetry on reports the last day, not the whole history.
     # It never moves after that; each job then has its own watermark (jobMarks) that moves only when ITS report landed.
     $floor = if ($state -and $state.PSObject.Properties['runWatermarkUtc'] -and "$($state.runWatermarkUtc)") { $state.runWatermarkUtc } else { $NowUtc.AddHours(-24).ToString('o') }
@@ -3747,7 +3809,7 @@ function Invoke-PimUplinkCycle {
         if ("$($r.Status)" -eq 'ok') { $sent++; $floor = $NowUtc.ToString('o'); $marks = @{}; $lastHb = $null }
         else { $failed++; $stopped = $true; $consent = 'off'; $why += "optin: $($r.Reason)" }
     }
-    if (-not $stopped -and (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc -Hours $HeartbeatHours)) {
+    if (-not $stopped -and ($hbVerChanged -or (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc -Hours $HeartbeatHours))) {
         # PIM 100.36: the SQL space, identified heartbeat only, both numbers or neither (never a 0 / a guess).
         $hbCounts = $null
         if ($sender.Mode -eq 'identified' -and $SqlSpace -and $SqlSpace.ContainsKey('sqlUsedMb') -and $SqlSpace.ContainsKey('sqlMaxMb') -and
@@ -3982,7 +4044,7 @@ function Invoke-PimUplinkCycle {
             }
         }
         $r = & $postRc $hb $hbAdd @{} $hbCause $hbRc
-        if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
+        if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o'); if ("$Version".Trim()) { $hbVerOut = "$Version".Trim() } } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
         if ("$($r.Status)" -eq 'ok' -and $agOnHb) {
             foreach ($a in $activeNow) { if (-not $reported.ContainsKey("$($a.id)")) { $reported["$($a.id)"] = @{ sinceUtc = $NowUtc.ToString('o'); hold = $false } } }
         }
@@ -4258,6 +4320,11 @@ function Invoke-PimUplinkCycle {
     # UPLINK-QUIET: cycles in a row with a report that was not delivered (Get-PimUplinkDeliveryWarning turns the job amber
     # only from the third). Kept beside lastFailed; a fully delivered cycle resets it.
     $newState['failedCycles'] = Get-PimUplinkFailedCycles -State $state -Failed $failed -Count $CountFailedCycle
+    # UPLINK-SLOT-1 (c): the version of the last LANDED heartbeat, and of this cycle (so the scheduler makes the job due at
+    # once only ONCE per version). Left out while there is none (the state stays as before).
+    if ($hbVerOut) { $newState['lastHeartbeatVersion'] = $hbVerOut }
+    $cycVer = "$Version".Trim(); if (-not $cycVer) { $cycVer = Get-PimUplinkStateValue -State $state -Name 'lastCycleVersion' }
+    if ($cycVer) { $newState['lastCycleVersion'] = $cycVer }
     # PIM 100.102: the reported set. Left out while it was never started AND the state could not be read (so the first
     # readable cycle still starts it from the sent trip records).
     if ($hadReported -or $guardsKnown) {

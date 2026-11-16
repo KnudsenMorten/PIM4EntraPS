@@ -300,11 +300,18 @@ function Get-PimDailyChangesReport {
     $add = {
         param($ts, $actor, $kind, $area, $what, $before, $after, $action, $target)
         $why = Get-PimChangeRiskReason -Kind $kind -Action $action -Text ("$what $before $after $target")
+        $who = if ("$actor".Trim()) { "$actor".Trim() } else { 'engine' }
+        # MAIL-NOTABLE-1 (owner 2026-11-15, "if a person delegated it, why are you telling it is an error"): a privileged /
+        # Tier-0 GRANT that a named PERSON made is information (listed for review, calm), not "needs a look". Guards, break-glass,
+        # emergency overrides and removals stay "needs a look"; so does a privileged grant with no person behind it.
+        $grantByPerson = ($why -match '^(privileged role|privileged Azure role|Tier 0 access)' -and $kind -ne 'Removed' -and $who -match '@')
         $rows.Add([pscustomobject]@{
             ts = $ts.ToString('o'); when = $ts.ToString('yyyy-MM-dd HH:mm') + ' UTC'
-            actor = $(if ("$actor".Trim()) { "$actor".Trim() } else { 'engine' })
+            actor = $who
             kind = $kind; area = $area; what = "$what"; before = "$before"; after = "$after"
-            risky = [bool]$why; riskReason = $why; action = "$action"; target = "$target"
+            risky = ([bool]$why -and -not $grantByPerson); riskReason = $(if ($grantByPerson) { '' } else { $why })
+            notable = [bool]$grantByPerson; notableReason = $(if ($grantByPerson) { $why } else { '' })
+            action = "$action"; target = "$target"
         })
     }
     foreach ($e in @($Events)) {
@@ -358,7 +365,7 @@ function Get-PimDailyChangesReport {
     $byActor = @($all | Group-Object actor | ForEach-Object { [pscustomobject]@{ actor = $_.Name; changes = $_.Count; risky = @($_.Group | Where-Object { $_.risky }).Count } } | Sort-Object @{ Expression = 'changes'; Descending = $true }, actor)
     [pscustomobject]@{
         windowStartUtc = $start.ToString('o'); windowEndUtc = $end.ToString('o')
-        total = $all.Count; rows = $all; risky = @($all | Where-Object { $_.risky })
+        total = $all.Count; rows = $all; risky = @($all | Where-Object { $_.risky }); notable = @($all | Where-Object { $_.notable })
         byKind = $byKind; byActor = $byActor; actorCount = @($byActor).Count
         removals = @($all | Where-Object { $_.kind -eq 'Removed' }).Count
         summary = (Get-PimDailySummary -Events $Events -NowUtc $NowUtc -SinceUtc $start)
@@ -383,14 +390,16 @@ function ConvertTo-PimDailyChangesHtml {
     $homeUrl = if ("$PortalBase".Trim()) { (Get-PimAudienceLink -Type 'home' -Base $PortalBase -LinkTab 'home').url -replace '/\?tab=home$', '/' } else { '' }
     $notif = (Get-PimAudienceLink -Type 'settings' -Base $PortalBase -LinkTab 'settings' -Query 'section=notifications').url
     $total = [int]$Report.total; $risky = @($Report.risky); $actors = [int]$Report.actorCount
+    $notable = @(if ($Report.PSObject.Properties['notable'] -or ($Report -is [System.Collections.IDictionary] -and $Report.Contains('notable'))) { $Report.notable })
     $kinds = $Report.byKind
     $kindTxt = (@($kinds.Keys | ForEach-Object { '{0} {1}' -f $kinds[$_], "$_".ToLowerInvariant() }) -join ', ')
     $headline = if ($total -eq 0) { 'No delegation, admin account or safety changes in this window.' }
                 else { ('{0} change(s) by {1} {2}: {3}. {4}' -f $total, $actors, $(if ($actors -eq 1) { 'person' } else { 'people' }), $kindTxt,
-                        $(if ($risky.Count) { "$($risky.Count) need(s) a look." } else { 'Nothing risky.' })) }
+                        $(if ($risky.Count) { "$($risky.Count) need(s) a look." } else { 'Nothing risky.' })) +
+                    $(if ($notable.Count) { " $($notable.Count) privileged grant(s) made by a person -- listed for your information." } else { '' }) }
     $tiles = New-PimMailSummaryTiles -Tiles @(
         @{ label = 'Changes'; value = "$total"; tone = 'accent' }
-        @{ label = 'Need a look'; value = "$($risky.Count)"; tone = $(if ($risky.Count) { 'danger' } else { 'good' }); hint = $(if ($risky.Count) { 'removals, tier-0 roles, guards, break-glass' } else { 'nothing risky' }) }
+        @{ label = 'Need a look'; value = "$($risky.Count)"; tone = $(if ($risky.Count) { 'danger' } else { 'good' }); hint = $(if ($risky.Count) { 'removals, guards, break-glass, privileged changes with no person behind them' } else { 'nothing risky' }) }
         @{ label = 'People'; value = "$actors"; tone = 'neutral' }
         @{ label = 'Removed'; value = "$([int]$Report.removals)"; tone = $(if ([int]$Report.removals) { 'warning' } else { 'neutral' }) }
     )
@@ -399,6 +408,11 @@ function ConvertTo-PimDailyChangesHtml {
         $rt = New-PimMailTable -Columns @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'what'; label = 'What'; topic = $true }, @{ key = 'riskReason'; label = 'Why it needs a look' }) `
                                -Rows $risky -MaxRows $(if ($Print) { 0 } else { 15 }) -MoreUrl $auditAll -MoreLabel 'See them in the audit trail'
         $summary += New-PimMailCallout -Tone 'danger' -Title ("Needs a look ({0})" -f $risky.Count) -Html $rt
+    }
+    if ($notable.Count) {
+        $nt = New-PimMailTable -Columns @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'what'; label = 'What'; topic = $true }, @{ key = 'notableReason'; label = 'Access' }) `
+                               -Rows $notable -MaxRows $(if ($Print) { 0 } else { 15 }) -MoreUrl $auditAll -MoreLabel 'See them in the audit trail'
+        $summary += New-PimMailCallout -Tone 'accent' -Title ("Privileged access granted by a person ({0}) -- for your information" -f $notable.Count) -Html $nt
     }
     $body = ''
     if ($total -gt 0) {

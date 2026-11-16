@@ -1532,7 +1532,7 @@ function Invoke-PimEngineScope {
                 $__srRow = if ($op -eq 'Remove') { if ($item.PSObject.Properties['row'] -and $null -ne $item.row) { $item.row } elseif ($item.PSObject.Properties['live']) { $item.live } else { $null } } elseif ($item.PSObject.Properties['desired']) { $item.desired } else { $null }
                 $__srCommit = $null; try { $__srCommit = Resolve-PimEngineChangeCommit -Entity $entity -Op $op -Row $__srRow } catch { $__srCommit = $null }
                 $__srRefs = @(); try { $__srRefs = @(Get-PimEngineItemStoreRefs -Entity $entity -Row $__srRow) } catch { $__srRefs = @() }
-                $__srV = Test-PimEngineSignedRequest -Commit $__srCommit -Refs $__srRefs -Op $op -State $__srState
+                $__srV = Test-PimEngineSignedRequest -Commit $__srCommit -Refs $__srRefs -Op $op -State $__srState -Scope "$Scope" -Key "$($item.key)"
                 $__srLine = Add-PimSignedRequestObservation -Verdict $__srV -Scope $Scope -Op $op -Key "$($item.key)" -State $__srState
                 if ($__srLine) {
                     Write-Host ("    [signed-request] {0}" -f $__srLine) -ForegroundColor $(if ($__srV.refuse) { 'Red' } else { 'DarkYellow' })
@@ -1540,8 +1540,13 @@ function Invoke-PimEngineScope {
                 }
                 if ($__srV.refuse) {
                     $script:__skipped++
-                    & $watchAdd $op $item 'waiting' ("held: the signed request does not verify -- $($__srV.reason)")
-                    Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'refused' -ErrorMessage ("signed request refused: $($__srV.reason)")
+                    # SIGNED-REQ-STUCK-1: judged on an earlier run = still held, but no new line / audit row (it had its one)
+                    if ($__srV.remembered) {
+                        & $watchAdd $op $item 'waiting' ("held: the signed request did not verify when it was judged ($($__srV.judgedUtc)) -- $($__srV.reason); a new signed commit is judged afresh")
+                    } else {
+                        & $watchAdd $op $item 'waiting' ("held: the signed request does not verify -- $($__srV.reason)")
+                        Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'refused' -ErrorMessage ("signed request refused: $($__srV.reason)")
+                    }
                     return
                 }
             }

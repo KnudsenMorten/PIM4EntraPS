@@ -292,6 +292,8 @@ try {
                 if ($g.reason) { Note "  $($g.reason)" }
             } else {
                 Note "workload $w prerequisites: $state$(if ((Get-PimWorkloadPrereqUngated) -contains $w) { ' (never held)' })"
+                # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "sentinel is optional"): information, never a hold of the pack.
+                if ([bool]$g['dataOpsHeld']) { Note "  a $w role that uses Data Operations permissions $($g.dataOpsReason)" }
             }
         }
         $packResults.Add([pscustomobject]$pr)

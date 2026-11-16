@@ -1,5 +1,63 @@
 # What's new in PIM Manager
 
+## 3.1.30 · 2026-11-16 · Fix-only
+
+Defender XDR assignments no longer wait for the daily prerequisite check after an update.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Defender judged from the live roles at once** - Each engine run judges the Defender XDR prerequisites from the live Defender roles it already read, so assignments that a new version allows are made on the first run instead of the next day.
+- **Prerequisites checked right after an update** - The prerequisite check runs once on the first engine run after an update, so a new version's rules show in PIM Manager within minutes.
+
+## 3.1.29 · 2026-11-16 · Fix-only
+
+An open PIM Manager page keeps its sign-in fresh, refused calls name who sent them, and a role deleted in a workload no longer fails every run.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Sign-in stays fresh on an open page** - The page renews its sign-in before it ends. When renewal is not possible, it stops its background calls and shows the sign-in bar once, instead of trying every minute.
+- **Refused calls say who and from where** - A refused call is logged with the signed-in user, the address it came from and the browser type, at most once per 10 minutes. The token itself is never logged.
+- **A role deleted in the workload** - When a role that PIM Manager had assigned is deleted in the workload, the row shows a calm warning (delete the row or recreate the role) instead of failing every run.
+
+## 3.1.28 · 2026-11-16 · Fix-only
+
+Defender XDR runs on Unified RBAC alone with Microsoft Sentinel optional, Defender assignments no longer fail on Microsoft's redirect, and the coverage report follows your commits.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Microsoft Sentinel is optional for Defender XDR** - Defender XDR is ready when Unified RBAC answers and its workloads are active. Only a role that uses Data Operations permissions waits for Sentinel, as a calm note on that row.
+- **No manual confirmation for Defender** - PIM Manager recognises from your live Defender roles that Unified RBAC is in use and, when a role already uses Data Operations, that Sentinel is connected. Nothing needs to be pressed.
+- **Defender assignments with Microsoft's redirect** - Microsoft answers a new Defender XDR role assignment with a redirect. PIM Manager now reads the assignment back instead of reporting the run as failed.
+- **Coverage follows your commits** - After a commit that changed something, the tenant cache and the coverage report are refreshed within minutes, and the Overview says how old the coverage report is.
+
+## 3.1.27 · 2026-11-16 · Security
+
+Each install now keeps itself on the sign-in and AI chat standard, the support heartbeat is never delayed by other work, and discovery handles two roles with the same name.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Sign-in standard applied by the update** - Each update applies the sign-in standard to your install itself, including a long-lived session that renews on its own, and removes what the retired sign-in front left behind.
+- **Status reports are never delayed** - The report to support has its own slot, is sent right after an update, and only one full first run follows an update.
+- **Roles with the same name** - When two roles share a name, discovery gives each its own key and stores the role id, so approving gaps never creates a duplicate and the engine never guesses.
+- **Stronger start-up check** - The start-up check of Microsoft's token library also proves that an expired token is refused.
+- **Smaller fixes** - A refused change is judged once instead of on every run, the request API's app is pinned by its id, and AI chat settings can be set by the update.
+
 ## 3.1.26 · 2026-11-15 · Security
 
 Security release: Microsoft's own sign-in and token checks protect PIM Manager, the request API uses Entra tokens only, and Pro adds a chat in the Manager.

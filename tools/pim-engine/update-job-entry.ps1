@@ -82,7 +82,10 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccess.ps1')        # framework 12.23 / PIM 100.156 least-privilege roles via the signed procedure
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlAccessCutover.ps1')  # framework 12.23 P8 exception: a private-SQL install starts its own in-network cut-over
 . (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
-. (Join-Path $solRoot 'engine\_shared\PIM-BuiltinAuth.ps1')     # BUILT-IN-AUTH-1 the built-in sign-in standard -- REPORTED only (never written here)
+. (Join-Path $solRoot 'engine\_shared\PIM-BuiltinAuth.ps1')     # BUILT-IN-AUTH-1 the built-in sign-in standard: REPORTED (2f-quater) + AUTH-CONVERGE-1 / FRONT-LEFTOVER-CLEAN-1 (2f-auth, 2f-front)
+# AI-CHAT-CONVERGE-1 (3.1.27): the AI chat is Pro (engine/ai-chat is not in the Community release) -- loaded where it is there
+$aiChatLib = Join-Path $solRoot 'engine\ai-chat\PIM-AiChat.ps1'
+if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-Wake.ps1')             # WAKE-1 (3.1.26) the wake queue + the event-triggered wake job (step 2e-sexies; grants REPORTED only)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
@@ -283,6 +286,21 @@ function Invoke-PimUpdaterConvergeStep {
             } else { Say "manager address: $(if ($mu.url) { $mu.url } else { '(none)' }) -- $($mu.reason)" 'DarkGray' }
         }
     } catch { Say "  manager address not recorded: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-quinquies. AI-CHAT-CONVERGE-1 (3.1.27) -- THE AI CHAT SETTINGS FROM THE VALUES THIS JOB IS GIVEN ----------------
+    # The Support app is read-only on SQL at an install, so the AI chat settings reach an install HERE, written by the install's
+    # own identity from what this job's configuration carries (set over the control plane): PIM_AICHAT_ENDPOINT +
+    # PIM_AICHAT_DEPLOYMENT (+ PIM_AICHAT_APIVERSION, PIM_AICHAT_ENABLE). The product's own allow-list and input check decide;
+    # pim.Settings 'AiChat' + the gate ai.chat (every other gate kept), audited with this job as the actor, read back
+    # (engine/ai-chat/PIM-AiChat.ps1 Invoke-PimAiChatConverge). No value = nothing touched; a refused value = nothing written.
+    # Never a key. Community (no engine/ai-chat): not run. Never fails the update.
+    try {
+        if (Get-Command Invoke-PimAiChatConverge -ErrorAction SilentlyContinue) {
+            $acEnv = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { if ("$($ev.Key)" -match '^(?i)PIM_AICHAT_') { $acEnv["$($ev.Key)"] = "$($ev.Value)" } }
+            $ac = Invoke-PimAiChatConverge -Environment $acEnv -Store $storeSeam
+            foreach ($l in @($ac.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+            if ("$($ac.state)" -in @('refused', 'partial')) { $cvWarnings += [int][math]::Max(1, [int]$ac.warnings) }
+        }
+    } catch { Say "  AI chat settings not converged: $($_.Exception.Message)" 'Yellow' }
     # ---- 2d-ter. CR5 item 5 (framework §12.11c item 5, PIM 100.149) -- THE DISPLAY NAMES PEOPLE READ ------------------------
     # "PIM Manager", never "PIM4EntraPS", at EXISTING installs too. OFF until the owner switches it on: pim.Settings
     # 'PIM_Update_RenameDisplayNames' (true), else this job's variable of the same name. Only objects that carry exactly the
@@ -554,6 +572,44 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($script:PimSkvResult.lines)) { Say ("secrets to Key Vault: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         foreach ($rb in @($script:PimSkvResult.rollback)) { Say ("secrets to Key Vault: rollback record (no values) " + ($rb | ConvertTo-Json -Depth 6 -Compress)) 'DarkGray' }
     } catch { Say "  secrets to Key Vault not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-auth. AUTH-CONVERGE-1 (3.1.27, rule "five years, no contact: updates via the updater alone") -- THE STANDARD APPLIED ----
+    # An install ALREADY on the built-in sign-in is brought to the current standard by this job's own identity
+    # (engine/_shared/PIM-BuiltinAuth.ps1 Invoke-PimBuiltinAuthConverge): the API scope user_impersonation exposed + the Azure
+    # CLI pre-authorised on the app registration this updater OWNS (Application.ReadWrite.OwnedBy -- one it does not own is
+    # reported, never forced), THEN the provider loginParameters (only once the scope reads back) and excludedPaths = exactly the
+    # two protected-resource metadata paths on authConfigs/current (its Contributor on the resource group). Never a secret,
+    # never a role, never a wider excluded path; every write read back. Turning the built-in sign-in ON stays setup's. The
+    # read-only check below (2f-quater) then reports the result. Never fails the update.
+    $script:PimBuiltinAuthConverge = $null
+    try {
+        # a write waits out "an operation is in progress" on the Manager (bounded, Invoke-PimArmBusyRetry); a read goes straight through
+        $bcArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArmBusyRetry -Write { Invoke-PimArm -Method $m -Path $p -Body $b } } else { Invoke-PimArm -Method $m -Path $p } }
+        $bcGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path ('/' + "$p".TrimStart('/')) -Body $b } else { Invoke-PimGraph -Method $m -Path ('/' + "$p".TrimStart('/')) } }
+        $script:PimBuiltinAuthConverge = Invoke-PimBuiltinAuthConverge -Arm $bcArm -Graph $bcGraph -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -UpdaterObjectId "$aoMe"
+        foreach ($l in @($script:PimBuiltinAuthConverge.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+    } catch { Say "  built-in sign-in not converged: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-front. FRONT-LEFTOVER-CLEAN-1 (3.1.27) -- THE RETIRED SIGN-IN FRONT'S LEFTOVERS, BY THE INSTALL'S OWN IDENTITY ----
+    # ONLY after this run reads back that NO role assignment remains on <vault>/keys/signin-front (the control plane removes
+    # those): the front's database state (schema signin), the Manager's PIM_SIGNIN_FRONT_* / SIGNIN_* settings, the old
+    # https://<fqdn>/signin-oidc reply URL (on a registration it owns; /.auth/login/aad/callback kept). The role-less signin-front
+    # key itself is ACCEPTED-INERT (Invardia 2026-11-15): kept, never deleted, no key-delete right needed, an OK state. A key
+    # with any role assignment, or a sign-in front still on the Manager = NOTHING removed. A right this identity lacks is
+    # REPORTED, never added (engine/_shared/PIM-BuiltinAuth.ps1 Invoke-PimSigninFrontLeftoverClean). Never fails the update.
+    $script:PimSigninFrontLeftover = $null
+    try {
+        $flExec = $null; $flScalar = $null; $flSkip = ''
+        if ("$csSize".Trim()) {
+            $flCs = "$csSize"
+            $flExec = { param($q) [void](Invoke-PimSqlNonQuery -ConnectionString $flCs -Sql $q) }
+            $flScalar = { param($q) Invoke-PimSqlScalar -ConnectionString $flCs -Sql $q }
+            # SCHEMA-QUIESCE-818: dropping schema signin is DDL -- not while a PIM job runs (the next update does it)
+            if (-not $script:PimSchemaQuiet) { $flQ = Invoke-PimUpdaterSchemaQuiesce -Cs "$csSize" -Once; if (-not $flQ.go) { $flSkip = ($flQ.line -replace '^schema quiesce: ', '') } }
+        }
+        $script:PimSigninFrontLeftover = Invoke-PimSigninFrontLeftoverClean -Arm $bcArm -Graph $bcGraph -SqlExec $flExec -SqlScalar $flScalar -SqlSkipReason $flSkip `
+                                             -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -UpdaterObjectId "$aoMe"
+        foreach ($l in @($script:PimSigninFrontLeftover.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        if ("$($script:PimSigninFrontLeftover.state)" -eq 'partial') { $fixByHand += [int][math]::Max(1, [int]$script:PimSigninFrontLeftover.warnings) }
+    } catch { Say "  sign-in front leftovers not cleaned: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f-quater. BUILT-IN-AUTH-1 (owner 2026-11-14) -- THE BUILT-IN SIGN-IN STANDARD, REPORTED ONLY --------------------
     # The same standard the install writes (engine/_shared/PIM-BuiltinAuth.ps1): built-in authentication on with the federated
     # credential (no client secret), the token store, the account picker and the 8-hour session; the Manager verifying the signed

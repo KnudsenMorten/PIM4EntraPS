@@ -56,7 +56,7 @@ function Test-PimSettingNeverCopy {
 $script:PimSettingsFileNeverExact = @(
     'BreakGlassAccounts', 'Approvers', 'Scenario', 'RingOrder', 'RingPlan', 'ReleaseWave', 'StorageBackend', 'MailSender',
     'ManagerUrl', 'RfaSettings', 'InvardiaEnvironmentId', 'InstallNames', 'LicenceRequestBaseUrl', 'AdminTapIssuance',
-    'WorkloadPrereqs', 'SignedRequests', 'SignedRequestStats', 'MailSendProof', 'MailReportLastSent', 'PimActivityReadUtc',
+    'WorkloadPrereqs', 'SignedRequests', 'SignedRequestStats', 'SignedRequestJudged', 'MailSendProof', 'MailReportLastSent', 'PimActivityReadUtc',
     'JobAcknowledgements', 'MspMasterName', 'CentralKillSource'
 )
 $script:PimSettingsFileNeverPrefix = @('Msp', 'Ring', 'Update', 'Release', 'Downlink', 'Uplink', 'Licen', 'Install', 'Invardia',

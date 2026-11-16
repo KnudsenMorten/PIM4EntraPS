@@ -69,7 +69,10 @@ $run = {
     switch -CaseSensitive ($kind) {
         'engine' {
             $pw = (Get-Process -Id $PID).Path
-            & $pw -NoProfile -File $sched -Once
+            # WAKE-EXITCODE-1 (internal 2026-11-15): the child's output goes to the LOG (Out-Host), never into this block's
+            # result -- otherwise the result is @(<every output line>, <exit code>) and [int](...) fails with
+            # "Cannot convert the System.Object[] value ... to type System.Int32", so every wake run ended 'exit 1'
+            & $pw -NoProfile -File $sched -Once | Out-Host
             return [int]$LASTEXITCODE
         }
         default { JobLog "no runner for '$kind'" 'ERROR'; return 2 }

@@ -9746,7 +9746,9 @@ function New-PimDefenderXdrRolesProvider {
             # A SPEC row's ambiguous name is refused inside Resolve-PimDefenderSpecRole (no duplicate heal since 2026-11-13) --
             # so the early refusal here applies to a by-name binding without a spec only.
             $amb = $ctx['defRoleAmbiguous']
-            if (-not $spec -and $amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant())) {
+            # WORKLOAD-DUPKEY-1: a row that carries the live role's id is bound by THAT id -- a shared name is then not ambiguous.
+            $__rowRid = Get-PimRowProp -Row $d -Names @('RoleDefinitionId')
+            if (-not $spec -and $amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant()) -and -not "$__rowRid".Trim()) {
                 throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) -- PIM will not pick one. Rename or delete the extra role in the Defender portal, then the next run binds the one that is left." -f @($amb[$rn.ToLowerInvariant()]).Count, $rn, (@($amb[$rn.ToLowerInvariant()]) -join ', '))
             }
             if ($spec) {
@@ -9754,7 +9756,7 @@ function New-PimDefenderXdrRolesProvider {
                 # only LOOKED UP and compared -- never created or patched. Missing = DEFENDER-ROLE-MISSING, the assignment HELD.
                 if ($ctx -is [hashtable] -and -not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
                 $__wl = [System.Collections.Generic.List[string]]::new()
-                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -Warnings $__wl
+                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -Warnings $__wl -RoleId "$__rowRid"
                 if ($ctx -is [hashtable]) { foreach ($__w in $__wl) { [void]$ctx['__pimScopeWarnings'].Add($__w) } }
                 if (-not $rid) {
                     # missing (DEFENDER-ROLE-MISSING) or WIDER / unknown (DEFENDER-ROLE-WIDER): the assignment is HELD, never added
@@ -9764,6 +9766,11 @@ function New-PimDefenderXdrRolesProvider {
                 }
             } else {
                 $rid = $ctx['defRoleNameToId'][$rn.ToLowerInvariant()]
+                if ("$__rowRid".Trim()) {
+                    # by the stored id ONLY: an id the catalog does not hold is a missing role (held, reported), never the name's
+                    $__byId = @(Resolve-PimDefenderRoleById -Catalog $ctx['defRoleCatalog'] -RoleId "$__rowRid")
+                    $rid = if ($__byId.Count) { "$($__byId[0].id)" } else { $null }
+                }
                 if (-not $rid) {
                     # 2026-11-13: a binding WITHOUT a spec whose role is missing is HELD + DEFENDER-ROLE-MISSING (no permissions
                     # list: the row names the role, it does not describe it) -- never a throw.
@@ -9809,7 +9816,7 @@ function New-PimDefenderXdrRolesProvider {
             if ($ctx -is [hashtable] -and -not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
             $__wl = [System.Collections.Generic.List[string]]::new()
             try {
-                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -LiveDataSources @($l.appScopeIds) -Warnings $__wl -Assigned
+                $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog'] -DataSources @($spec.dataSources) -LiveDataSources @($l.appScopeIds) -Warnings $__wl -Assigned -RoleId "$(Get-PimRowProp -Row $d -Names @('RoleDefinitionId'))"
             } catch {
                 # 2026-11-13 (review): the group ALREADY holds its assignment -- a duplicate role name is a WARNING here, not a
                 # failed item (nothing is written either way; the create path keeps the refusal).
@@ -10409,6 +10416,7 @@ function New-PimWorkloadConnectorsProvider {
             $live = New-Object System.Collections.Generic.List[object]
             $seen = @{}
             $rmDataErr = New-Object System.Collections.Generic.List[object]   # 100.27
+            $roleGone = New-Object System.Collections.Generic.List[object]    # WORKLOAD-ROLE-GONE-1
             $assignKeys = @{}; foreach ($a in @($d.assign)) { $assignKeys[(Get-PimWorkloadConnectorKey -Row $a)] = $true }
             foreach ($r in $rows) {
                 $b = Resolve-PimWorkloadBinding -Row $r -Connectors $connectors -TagToName $tagToName -Cache $cache
@@ -10426,6 +10434,11 @@ function New-PimWorkloadConnectorsProvider {
                         $live.Add($lo); $seen[$b.key] = $true
                         # 100.27: the row's own data is what is missing -> ask the records whether it was ever applied (below).
                         if (Test-PimWorkloadRemoveDataError -Message $b.error) { $rmDataErr.Add(@{ item = $lo; key = $b.key; connector = $b.connector }) }
+                    }
+                    # WORKLOAD-ROLE-GONE-1: an ASSIGN whose role is not in the workload's live role list -- asked below whether
+                    # PIM Manager applied it before (then the role was deleted after: a warning, not a failure).
+                    if (-not $isRemove -and -not $seen.ContainsKey($b.key) -and (Get-Command Test-PimWorkloadRoleGoneCandidate -ErrorAction SilentlyContinue) -and (Test-PimWorkloadRoleGoneCandidate -Message $b.error)) {
+                        $roleGone.Add(@{ key = $b.key; o = $o; row = $r; connector = $b.connector })
                     }
                     continue
                 }
@@ -10470,11 +10483,40 @@ function New-PimWorkloadConnectorsProvider {
                     }
                 }
             }
+            # WORKLOAD-ROLE-GONE-1 (owner 2026-11-16 "fix it so i dont have to click"). An Assign row whose role is no longer
+            # in the workload, for a binding the ledger / applied outcomes show PIM Manager DID apply: the role was deleted in
+            # the workload afterwards. Nothing to assign -> a live item in state 'role-gone' (Equal: in sync, no Create, no
+            # failure, no alert) + ONE scope warning saying what to do. Never applied, or records unreadable: it is NOT
+            # touched here and still fails as WORKLOAD-ROLE-NOT-FOUND (ApplyCreate throws the binding's error).
+            if ($roleGone.Count -and (Get-Command Resolve-PimWorkloadRoleGone -ErrorAction SilentlyContinue)) {
+                $evG = $null
+                if (Get-Command Get-PimEverAppliedKeys -ErrorAction SilentlyContinue) {
+                    $evGCs = $null
+                    if (-not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $evGCs = Get-PimSqlSettingsConnectionString } catch { $evGCs = $null } }
+                    $evG = Get-PimEverAppliedKeys -ConnectionString $evGCs -Scope 'WorkloadConnectors' -Keys @($roleGone | ForEach-Object { "$($_.key)" })
+                }
+                $split = Resolve-PimWorkloadRoleGone -Candidates @($roleGone.ToArray()) -EverApplied $evG
+                foreach ($g in @($split.gone)) {
+                    $c = $g.candidate
+                    if ($seen.ContainsKey($c.key)) { continue }
+                    $c.o.wlcState = 'role-gone'
+                    $msgG = Format-PimWorkloadRoleGone -RoleName "$($c.row.RoleName)" -Connector $c.connector -Workload "$($c.row.Workload)" -GroupTag "$($c.row.GroupTag)" -AppliedBy "$($g.appliedBy)" -Key "$($c.key)"
+                    $c.o['wlcWarning'] = $msgG
+                    $live.Add([pscustomobject]$c.o); $seen[$c.key] = $true
+                    Write-Host ("    [workloads] {0}" -f $msgG) -ForegroundColor DarkYellow
+                    if ($ctx -is [hashtable]) {
+                        if (-not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+                        try { [void]$ctx['__pimScopeWarnings'].Add($msgG) } catch { }
+                    }
+                }
+            }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimWorkloadConnectorKey -Row $r }
         # Existence-based: the binding is in place (or excused by an active exemption).
-        Equal = { param($d, $l) ("$($l.wlcState)" -eq 'present' -or "$($l.wlcState)" -eq 'exempted') }
+        # WORKLOAD-ROLE-GONE-1: 'role-gone' = the role was deleted in the workload after PIM applied it -- nothing to assign
+        # (a scope warning says so), never a Create that fails every run.
+        Equal = { param($d, $l) ("$($l.wlcState)" -eq 'present' -or "$($l.wlcState)" -eq 'exempted' -or "$($l.wlcState)" -eq 'role-gone') }
         ApplyCreate = {
             param($item, $ctx)
             # 🔴 REQ-W (2.4.380): a NEW binding waits while its connector's workload prerequisites are not green

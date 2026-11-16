@@ -64,6 +64,53 @@ function Get-PimWorkloadPrereqSelfCheckToolVersion {
     try { return "$(Get-Content -Raw -LiteralPath (Join-Path (Get-PimWorkloadPrereqSelfCheckRoot) 'VERSION'))".Trim() } catch { return '' }
 }
 
+# ---- WORKLOAD-PREREQS-AFTER-UPDATE-1 (internal 2026-11-16, owner: "upd it at <customer> so it clears", "keep pushing") ----
+# The daily 'workload-prereqs' job is due AT ONCE on the first tick on a new version (the scheduler's due-now resolver, the
+# uplink's mechanism), so a new version's prerequisite rules are recorded within minutes, not up to a day later. Once per
+# version: a stored record stamped with the running version (toolVersion, written by this job) = done.
+function Test-PimWorkloadPrereqVersionCheckDue {
+    <#
+      PURE. Due now when: a version is known, something is stored (never run = the normal cadence -- no extra run on a doubt),
+      NO stored workload record carries -Version as its toolVersion yet, and the job did not START within -RetryMinutes (a run
+      that failed on this version is retried at most that often, never on every tick).
+    #>
+    param([AllowNull()][object]$Stored, [string]$Version = '', [AllowNull()][object]$Job, [Parameter(Mandatory)][datetime]$NowUtc, [int]$RetryMinutes = 60)
+    $v = "$Version".Trim(); if (-not $v -or $null -eq $Stored) { return $false }
+    $recs = @(foreach ($w in (Get-PimWorkloadPrereqWorkloads)) { $r = Get-PimWorkloadPrereqStoredRecord -Stored $Stored -Workload $w; if ($r) { $r } })
+    if (-not $recs.Count) { return $false }
+    if (@($recs | Where-Object { "$(Get-PimWorkloadPrereqRecordField -Object $_ -Name 'toolVersion')".Trim() -eq $v }).Count) { return $false }
+    if ($null -ne $Job) {
+        foreach ($n in @('lastRunUtc', 'lastStartedUtc')) {
+            $raw = Get-PimWorkloadPrereqRecordField -Object $Job -Name $n
+            $t = ConvertTo-PimWorkloadPrereqUtcText -Value $raw
+            if ($t) {
+                $at = [datetime]::Parse($t, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal')
+                if ($at -gt $NowUtc.ToUniversalTime().AddMinutes(-1 * [Math]::Max(1, $RetryMinutes))) { return $false }
+            }
+        }
+    }
+    return $true
+}
+function Get-PimWorkloadPrereqDueNowAfterUpdate {
+    <#
+      The scheduler's due-now resolver for 'workload-prereqs' (registered in Start-PimScheduler.ps1). Reads pim.Settings
+      'WorkloadPrereqs' and the running version (the VERSION file the job stamps). NEVER throws: $false.
+      -GetStored / -Version are test seams.
+    #>
+    param([AllowNull()][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][scriptblock]$GetStored = $null, [AllowNull()][object]$Version = $null)
+    try {
+        $ver = if ($null -ne $Version) { "$Version".Trim() } else { Get-PimWorkloadPrereqSelfCheckToolVersion }
+        if (-not $ver) { return $false }
+        $st = $null
+        if ($GetStored) { $st = & $GetStored }
+        elseif ("$($global:PIM_SqlConnectionString)".Trim() -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $st = Get-PimSqlSetting -ConnectionString $global:PIM_SqlConnectionString -Name 'WorkloadPrereqs' }
+        elseif (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $st = Get-PimSetting -Name 'WorkloadPrereqs' }
+        else { return $false }
+        if ($st -is [string]) { if ("$st".Trim()) { try { $st = $st | ConvertFrom-Json } catch { return $false } } else { $st = $null } }
+        return [bool](Test-PimWorkloadPrereqVersionCheckDue -Stored $st -Version $ver -Job $Job -NowUtc $NowUtc)
+    } catch { return $false }
+}
+
 function Import-PimWorkloadPrereqRunner {
     # The runner's functions, loaded when the tick has not loaded them yet. Returns $true when they are available.
     if (Get-Command Invoke-PimWorkloadPrereqRun -ErrorAction SilentlyContinue) { return $true }

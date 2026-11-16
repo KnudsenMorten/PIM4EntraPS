@@ -388,6 +388,33 @@ if ((Get-Command Register-PimJobCadenceResolver -ErrorAction SilentlyContinue) -
         Get-PimUplinkCadenceMinutes -Job $job -NowUtc $now
     }
 }
+# UPLINK-SLOT-1 (c): on the first tick on a new version the uplink job is due AT ONCE (one extra send of the install's
+# report; then its normal cadence) -- Get-PimUplinkDueNowAfterUpdate reads UplinkState's recorded versions. Never fails a tick.
+if ((Get-Command Register-PimJobDueNowResolver -ErrorAction SilentlyContinue) -and (Get-Command Get-PimUplinkDueNowAfterUpdate -ErrorAction SilentlyContinue)) {
+    Register-PimJobDueNowResolver -Type 'uplink' -Resolver {
+        param($job, $now)
+        Get-PimUplinkDueNowAfterUpdate -NowUtc $now
+    }
+}
+# WORKLOAD-PREREQS-AFTER-UPDATE-1 (internal 2026-11-16, owner: "upd it at <customer> so it clears"): on the first tick on a new
+# version the daily 'workload-prereqs' job is due AT ONCE (once per version: the records it writes carry the version) --
+# Get-PimWorkloadPrereqDueNowAfterUpdate, PIM-WorkloadPrereqSelfCheck.ps1. Never fails a tick.
+if ((Get-Command Register-PimJobDueNowResolver -ErrorAction SilentlyContinue) -and (Get-Command Get-PimWorkloadPrereqDueNowAfterUpdate -ErrorAction SilentlyContinue)) {
+    Register-PimJobDueNowResolver -Type 'workload-prereqs' -Resolver {
+        param($job, $now)
+        Get-PimWorkloadPrereqDueNowAfterUpdate -Job $job -NowUtc $now
+    }
+}
+# COVERAGE-AFTER-COMMIT-1 (owner 2026-11-16): a commit / queue-apply that applied >= 1 change makes 'tenant-cache' due at once,
+# and 'coverage' due once that refresh has finished (Get-PimCoverageRefreshDueNow, PIM-Scheduler.ps1). Never fails a tick.
+if ((Get-Command Register-PimJobDueNowResolver -ErrorAction SilentlyContinue) -and (Get-Command Get-PimCoverageRefreshDueNow -ErrorAction SilentlyContinue)) {
+    foreach ($__covType in @('tenant-cache', 'coverage')) {
+        Register-PimJobDueNowResolver -Type $__covType -Resolver {
+            param($job, $now, $jobs)
+            Get-PimCoverageRefreshDueNow -Job $job -Jobs @($jobs) -NowUtc $now
+        }
+    }
+}
 # The REAL 'licence-check' handler. PIM 100.72 (4): a refused / grace licence is TELEMETRY -- a 'warning' run, not a guard trip.
 Register-PimJobHandler -Type 'licence-check' -Handler {
     param($job, $now, $whatIf)

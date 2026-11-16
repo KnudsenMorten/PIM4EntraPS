@@ -400,6 +400,17 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # DEFENDER-APPSCOPE-1 (internal 2026-11-15, owner: "this msg is useless ... missing relevant context"): Microsoft began
+    # refusing a Defender XDR role assignment without appScopeIds ("HTTP 400 : AppScopeIds: AppScopeIds must be provided").
+    # PIM's defect, not the customer's: 3.1.27 sends appScopeIds ["/"] (connector defender-xdr). Was UNCLASSIFIED.
+    @{ code = 'DEFENDER-APPSCOPE-REQUIRED'
+       match = { param($m, $row) $m -match '(?i)AppScopeIds must be provided' }
+       title = 'Microsoft Defender XDR now requires a scope on every role assignment -- fixed in PIM Manager 3.1.27'
+       cause = 'Microsoft changed the Defender XDR role-assignment API: an assignment must now name its scope (appScopeIds). PIM Manager versions before 3.1.27 did not send it, so Defender refused to give the group this Defender XDR role. Nothing was changed in Defender; access the group already had is kept.'
+       remedy = 'Nothing for you to do: PIM Manager 3.1.27 sends the scope, and the update brings it to this installation. The first run after the update gives the waiting Defender XDR roles.'
+       retryable = $true; severity = 'info'
+       fixes = @() }
+
     # BUG-257 (§78 live run 7, 2026-09-24): the TAP job (delta-admin-tap, every 10 min) and the account job (delta-admins,
     # every 5 min) run apart, so an admin that became due between them reaches AdminTap before the account exists -- the
     # run was recorded FAILED "Unrecognised failure" and the next run issued the pass as normal. Ordering, not a fault.
@@ -501,6 +512,19 @@ $script:PimFailureRules = @(
        cause = 'The Workload column must be the id of a shipped workload connector (the error lists the supported ids). The row is not applied at all.'
        remedy = 'Correct the Workload column to a supported connector id, or stop managing the binding (delete the row -- a binding that was never applied is deleted outright).'
        retryable = $false; severity = 'data'
+       fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
+
+    # WORKLOAD-ROLE-GONE-1 (internal 2026-11-16, owner: "fix it so i dont have to click"): the role a row binds was deleted
+    # in the workload AFTER PIM Manager had assigned it (the engine's ledger / applied outcomes say so). Nothing to assign:
+    # the engine raises it as a scope WARNING, never a failed item -- the job does not fail and does not alert. Ahead of
+    # WORKLOAD-ROLE-NOT-FOUND (a role never applied before still fails as that class). severity info: nothing failed, no
+    # customer-config Solution; the 'delete-row' fix stays available.
+    @{ code = 'WORKLOAD-ROLE-GONE'
+       match = { param($m, $row) $m -match '(?i)^\s*(\[[A-Za-z]+\]\s*)?(WorkloadConnectors:\s*)?WORKLOAD-ROLE-GONE:' }
+       title = 'The workload role this row binds was deleted after PIM Manager had assigned it'
+       cause = 'The role this row binds is no longer in the workload, and PIM Manager''s records show it had assigned this access before, so the role was deleted in the workload afterwards. There is nothing to assign. This is a warning, not a failure: the job does not fail and does not alert.'
+       remedy = 'Delete the row to stop managing it, or recreate the role in the workload (with the same name) and the next run assigns it again.'
+       retryable = $false; severity = 'info'
        fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
 
     @{ code = 'WORKLOAD-ROLE-NOT-FOUND'
@@ -880,6 +904,7 @@ function Get-PimFailureCodeTable {
         ,@('DEFENDER-ROLE-MISSING',            'pim-def-0108',   'customer-config',   'customer', '',      '3.1.21')
         ,@('DEFENDER-ROLE-DIFFERS',            'pim-def-0109',   'customer-config',   'customer', '',      '3.1.21')
         ,@('DEFENDER-ROLE-WIDER',              'pim-def-0110',   'customer-config',   'customer', '',      '3.1.21')
+        ,@('DEFENDER-APPSCOPE-REQUIRED',       'pim-def-0111',   'upstream-error',    'product',  '3.1.27', '3.1.27')
         ,@('POWERBI-ENGINE-NOT-IN-WORKSPACE',  'pim-pbi-0101',   'permission',        'customer', '',      '2.4.638')
         ,@('POWERBI-ADMIN-NOT-GRANTED',        'pim-pbi-0102',   'permission',        'customer', '',      '2.4.638')
         ,@('POWERBI-WORKSPACE-NOT-FOUND',      'pim-pbi-0103',   'target-missing',    'customer', '',      '2.4.638')
@@ -890,6 +915,8 @@ function Get-PimFailureCodeTable {
         ,@('WORKLOAD-RESOURCE-MISSING',        'pim-wl-0105',    'customer-config',   'customer', '',      '2.4.638')
         ,@('WORKLOAD-CONTAINER-MISSING',       'pim-wl-0106',    'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('WORKLOAD-ACTION-UNKNOWN',          'pim-wl-0107',    'customer-config',   'customer', '',      '2.4.638')
+        # WORKLOAD-ROLE-GONE-1 (3.1.29): a warning, never a failed item -- no follow-up, no ticket
+        ,@('WORKLOAD-ROLE-GONE',               'pim-wl-0108',    'target-missing',    'nobody',   '',      '3.1.29')
         ,@('ADMIN-NOT-CREATED-YET',            'pim-tap-0101',   'replication-delay', 'nobody',   '',      '2.4.638')
         ,@('TAP-TENANT-POLICY',                'pim-tap-0102',   'customer-config',   'customer', '',      '2.4.638')
         ,@('TAP-NO-RECIPIENT',                 'pim-tap-0103',   'customer-config',   'customer', '',      '2.4.638')
@@ -975,6 +1002,8 @@ function Get-PimFailureClassOwnText {
                                  'Nothing to do for you: Invardia support looks at it. This clears by itself when the job runs normally again.') }
         'DEFENDER-DATASOURCES-CHANGED' { return @('A Defender XDR role assignment covers other data sources than the workload template names. PIM Manager reported it and changed nothing; the access stays as it is.',
                                  'Nothing to do. PIM Manager compares again on every run.') }
+        'WORKLOAD-ROLE-GONE' { return @('A role that a workload row binds was deleted in the workload after PIM Manager had assigned it, so there is nothing to assign. Nothing failed; everything else is applied.',
+                                 'Nothing has to be done. To stop the warning, delete the row in Advanced View (grid) and commit, or recreate the role in the workload.') }
     }
     return $null
 }

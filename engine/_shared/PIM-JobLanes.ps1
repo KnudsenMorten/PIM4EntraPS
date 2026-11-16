@@ -114,7 +114,35 @@ function Get-PimEngineScopeArea {
     return "engine:$k"
 }
 
-function Get-PimSingleWriterJobTypes { <# PURE. LITERAL. TRUST-1 round 4 item 1: jobs whose every run (scheduled, Run now, trigger) shares one lock. #> return @('active-assignments-snapshot', 'drift-snapshot', 'coverage') }
+function Get-PimSingleWriterJobTypes { <# PURE. LITERAL. TRUST-1 round 4 item 1: jobs whose every run (scheduled, Run now, trigger) shares one lock. UPLINK-SLOT-1: the uplink too (two uplinks never run at once). #> return @('active-assignments-snapshot', 'drift-snapshot', 'coverage', 'uplink') }
+
+# ---- UPLINK-SLOT-1 (found at internal 2026-11-15; framework 8.4: the uplink / heartbeat is never starved by product work) ---
+# After an update three executions each ran a first-run-after-update pass side by side, filled the 4 slots, and the uplink
+# waited behind them for hours. Two rules:
+#   * OWN SLOT -- a job of these types never counts against the lane cap and never waits for it. Its single-writer lock
+#     ('job:uplink', Get-PimSingleWriterJobTypes) still keeps two uplinks from ever running at once.
+#   * FIRST-RUN LEASE -- the first scheduled engine-delta run on a new version (delta-skip code 'version': every step is read
+#     for real once) holds the lease area below. Only ONE such run goes at a time across executions; the others wait (they
+#     stay due, hold no slot). The lease is an ordinary lock: it expires at its TTL unless the run's heartbeat renews it,
+#     and a holder whose execution the platform reports ENDED is taken over at once -- it never sticks.
+function Get-PimOwnSlotJobTypes { <# PURE. LITERAL. UPLINK-SLOT-1: job types with their OWN slot (outside the lane cap). #> return @('uplink') }
+function Test-PimOwnSlotArea {
+    # PURE. True for a lock area that belongs to an own-slot job ('job:uplink'): such a lock never takes a slot.
+    param([string]$Area)
+    $a = "$Area".Trim().ToLowerInvariant()
+    foreach ($t in @(Get-PimOwnSlotJobTypes)) { if ($a -eq "job:$t") { return $true } }
+    return $false
+}
+function Get-PimFirstRunLeaseArea { <# PURE. LITERAL. UPLINK-SLOT-1 (b): the lock area of the first run after an update. #> return 'first-run-after-update' }
+function Test-PimFirstRunLeaseNeeded {
+    # PURE. UPLINK-SLOT-1 (b): a delta-skip verdict that says "run, because the running version differs from the last run's"
+    # = this is a first run after an update, and it must hold the first-run lease. Anything else (skip, any other code,
+    # no verdict) = no lease.
+    param([AllowNull()][object]$Verdict)
+    if ($null -eq $Verdict) { return $false }
+    if ($Verdict.PSObject.Properties['skip'] -and [bool]$Verdict.skip) { return $false }
+    return ("$($Verdict.code)" -eq 'version')
+}
 
 function Get-PimJobAreas {
     <#
@@ -147,7 +175,8 @@ function Get-PimJobAreas {
     # TRIGGER ('trigger:<type>:All', no -JobName) take the SAME lock, 'job:<scheduled name>' (the shipped name = the type), so
     # two runs of one of them never write at the same time. Every other job keeps 'job:<its name>'.
     $jobKey = if ($type -in (Get-PimSingleWriterJobTypes)) { "job:$type" } else { "job:$name" }
-    return [pscustomobject]@{ job = $jobKey; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1) }
+    # UPLINK-SLOT-1: ownSlot = this job never counts against, and never waits for, the lane cap.
+    return [pscustomobject]@{ job = $jobKey; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1); ownSlot = [bool]($type -in @(Get-PimOwnSlotJobTypes)) }
 }
 
 function Get-PimLaneCap {
@@ -305,9 +334,14 @@ function Get-PimLockConflict {
 function Get-PimLiveLockOwners {
     # PURE. The distinct owners holding a live lock in -Map (PIM 100.166 c3: or a lock past its TTL whose execution is in
     # -AliveExecutions -- that owner's run is still working, its 'running' record must not be closed).
-    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [hashtable]$AliveExecutions = @{})
+    # UPLINK-SLOT-1: -SlotsOnly = only the owners that take a SLOT (a lock on an own-slot area, 'job:uplink', takes none) --
+    # the lane cap counts these; closing 'running' records still sees every owner (no switch).
+    param([System.Collections.IDictionary]$Map, [Parameter(Mandatory)][datetime]$NowUtc, [hashtable]$AliveExecutions = @{}, [switch]$SlotsOnly)
     $o = New-Object System.Collections.Generic.List[string]
-    foreach ($k in @($Map.Keys)) { $l = $Map[$k]; if ((Test-PimAreaLockHeld -Lock $l -NowUtc $NowUtc -AliveExecutions $AliveExecutions) -and -not $o.Contains("$($l.owner)")) { $o.Add("$($l.owner)") } }
+    foreach ($k in @($Map.Keys)) {
+        if ($SlotsOnly -and (Test-PimOwnSlotArea -Area "$k")) { continue }
+        $l = $Map[$k]; if ((Test-PimAreaLockHeld -Lock $l -NowUtc $NowUtc -AliveExecutions $AliveExecutions) -and -not $o.Contains("$($l.owner)")) { $o.Add("$($l.owner)") }
+    }
     return @($o.ToArray())
 }
 
@@ -345,8 +379,9 @@ function Request-PimAreaLocks {
         }
         if ($conf) { $c.conflict = $conf; return $changed }
         if ($Cap -gt 0) {
-            $others = @(Get-PimLiveLockOwners -Map $map -NowUtc $NowUtc -AliveExecutions $alive | Where-Object { $_ -ne $Owner })
-            $mine = @($map.Keys | Where-Object { "$($map[$_].owner)" -eq $Owner }).Count
+            # UPLINK-SLOT-1: a run of an own-slot job (the uplink) takes no slot -- it is neither counted here nor counts as "mine"
+            $others = @(Get-PimLiveLockOwners -Map $map -NowUtc $NowUtc -AliveExecutions $alive -SlotsOnly | Where-Object { $_ -ne $Owner })
+            $mine = @($map.Keys | Where-Object { "$($map[$_].owner)" -eq $Owner -and -not (Test-PimOwnSlotArea -Area "$_") }).Count
             if (-not $mine -and $others.Count -ge $Cap) { $c.capReached = $true; $c.busy = $others.Count; return $changed }
         }
         $exec = Get-PimSchedulerExecutionName
@@ -914,9 +949,10 @@ function Get-PimJobLaneState {
     $a = Get-PimJobAreas -Job $Job
     $want = @($a.job) + $(if ($a.perScope) { @() } else { @($a.areas) })
     $conf = Get-PimLockConflict -Map $Map -Areas $want -Owner '' -NowUtc $NowUtc
-    $live = @(Get-PimLiveLockOwners -Map $Map -NowUtc $NowUtc)
+    $live = @(Get-PimLiveLockOwners -Map $Map -NowUtc $NowUtc -SlotsOnly)
     $cap = Get-PimLaneCap
-    return [pscustomobject]@{ conflict = $conf; capReached = [bool](-not $conf -and $live.Count -ge $cap); busy = $live.Count; cap = $cap; live = $live; areas = @($a.areas) }
+    # UPLINK-SLOT-1: an own-slot job (the uplink) never waits for a free slot
+    return [pscustomobject]@{ conflict = $conf; capReached = [bool](-not $conf -and -not $a.ownSlot -and $live.Count -ge $cap); busy = $live.Count; cap = $cap; live = $live; areas = @($a.areas) }
 }
 
 function Get-PimCoveringCleanRun {

@@ -279,13 +279,20 @@ function Invoke-PimPrereqDefenderXdr {
     $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.urbacReachable' -Status $pv.status -Detail $pv.detail))
 
     # Activated workloads: portal only; INFERRED from the live roles when they are readable.
-    $inf = if ($roles.ok) { (Get-PimDefenderUrbacInference -RoleDefinitions @($roles.value)).detail } else { 'cannot infer: the role definitions could not be read.' }
+    # DEFENDER-URBAC-INFERRED-1 (internal 2026-11-16, owner decision "Confirm (1) + fix product"): live roles that carry a
+    # microsoft.xdr/ permission prove Unified RBAC is in use -> 'ok', marked inferred (a person's Confirm still wins: the
+    # merge keeps a stored confirmation, and -ConfirmPortalStep records one). No such role -> the portal step, as before.
+    # DEFENDER-INFER-AT-RUN-1: recorded as the portal step here; the ONE rule (Get-PimDefenderInferredChecks, the engine uses
+    # it too) turns it 'ok' (inferred) at the end of this function when the live roles prove it.
+    $infR = if ($roles.ok) { Get-PimDefenderUrbacInference -RoleDefinitions @($roles.value) } else { $null }
+    $inf = if ($infR) { $infR.detail } else { 'cannot infer: the role definitions could not be read.' }
     $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.urbacWorkloads' -Status 'manual' -Detail "portal only -- $inf"))
 
     if ($Ctx.skipDataOperations) {
         foreach ($id in @('defender.dataOpsCatalog', 'defender.sentinelEnabled', 'defender.sentinelInDefender')) {
             $out.Add((New-PimWorkloadPrereqCheck -Id $id -Status 'skipped' -Detail 'Data Operations roles not used (-SkipDataOperations).'))
         }
+        if ($roles.ok) { return @(Get-PimDefenderInferredChecks -Checks @($out.ToArray()) -RoleDefinitions @($roles.value)) }
         return $out.ToArray()
     }
     # Data Operations in the permission CATALOG (lead, measured 2026-09-19: a tenant without the Sentinel prerequisite
@@ -336,6 +343,12 @@ function Invoke-PimPrereqDefenderXdr {
         $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'notChecked' -Detail 'the caller can see no Log Analytics workspace -- pass -SentinelWorkspaceId <workspace resource id>.'))
     }
     $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelInDefender' -Status 'manual' -Detail 'portal only (no public API connects a workspace to the Defender portal).'))
+    # DEFENDER-DATAOPS-INFERRED-1 (internal 2026-11-16, owner: "if we can avoid manually press i prefer that"): a LIVE role
+    # that already uses microsoft.xdr/dataops/ is proof -- Defender refuses to store one until Sentinel is connected (measured
+    # 2026-09-19). Then the portal step, an unreadable Sentinel check and the catalog are 'ok', marked inferred (never
+    # attested). A verified failed Sentinel check stays as it is; a person's Confirm / Not used still wins (the merge).
+    # DEFENDER-INFER-AT-RUN-1: the rule lives in ONE place, Get-PimDefenderInferredChecks (the engine applies it too).
+    if ($roles.ok) { return @(Get-PimDefenderInferredChecks -Checks @($out.ToArray()) -RoleDefinitions @($roles.value)) }
     return $out.ToArray()
 }
 
@@ -758,8 +771,10 @@ function Invoke-PimWorkloadPrereqRun {
     }
     $confirm = @($Ctx.confirm | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
     $final = foreach ($c in @($checks)) {
-        if ($confirm -contains $c.id.ToLowerInvariant() -and -not $c.ok) {
-            if (Test-PimWorkloadPrereqConfirmable -Id $c.id -Status $c.status) {
+        # DEFENDER-URBAC-INFERRED-1: an INFERRED ok is still open to a person's confirmation (attested beats inferred).
+        $inferred = ($c.PSObject.Properties['inferred'] -and [bool]$c.inferred)
+        if ($confirm -contains $c.id.ToLowerInvariant() -and (-not $c.ok -or $inferred)) {
+            if (Test-PimWorkloadPrereqConfirmable -Id $c.id -Status $(if ($inferred) { 'manual' } else { $c.status })) {
                 New-PimWorkloadPrereqCheck -Id $c.id -Status 'confirmed' -Detail "confirmed by $($Ctx.ranBy) with -ConfirmPortalStep (attested, not API-verified). Before: $($c.detail)"
             } else {
                 $c.detail = "$($c.detail) [-ConfirmPortalStep $($c.id) IGNORED: this result was verified through an API and cannot be attested away]"

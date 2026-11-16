@@ -1059,6 +1059,155 @@ function Get-PimJobCadenceOverrideMinutes {
     return $m
 }
 
+# ---- due NOW (UPLINK-SLOT-1 (c)) ---------------------------------------------
+# A job TYPE may be due at once, whatever its cadence, for ONE run: the uplink on the first tick on a new version, so the
+# install's first report after an update goes out at once (one extra send; then its normal cadence). A resolver per type
+# answers $true for NOW. It never changes the interval; the run's own stamps then count the next slot as usual. A resolver
+# that throws = not due now (a tick never fails because of one).
+$script:PimJobDueNowResolvers = @{}
+function Register-PimJobDueNowResolver {
+    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][scriptblock]$Resolver)
+    $script:PimJobDueNowResolvers["$Type".ToLowerInvariant()] = $Resolver
+}
+function Get-PimJobDueNowNames {
+    <# The names of the given jobs whose registered resolver says "due now". NEVER throws. #>
+    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = New-Object System.Collections.Generic.List[string]
+    if (-not $script:PimJobDueNowResolvers -or -not $script:PimJobDueNowResolvers.Count) { return @() }
+    foreach ($j in @($Jobs | Where-Object { $_ -and "$($_.name)".Trim() })) {
+        $rs = $script:PimJobDueNowResolvers["$($j.type)".ToLowerInvariant()]
+        if (-not $rs) { continue }
+        # COVERAGE-AFTER-COMMIT-1: the whole job list rides along as a 3rd argument (a resolver may look at another job's
+        # stamps); a resolver with param($job, $now) simply ignores it.
+        $d = $false; try { $d = [bool](@(& $rs $j $NowUtc @($Jobs)) | Select-Object -Last 1) } catch { $d = $false }
+        if ($d -and -not $out.Contains("$($j.name)")) { $out.Add("$($j.name)") }
+    }
+    return @($out.ToArray())
+}
+function Set-PimJobDueNow {
+    <#
+      PURE. The jobs with "due now" applied (copies; the input is never changed): an ENABLED job named in -Names whose next
+      slot is later than -NowUtc gets nextRunUtc = -NowUtc and dueNow = $true. A disabled job stays off; every other job is
+      returned as it is.
+    #>
+    param([object[]]$Jobs, [string[]]$Names = @(), [Parameter(Mandatory)][datetime]$NowUtc)
+    if (-not @($Names).Count) { return @($Jobs) }
+    $now = $NowUtc.ToUniversalTime()
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($j in @($Jobs)) {
+        if (-not $j -or @($Names) -notcontains "$($j.name)") { $out.Add($j); continue }
+        $en = $true; if ($j.PSObject.Properties['enabled']) { $en = [bool]$j.enabled }
+        if (-not $en) { $out.Add($j); continue }
+        $next = $null; if ($j.PSObject.Properties['nextRunUtc']) { $next = Get-PimUtcStamp $j.nextRunUtc }
+        if ($null -eq $next -or $next -le $now) { $out.Add($j); continue }
+        $e = $j.PSObject.Copy()
+        $e.nextRunUtc = $now.ToString('o')
+        $e | Add-Member -NotePropertyName dueNow -NotePropertyValue $true -Force
+        $out.Add($e)
+    }
+    @($out.ToArray())
+}
+function Get-PimTickJobOrder {
+    <#
+      PURE. UPLINK-SLOT-1: the order the scheduled block of a tick goes through its jobs -- the own-slot jobs (the uplink)
+      FIRST, then every other job in its own order. The list itself is never changed (it is what the tick persists).
+    #>
+    param([object[]]$Jobs)
+    $own = @(Get-PimOwnSlotJobTypes)
+    $first = @(@($Jobs) | Where-Object { $_ -and ("$($_.type)".Trim().ToLowerInvariant() -in $own) })
+    $rest  = @(@($Jobs) | Where-Object { -not ($_ -and ("$($_.type)".Trim().ToLowerInvariant() -in $own)) })
+    return @($first + $rest)
+}
+
+# ---- COVERAGE-AFTER-COMMIT-1 (owner 2026-11-16) --------------------------------
+# "and these gaps are old": the Overview said "Coverage check: 44 gap(s)" hours after the owner committed the gaps, because
+# 'tenant-cache' and 'coverage' run every 720 min. A commit / queue-apply that APPLIED at least one change now writes ONE
+# request (pim.Settings 'CoverageRefreshRequest' = { requestedUtc; reason; applied }); the due-now resolvers of the two jobs
+# (registered in Start-PimScheduler.ps1) read it:
+#   * 'tenant-cache' is due now while its last scheduled run finished BEFORE the request;
+#   * 'coverage' is due now only once 'tenant-cache' finished AFTER the request (so it never compares an old cache), and
+#     while its own last run finished before the request. No enabled 'tenant-cache' job = 'coverage' does not wait for it.
+# Both are evaluated at the START of a tick, so the cache refresh and the coverage run land in two following ticks, in
+# that order. A commit that applied nothing writes nothing (no extra Graph load). A request older than
+# Get-PimCoverageRefreshMaxAgeHours is ignored (a job that keeps failing never stays "due now" for ever).
+function Get-PimCoverageRefreshSettingName { 'CoverageRefreshRequest' }
+function Get-PimCoverageRefreshMaxAgeHours { 24 }
+function Request-PimCoverageRefreshAfterCommit {
+    <#
+      Best effort, NEVER throws: { ok; requested; error }. -Applied < 1 = nothing is written (requested = $false).
+      -Writer: test seam (param($cs, $json)).
+    #>
+    param([int]$Applied = 0, [string]$Reason = '', [string]$ConnectionString = '', [datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Writer = $null)
+    if ($Applied -lt 1) { return [pscustomobject]@{ ok = $true; requested = $false; error = '' } }
+    try {
+        $json = ConvertTo-Json -Compress -InputObject ([ordered]@{
+            requestedUtc = (Get-PimUtcStamp $NowUtc).ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+            reason = "$Reason"; applied = [int]$Applied })
+        if (-not $Writer) {
+            if (-not "$ConnectionString".Trim() -and "$($global:PIM_SqlConnectionString)".Trim()) { $ConnectionString = "$($global:PIM_SqlConnectionString)" }
+            if (-not "$ConnectionString".Trim() -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $ConnectionString = "$(Get-PimSqlSettingsConnectionString)" } catch { } }
+            if (-not "$ConnectionString".Trim()) { return [pscustomobject]@{ ok = $false; requested = $false; error = 'no SQL store' } }
+            if (-not (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ok = $false; requested = $false; error = 'Set-PimSqlSetting is not loaded' } }
+            $Writer = { param($cs, $j) Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimCoverageRefreshSettingName) -ValueJson $j }
+        }
+        [void](& $Writer $ConnectionString $json)
+        return [pscustomobject]@{ ok = $true; requested = $true; error = '' }
+    } catch { return [pscustomobject]@{ ok = $false; requested = $false; error = "$($_.Exception.Message)" } }
+}
+function Test-PimCoverageRefreshDueNow {
+    <#
+      PURE. Is -Job ('tenant-cache' or 'coverage') due now because of -Request ({ requestedUtc })? -Jobs: the tick's job list
+      (to read the tenant-cache job's stamps for 'coverage'). Any other type, no request, an unreadable or too old request,
+      a disabled job = $false.
+    #>
+    param([AllowNull()][object]$Job, [object[]]$Jobs = @(), [AllowNull()][object]$Request, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $Job -or $null -eq $Request) { return $false }
+    $type = "$($Job.type)".Trim().ToLowerInvariant()
+    if ($type -notin @('tenant-cache', 'coverage')) { return $false }
+    if ($Job.PSObject.Properties['enabled'] -and -not [bool]$Job.enabled) { return $false }
+    $req = $null; if ($Request.PSObject.Properties['requestedUtc']) { $req = Get-PimUtcStamp $Request.requestedUtc }
+    if ($null -eq $req) { return $false }
+    $now = Get-PimUtcStamp $NowUtc
+    if ($req -gt $now.AddMinutes(5) -or $req -lt $now.AddHours(-1 * (Get-PimCoverageRefreshMaxAgeHours))) { return $false }
+    $finOf = {
+        param($j)
+        $f = $null
+        if ($j.PSObject.Properties['lastFinishedUtc']) { $f = Get-PimUtcStamp $j.lastFinishedUtc }
+        if ($null -eq $f -and $j.PSObject.Properties['lastRunUtc']) { $f = Get-PimUtcStamp $j.lastRunUtc }
+        $f
+    }
+    $own = & $finOf $Job
+    if ($null -ne $own -and $own -ge $req) { return $false }   # already ran after the request
+    if ($type -eq 'tenant-cache') { return $true }
+    # 'coverage': wait for a tenant-cache run that finished after the request (when such a job is enabled)
+    $tc = @(@($Jobs) | Where-Object { $_ -and "$($_.type)".Trim().ToLowerInvariant() -eq 'tenant-cache' -and -not ($_.PSObject.Properties['enabled'] -and -not [bool]$_.enabled) })
+    if (-not $tc.Count) { return $true }
+    foreach ($t in $tc) { $tf = & $finOf $t; if ($null -ne $tf -and $tf -ge $req) { return $true } }
+    return $false
+}
+function Get-PimCoverageRefreshDueNow {
+    <#
+      The due-now resolver of 'tenant-cache' and 'coverage' (Start-PimScheduler.ps1). Reads the request once per tick clock
+      (both resolvers of one tick share the read). NEVER throws: $false. -GetRequest: test seam.
+    #>
+    param([AllowNull()][object]$Job, [object[]]$Jobs = @(), [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][scriptblock]$GetRequest = $null)
+    try {
+        $key = $NowUtc.ToUniversalTime().ToString('o')
+        $req = $null
+        if ($GetRequest) { $req = & $GetRequest }
+        elseif ($script:PimCoverageRefreshReqCache -and "$($script:PimCoverageRefreshReqCache.key)" -eq $key) { $req = $script:PimCoverageRefreshReqCache.value }
+        else {
+            $cs = ''
+            if ("$($global:PIM_SqlConnectionString)".Trim()) { $cs = "$($global:PIM_SqlConnectionString)" }
+            elseif (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { $cs = "$(Get-PimSqlSettingsConnectionString)" }
+            if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $req = Get-PimSqlSetting -ConnectionString $cs -Name (Get-PimCoverageRefreshSettingName) }
+            $script:PimCoverageRefreshReqCache = @{ key = $key; value = $req }
+        }
+        if ($req -is [string]) { try { $req = $req | ConvertFrom-Json } catch { $req = $null } }
+        return [bool](Test-PimCoverageRefreshDueNow -Job $Job -Jobs @($Jobs) -Request $req -NowUtc $NowUtc)
+    } catch { return $false }
+}
+
 # ---- handler registry -----------------------------------------------------
 function Register-PimJobHandler {
     param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][scriptblock]$Handler)
@@ -1701,6 +1850,14 @@ function Initialize-PimDefaultJobHandlers {
         if ($arApplied -gt 0) {
             try { [void](Add-PimJobTrigger -Type 'tenant-cache' -Scope 'access-reviews' -Reason "queue-apply:access-review-actions-applied=$arApplied" -JobName 'tenant-cache') }
             catch { Write-Warning "[scheduler] could not queue an access-review record refresh after $arApplied applied access-review action(s): $($_.Exception.Message)" }
+        }
+        # COVERAGE-AFTER-COMMIT-1 (owner 2026-11-16): >= 1 applied change = 'tenant-cache' then 'coverage' due now on the
+        # following ticks (Request-PimCoverageRefreshAfterCommit). 0 applied = nothing. Best effort: never fails the apply.
+        if ($applied -gt 0) {
+            try {
+                $covReq = Request-PimCoverageRefreshAfterCommit -Applied $applied -ConnectionString $cs -Reason "queue-apply:applied=$applied"
+                if (-not $covReq.ok) { Write-Warning "[scheduler] the coverage refresh after $applied applied change(s) was not requested: $($covReq.error)" }
+            } catch { Write-Warning "[scheduler] the coverage refresh after $applied applied change(s) was not requested: $($_.Exception.Message)" }
         }
         # 🔑 A FAILED ENTRY IS REPORTED, NOT SWALLOWED. The whole point of §65.8 is that a queued
         # action whose failure nobody sees is worse than a synchronous one that throws.
@@ -2888,8 +3045,13 @@ function Get-PimJobsStatus {
         $name = "$($j.name)"
         $sj = $stateByName["$name"]              # persisted-state fallback for this job (may be $null)
         $runs = if ($runsByName.ContainsKey($name)) { @($runsByName[$name].ToArray()) } else { @() }
-        $last = $runs | Select-Object -First 1
-        $inProg = @($runs | Where-Object { "$($_.status)" -eq 'running' -or -not "$($_.finishedUtc)".Trim() }) | Select-Object -First 1
+        # JOB-LAST-REAL-1 (internal 2026-11-15, owner: "this msg is useless"): a run that only SKIPPED this job (another
+        # worker's job filter, e.g. a one-off run limited to other jobs) is not this job's result -- it hid the real last
+        # outcome behind "not scheduled on this worker". The newest run that really ran wins; a skipped one only when
+        # nothing else was ever recorded.
+        $last = $runs | Where-Object { "$($_.status)" -ne 'skipped' } | Select-Object -First 1
+        if (-not $last) { $last = $runs | Select-Object -First 1 }
+        $inProg =@($runs | Where-Object { "$($_.status)" -eq 'running' -or -not "$($_.finishedUtc)".Trim() }) | Select-Object -First 1
         $en = $true; if ($j.PSObject.Properties['enabled']) { $en = [bool]$j.enabled }
         $iv = 0; if ($j.PSObject.Properties['intervalMinutes']) { $iv = [int]$j.intervalMinutes }
         $next = $null
@@ -4314,7 +4476,10 @@ function Invoke-PimTickJobRun {
     $lockOn = ($UseLocks -and -not $WhatIf)
     if ($lockOn) {
         $want = @($al.job) + $(if ($al.perScope) { @() } else { @($al.areas) })
-        $lr = Request-PimAreaLocks -Owner $Owner -Areas $want -Job $name -RunId $runId -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes -Cap (Get-PimLaneCap)
+        # UPLINK-SLOT-1 (a): an own-slot job (the uplink) never counts against, and never waits for, the lane cap; its
+        # single-writer lock (job:uplink) is still taken, so two uplinks never run at once.
+        $capFor = if ($al.PSObject.Properties['ownSlot'] -and $al.ownSlot) { 0 } else { Get-PimLaneCap }
+        $lr = Request-PimAreaLocks -Owner $Owner -Areas $want -Job $name -RunId $runId -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes -Cap $capFor
         if (-not $lr.ok) {
             if ($lr.conflict) { $out.outcome = 'waiting'; $out.detail = ("waiting for {0} (area {1})" -f ("$($lr.conflict.job)" -replace '^job:', ''), $lr.conflict.area) }
             elseif ($lr.capReached) { $out.outcome = 'slot'; $out.detail = ("waiting for a free slot: {0} runs are in progress (at most {1} side by side)" -f $lr.busy, (Get-PimLaneCap)) }
@@ -4350,6 +4515,19 @@ function Invoke-PimTickJobRun {
         $dsv = $null
         if (-not $coveredBy -and -not $WhatIf -and $Kind -eq 'scheduled' -and "$($Job.type)" -eq 'engine-delta' -and (Get-Command Get-PimDeltaSkipVerdict -ErrorAction SilentlyContinue)) {
             try { $dsv = Get-PimDeltaSkipVerdict -Job $Job -NowUtc $jobStart } catch { $dsv = $null }
+        }
+        # UPLINK-SLOT-1 (b): the first run on a new version reads every step for real once (delta-skip code 'version'). Only
+        # ONE such run goes at a time across executions: it holds the first-run lease (an ordinary lock -- TTL, renewed by
+        # the run's heartbeat, taken over when its execution ended; released with this run's locks below). Another one
+        # WAITS: it stays due and holds no slot, so three executions can never fill the cap with first-run passes.
+        if ($lockOn -and (Test-PimFirstRunLeaseNeeded -Verdict $dsv)) {
+            $fl = Request-PimAreaLocks -Owner $Owner -Areas @(Get-PimFirstRunLeaseArea) -Job $name -RunId $runId -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes -Cap 0
+            if (-not $fl.ok) {
+                if ($fl.conflict) { $out.outcome = 'waiting'; $out.detail = ("waiting for the first run after the update: {0} runs it now (one at a time)" -f ("$($fl.conflict.job)" -replace '^job:', '')) }
+                else { $out.outcome = 'store'; $out.detail = "not started: $($fl.error)" }
+                $out.started = $null
+                return [pscustomobject]$out
+            }
         }
         if ($dsv -and $dsv.skip) {
             $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $true; ran = $false; cadenceSkipped = $true; skipCode = "$($dsv.code)"
@@ -4558,6 +4736,16 @@ function Invoke-PimSchedulerTick {
         try { $Jobs = @(Set-PimJobCadenceOverride -Jobs $Jobs -Overrides (Get-PimJobCadenceOverrides -Jobs $Jobs -NowUtc $now)) }
         catch { Write-Warning "[scheduler] the cadence overrides were not applied: $($_.Exception.Message)" }
     }
+    # UPLINK-SLOT-1 (c): a registered "due now" (the uplink on the first tick on a new version) makes that job due in THIS
+    # tick, whatever its cadence. No resolver registered (the Manager, an offline test) = nothing changes. Never fails a tick.
+    try {
+        $dueNow = @(Get-PimJobDueNowNames -Jobs $Jobs -NowUtc $now)
+        if ($dueNow.Count) {
+            $Jobs = @(Set-PimJobDueNow -Jobs $Jobs -Names $dueNow -NowUtc $now)
+            $__dn = ("[scheduler] due now (a new version, or a commit that applied changes): {0}" -f ($dueNow -join ', '))
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'sched.duenow' -Message $__dn -ForegroundColor Cyan } else { Write-Host $__dn -ForegroundColor Cyan }
+        }
+    } catch { Write-Warning "[scheduler] the due-now check was not applied: $($_.Exception.Message)" }
     # BUG-134: the RESOLVED list is what runs -- check THAT, not the shipped default (once/process).
     Write-PimJobScopeBindingReport -Schedule @($Jobs)
     $results = New-Object System.Collections.Generic.List[object]
@@ -4661,7 +4849,10 @@ function Invoke-PimSchedulerTick {
     }
 
     # (c) SCHEDULED: run due jobs on their cadence; advance next-run.
-    foreach ($j in @($Jobs)) {
+    # UPLINK-SLOT-1: the own-slot jobs (the uplink) go FIRST, so a long engine job of this execution never holds back the
+    # report to Invardia (Get-PimTickJobOrder; $Jobs itself keeps its order).
+    $tickOrder = @($Jobs); try { $tickOrder = @(Get-PimTickJobOrder -Jobs $Jobs) } catch { $tickOrder = @($Jobs) }
+    foreach ($j in $tickOrder) {
         # §80.2: a secondary instance does not even RECORD the jobs outside its scope -- they belong to the main tick (or to
         # the continuous hybrid-ad-sync loop), and a "skipped" row from here would sit in THEIR run history.
         if ($secondary -and -not (Test-PimJobInScope -Type "$($j.type)")) { continue }

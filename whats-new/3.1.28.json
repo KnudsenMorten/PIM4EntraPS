@@ -1,0 +1,7 @@
+{"version":"3.1.28","date":"2026-11-16","type":"fix-only",
+ "summary":"Defender XDR runs on Unified RBAC alone with Microsoft Sentinel optional, Defender assignments no longer fail on Microsoft's redirect, and the coverage report follows your commits.",
+ "new":[],
+ "fixes":[{"title":"Microsoft Sentinel is optional for Defender XDR","text":"Defender XDR is ready when Unified RBAC answers and its workloads are active. Only a role that uses Data Operations permissions waits for Sentinel, as a calm note on that row."},
+          {"title":"No manual confirmation for Defender","text":"PIM Manager recognises from your live Defender roles that Unified RBAC is in use and, when a role already uses Data Operations, that Sentinel is connected. Nothing needs to be pressed."},
+          {"title":"Defender assignments with Microsoft's redirect","text":"Microsoft answers a new Defender XDR role assignment with a redirect. PIM Manager now reads the assignment back instead of reporting the run as failed."},
+          {"title":"Coverage follows your commits","text":"After a commit that changed something, the tenant cache and the coverage report are refreshed within minutes, and the Overview says how old the coverage report is."}]}

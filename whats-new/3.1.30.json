@@ -1,0 +1,5 @@
+{"version":"3.1.30","date":"2026-11-16","type":"fix-only",
+ "summary":"Defender XDR assignments no longer wait for the daily prerequisite check after an update.",
+ "new":[],
+ "fixes":[{"title":"Defender judged from the live roles at once","text":"Each engine run judges the Defender XDR prerequisites from the live Defender roles it already read, so assignments that a new version allows are made on the first run instead of the next day."},
+          {"title":"Prerequisites checked right after an update","text":"The prerequisite check runs once on the first engine run after an update, so a new version's rules show in PIM Manager within minutes."}]}

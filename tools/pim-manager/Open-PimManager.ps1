@@ -799,6 +799,63 @@ function Get-PimManagerAuthPathStatus {
     }
 }
 
+function Get-PimAuthClientFamily {
+    # PURE. SIGNIN-RENEW-2 (c): the browser FAMILY of a User-Agent -- Edge | Chrome | Firefox | other. Never the full string.
+    param([string]$UserAgent)
+    $ua = "$UserAgent"
+    if ($ua -match '\bEdg(e|A|iOS)?/') { return 'Edge' }
+    if ($ua -match '\bFirefox/|\bFxiOS/') { return 'Firefox' }
+    if ($ua -match '\bChrome/|\bCriOS/') { return 'Chrome' }
+    return 'other'
+}
+
+function Get-PimAuthRejectLogLine {
+    <#
+      PURE (state in -State). SIGNIN-RENEW-2 (c) (internal 2026-11-16, owner: "is it a hacker"): the line a REJECTED request
+      logs, saying WHO and FROM WHERE so a person can tell their own stale tab from an attacker:
+        [auth] REJECTED principal [<layer>] user=<name or none> ip=<ip> client=<family> -- <reason>
+      user = X-MS-CLIENT-PRINCIPAL-NAME (only present when Microsoft's sign-in accepted the session cookie), ip = the FIRST
+      X-Forwarded-For entry, client = the browser family. The token is never logged. RATE LIMIT: the same user + layer +
+      reason logs once per 10 minutes; a later line carries the count since the first (e.g. "(x12 since 01:01Z)").
+      Returns '' when the line is held back by the limit.
+    #>
+    param([string]$Layer, [string]$Reason, [string]$PrincipalName = '', [string]$ForwardedFor = '', [string]$RemoteAddress = '',
+          [string]$UserAgent = '', [hashtable]$State, [datetime]$NowUtc = [datetime]::UtcNow, [int]$WindowMinutes = 10)
+    $clean = { param($v, $max) $t = ("$v" -replace '[\x00-\x1F\x7F]', '').Trim(); if ($t.Length -gt $max) { $t = $t.Substring(0, $max) }; $t }
+    $user = & $clean $PrincipalName 128; if (-not $user) { $user = 'none' }
+    $ip = & $clean ((("$ForwardedFor" -split ',')[0])) 64
+    if ($ip -notmatch '^[0-9A-Fa-f:.\[\]]+$') { $ip = '' }
+    if (-not $ip) { $ip = & $clean $RemoteAddress 64; if ($ip -notmatch '^[0-9A-Fa-f:.\[\]]+$') { $ip = '' } }
+    if (-not $ip) { $ip = 'unknown' }
+    $client = Get-PimAuthClientFamily -UserAgent $UserAgent
+    $why = & $clean $Reason 600
+    $line = "  [auth] REJECTED principal [{0}] user={1} ip={2} client={3} -- {4}" -f "$Layer", $user, $ip, $client, $why
+    if ($null -eq $State) { return $line }
+    $now = $NowUtc.ToUniversalTime()
+    $key = ("{0}|{1}|{2}" -f $user, "$Layer", $why).ToLowerInvariant()
+    # bounded: entries quiet for a day are dropped once the table grows
+    if ($State.Count -gt 500) { foreach ($k in @($State.Keys)) { if (($now - [datetime]$State[$k].lastUtc).TotalHours -gt 24) { $State.Remove($k) } } }
+    if (-not $State.ContainsKey($key)) {
+        $State[$key] = @{ firstUtc = $now; lastLoggedUtc = $now; lastUtc = $now; count = 1 }
+        return $line
+    }
+    $e = $State[$key]
+    $e.count = [int]$e.count + 1; $e.lastUtc = $now
+    if (($now - [datetime]$e.lastLoggedUtc).TotalMinutes -lt $WindowMinutes) { return '' }
+    $e.lastLoggedUtc = $now
+    return ("{0} (x{1} since {2:HH:mm}Z)" -f $line, [int]$e.count, ([datetime]$e.firstUtc))
+}
+
+function Write-PimAuthRejected {
+    # SIGNIN-RENEW-2 (c): log ONE rejected request (who + from where, rate-limited); never the token.
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request, [string]$Layer, [string]$Reason)
+    if (-not ($script:PimAuthRejectLog -is [hashtable])) { $script:PimAuthRejectLog = @{} }
+    $ra = ''; try { if ($Request.RemoteEndPoint) { $ra = "$($Request.RemoteEndPoint.Address)" } } catch { $ra = '' }
+    $l = Get-PimAuthRejectLogLine -Layer $Layer -Reason $Reason -PrincipalName "$($Request.Headers['X-MS-CLIENT-PRINCIPAL-NAME'])" `
+            -ForwardedFor "$($Request.Headers['X-Forwarded-For'])" -RemoteAddress $ra -UserAgent "$($Request.UserAgent)" -State $script:PimAuthRejectLog
+    if ($l) { Write-Host $l -ForegroundColor Red }
+}
+
 function Get-PimEasyAuthPrincipal {
     # The Entra-authenticated caller, VERIFIED -- not merely asserted by a header (SEC-01).
     #
@@ -848,7 +905,7 @@ function Get-PimEasyAuthPrincipal {
                 -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer `
                 -RequireFrontAccessToken ("$env:PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN".Trim() -match '^(1|true|yes|on)$')
         if ($d.trusted) { $script:CurrentRequestOid = "$($d.oid)"; return "$($d.identity)" }
-        Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
+        Write-PimAuthRejected -Request $Request -Layer "$($d.layer)" -Reason "$($d.reason)"
         return ''
     }
     # AUTH-MODERN-1 / SIGNIN-TOKEN-LIFETIME-1 (framework decision c5704c10): the platform's sign-in is layer 1; layer 2 is the
@@ -879,8 +936,8 @@ function Get-PimEasyAuthPrincipal {
         return "$($d.identity)"
     }
     # Rejections are security events -- never silent (BUG-01 lesson: a guard that trips
-    # without telling anyone reads as a clean run).
-    Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
+    # without telling anyone reads as a clean run). SIGNIN-RENEW-2: with who + from where, once per 10 minutes per cause.
+    Write-PimAuthRejected -Request $Request -Layer "$($d.layer)" -Reason "$($d.reason)"
     return ''
 }
 
@@ -4747,7 +4804,7 @@ function Start-PimManagerTickNow {
     if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) {
         try {
             $lm = (Get-PimSchedulerLocksRaw).Map
-            $busy = @(Get-PimLiveLockOwners -Map $lm -NowUtc $now)
+            $busy = @(Get-PimLiveLockOwners -Map $lm -NowUtc $now -SlotsOnly)   # UPLINK-SLOT-1: an uplink run takes no slot
             $cap = Get-PimLaneCap
             if ($busy.Count -ge $cap) {
                 return [pscustomobject]@{ started = $false; reason = 'busy'; detail = "$($busy.Count) engine runs are in progress (at most $cap side by side); one of them starts this as soon as it finishes its current job" }
@@ -8339,6 +8396,17 @@ function Invoke-PimManagerCsvPut {
     # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
     # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
     if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
+    # COVERAGE-AFTER-COMMIT-1 (owner 2026-11-16): a commit that changed >= 1 row asks for a fresh tenant cache + coverage report
+    # on the following ticks (one setting write: done long before the started container's tick reads it), so Discovery & gaps
+    # and the Overview do not show the gaps just committed for up to 12 hours. 0 changed rows = nothing requested. Best
+    # effort: never fails the commit.
+    $__covN = $diff.adds.Count + $diff.removes.Count + $diff.modifies.Count
+    if ($__covN -gt 0 -and (Get-Command Request-PimCoverageRefreshAfterCommit -ErrorAction SilentlyContinue)) {
+        try {
+            $__covReq = Request-PimCoverageRefreshAfterCommit -Applied $__covN -ConnectionString "$($script:PimSqlCs)" -Reason "commit:$base"
+            if (-not $__covReq.ok) { Write-Warning "  [coverage] the coverage refresh after this commit was not requested: $($__covReq.error)" }
+        } catch { Write-Warning "  [coverage] the coverage refresh after this commit was not requested: $($_.Exception.Message)" }
+    }
 
     # BUG-200: hand back the hash of what is stored NOW, so a follow-up commit from the same page is
     # checked against its own result rather than against the pre-commit read.

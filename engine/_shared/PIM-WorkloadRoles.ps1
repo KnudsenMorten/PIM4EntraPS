@@ -143,7 +143,7 @@ function ConvertTo-PimDefenderDesiredBinding {
     $gt = Get-PimWlRoleField -Row $Row -Names @('GroupTag')
     $gn = ''
     if ($gt -and $TagToName -and $TagToName.ContainsKey($gt.ToLowerInvariant())) { $gn = "$($TagToName[$gt.ToLowerInvariant()])" }
-    return [pscustomobject]@{
+    $o = [pscustomobject]@{
         GroupTag           = $gt
         GroupName          = $gn
         RoleDefinitionName = (Resolve-PimWorkloadBindingRoleName -Row $Row -TagToName $TagToName)
@@ -154,6 +154,11 @@ function ConvertTo-PimDefenderDesiredBinding {
         Action             = 'Assign'
         SourceEntity       = $SourceEntity
     }
+    # WORKLOAD-DUPKEY-1: the live role's id when the row names one -- a name several live roles share is then bound by this
+    # id (Resolve-PimDefenderRoleById), never refused and never guessed. Only when present (today's shape otherwise).
+    $rid = Get-PimWlRoleField -Row $Row -Names @('RoleDefinitionId', 'RoleId')
+    if ($rid) { $o | Add-Member -NotePropertyName RoleDefinitionId -NotePropertyValue $rid }
+    return $o
 }
 
 function Get-PimDefenderDesiredBindings {
@@ -443,6 +448,15 @@ function Get-PimDefenderAmbiguousRoleNames {
     return $h
 }
 
+function Resolve-PimDefenderRoleById {
+    # PURE over a catalog. WORKLOAD-DUPKEY-1: the live role with this id, or @() when the catalog holds none.
+    param([AllowNull()][object]$Catalog, [AllowNull()][string]$RoleId)
+    $k = "$RoleId".Trim().ToLowerInvariant()
+    if (-not $k -or -not $Catalog -or -not $Catalog.byId) { return @() }
+    if ($Catalog.byId.ContainsKey($k)) { return @($Catalog.byId[$k]) }
+    return @()
+}
+
 function Get-PimDefenderLiveAssignments {
     # LIVE. Every Defender XDR role assignment: { ok; error; items=@({ id; displayName; roleDefinitionId; principals; appScopeIds }) }.
     $items = New-Object System.Collections.Generic.List[object]
@@ -631,12 +645,15 @@ function Resolve-PimDefenderSpecRole {
     #>
     #   -DataSources / -LiveDataSources (optional): the spec's and the live assignment's appScopeIds -- only printed.
     #   -Warnings (optional): a list the report-only lines are added to (the scope's warnings).
+    #   -RoleId (optional, WORKLOAD-DUPKEY-1): the row's stored role id -- the role is then found by THAT id only (a shared
+    #   name is no longer ambiguous; an id the catalog does not hold = missing).
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string[]]$Actions, [AllowNull()][object]$Catalog,
           [AllowNull()][object[]]$DataSources, [AllowNull()][object[]]$LiveDataSources, [AllowNull()][System.Collections.IList]$Warnings,
-          [switch]$Assigned)
+          [switch]$Assigned, [string]$RoleId = '')
     $cat = if ($Catalog) { $Catalog } else { Get-PimDefenderRoleCatalog }
     if (-not $cat.ok) { throw "DefenderXdrRoles: the Defender XDR role catalog could not be read -- the role '$Name' was not checked: $($cat.error)" }
     $hits = @(); if ($cat.byName.ContainsKey($Name.ToLowerInvariant())) { $hits = @($cat.byName[$Name.ToLowerInvariant()]) }
+    if ("$RoleId".Trim()) { $hits = @(Resolve-PimDefenderRoleById -Catalog $cat -RoleId $RoleId) }
     $__say = { param($m) Write-Warning "  [DefenderXdrRoles] $m"; if ($null -ne $Warnings) { [void]$Warnings.Add($m) } }
     if ($hits.Count -gt 1) {
         throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) -- PIM will not pick one. Rename or delete the extra role in the Defender portal (Settings > Permissions > Roles), then the next run binds the one that is left." -f $hits.Count, $Name, (@($hits | ForEach-Object { $_.id }) -join ', '))
@@ -747,13 +764,15 @@ function Get-PimEngineWorkloadPrereqState {
     # process; a long-lived host drops it with Clear-PimWorkloadRoleCaches). -Force re-reads.
     [CmdletBinding()] param([switch]$Force)
     if (-not $Force -and $script:PimEngineWorkloadPrereqs) { return $script:PimEngineWorkloadPrereqs }
-    $st = [pscustomobject]@{ view = @(); storeError = '' }
+    # stored = the setting as read (DEFENDER-INFER-AT-RUN-1 re-judges DefenderXdr from it; never written back)
+    $st = [pscustomobject]@{ view = @(); storeError = ''; stored = $null }
     if (-not (Get-Command Get-PimWorkloadPrereqView -ErrorAction SilentlyContinue)) {
         $st.storeError = 'the prerequisite library (PIM-WorkloadPrereqs.ps1) is not loaded'
     } else {
         $r = Read-PimEngineWorkloadPrereqsSetting
         if (-not $r.ok) { $st.storeError = "$($r.error)" }
         else {
+            $st.stored = $r.stored
             try { $st.view = @(Get-PimWorkloadPrereqView -Stored $r.stored -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays)) }
             catch { $st.storeError = "pim.Settings['WorkloadPrereqs'] could not be judged: $($_.Exception.Message)" }
         }
@@ -764,7 +783,9 @@ function Get-PimEngineWorkloadPrereqState {
 
 function Get-PimEngineWorkloadAssignmentGate {
     # Get-PimWorkloadAssignmentGate over this run's stored state. EntraRoles and '' are never held (not even unreadable).
-    param([AllowEmptyString()][string]$Workload)
+    # -DataOperations (DEFENDER-DATAOPS-SCOPE-1): the assignment's role uses microsoft.xdr/dataops/ permissions.
+    # -Catalog (DEFENDER-INFER-AT-RUN-1): the live Defender role catalog this run already read; else the run's cached one.
+    param([AllowEmptyString()][string]$Workload, [switch]$DataOperations, [AllowNull()][object]$Catalog)
     if (-not "$Workload".Trim() -or -not (Get-Command Get-PimWorkloadAssignmentGate -ErrorAction SilentlyContinue)) {
         if ("$Workload".Trim() -and "$Workload".Trim() -ne 'EntraRoles') {
             # The rule itself is missing: fail closed, the same as an unreadable store.
@@ -773,7 +794,47 @@ function Get-PimEngineWorkloadAssignmentGate {
         return [pscustomobject]@{ workload = "$Workload"; held = $false; state = ''; reason = ''; reasons = @(); command = '' }
     }
     $s = Get-PimEngineWorkloadPrereqState
-    return [pscustomobject](Get-PimWorkloadAssignmentGate -Workload $Workload -View @($s.view) -StoreError "$($s.storeError)")
+    $view = @($s.view)
+    if ("$Workload".Trim() -eq 'DefenderXdr') { $view = @(Get-PimEngineDefenderInferredView -State $s -Catalog $Catalog) }
+    return [pscustomobject](Get-PimWorkloadAssignmentGate -Workload $Workload -View $view -StoreError "$($s.storeError)" -DataOperations:$DataOperations)
+}
+
+function ConvertTo-PimDefenderRoleDefinitionShape {
+    # PURE. A Get-PimDefenderRoleCatalog role { id; name; isBuiltIn; actions } in the Graph roleDefinitions shape the inference
+    # rule reads (displayName; rolePermissions.allowedResourceActions).
+    param([object[]]$Roles = @())
+    @(@($Roles) | Where-Object { $null -ne $_ } | ForEach-Object {
+        [pscustomobject]@{ id = "$($_.id)"; displayName = "$($_.name)"; isBuiltIn = [bool]$_.isBuiltIn; rolePermissions = @([pscustomobject]@{ allowedResourceActions = @($_.actions) }) } })
+}
+
+function Get-PimEngineDefenderInferredView {
+    <#
+      DEFENDER-INFER-AT-RUN-1 (internal 2026-11-16, owner: "upd it at <customer> so it clears", "keep pushing"). The judged
+      view with DefenderXdr RE-JUDGED from the live Defender roles this run already read (-Catalog, else the run's cached
+      Get-PimDefenderRoleCatalog -- never a new live read here): the stored record's checks go through the ONE inference rule
+      (Get-PimDefenderInferredChecks), so a record the daily job wrote before a new rule applies at once. The stored record is
+      NEVER written -- only this decision uses it. No catalog / a failed one / no stored DefenderXdr checks = the stored view.
+      Cached per catalog object for the run (Clear-PimWorkloadRoleCaches drops it).
+    #>
+    param([Parameter(Mandatory)][object]$State, [AllowNull()][object]$Catalog)
+    $base = @($State.view)
+    if ("$($State.storeError)".Trim() -or $null -eq $State.stored -or -not (Get-Command Get-PimDefenderInferredChecks -ErrorAction SilentlyContinue)) { return $base }
+    $cat = $Catalog; if (-not $cat) { $cat = $script:PimDefenderRoleCatalog }
+    if (-not $cat -or ($cat.PSObject.Properties['ok'] -and -not [bool]$cat.ok) -or -not @($cat.roles).Count) { return $base }
+    if ($script:PimEngineDefenderInferred -and [object]::ReferenceEquals($script:PimEngineDefenderInferred.catalog, $cat) -and [object]::ReferenceEquals($script:PimEngineDefenderInferred.state, $State)) { return @($script:PimEngineDefenderInferred.view) }
+    $view = $base
+    try {
+        $rec = Get-PimWorkloadPrereqStoredRecord -Stored $State.stored -Workload 'DefenderXdr'
+        $checks = @(@(Get-PimWorkloadPrereqRecordField -Object $rec -Name 'checks') | Where-Object { $_ })
+        if ($rec -and $checks.Count) {
+            $newChecks = @(Get-PimDefenderInferredChecks -Checks $checks -RoleDefinitions @(ConvertTo-PimDefenderRoleDefinitionShape -Roles @($cat.roles)))
+            $rec2 = Copy-PimWorkloadPrereqCheck -Check $rec -Set @{ workload = 'DefenderXdr'; checks = $newChecks }
+            $stored2 = Merge-PimWorkloadPrereqsSetting -Current $State.stored -Result $rec2
+            $view = @(Get-PimWorkloadPrereqView -Stored $stored2 -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays))
+        }
+    } catch { $view = $base }   # a re-judgement that cannot be made = the stored verdict (never looser)
+    $script:PimEngineDefenderInferred = @{ catalog = $cat; state = $State; view = @($view) }
+    return @($view)
 }
 
 function Get-PimWorkloadAssignmentHold {
@@ -787,8 +848,30 @@ function Get-PimWorkloadAssignmentHold {
     #>
     param([AllowEmptyString()][string]$Workload, [hashtable]$Context, [string]$What = '', [object]$Item, [string]$Scope = 'engine')
     if ($null -ne $Item -and $Item.PSObject -and $Item.PSObject.Properties['typeChange'] -and $Item.typeChange) { return $null }
-    $g = Get-PimEngineWorkloadAssignmentGate -Workload $Workload
+    # DEFENDER-DATAOPS-SCOPE-1 (internal 2026-11-16, owner decision "Confirm (1) + fix product"): a Defender assignment
+    # waits for the Data Operations (Sentinel) prerequisites ONLY when its role uses microsoft.xdr/dataops/ permissions
+    # (Test-PimDefenderRowUsesDataOperations: the row's spec, else the live role, else its name, else fail closed = $true).
+    # Every other workload: $true -- it has no Data Operations checks, so the verdict is unchanged.
+    $useDo = $true
+    $cat = $null
+    if ($Context -and $Context['defRoleCatalog']) { $cat = $Context['defRoleCatalog'] } elseif ($script:PimDefenderRoleCatalog) { $cat = $script:PimDefenderRoleCatalog }
+    if ("$Workload".Trim() -eq 'DefenderXdr' -and (Get-Command Test-PimDefenderRowUsesDataOperations -ErrorAction SilentlyContinue)) {
+        $row = $null
+        if ($Item -is [System.Collections.IDictionary]) { if ($Item.Contains('desired')) { $row = $Item['desired'] } }
+        elseif ($null -ne $Item -and $Item.PSObject.Properties['desired']) { $row = $Item.desired }
+        if ($null -ne $row) { $useDo = [bool](Test-PimDefenderRowUsesDataOperations -Row $row -Catalog $cat) }
+    }
+    # DEFENDER-INFER-AT-RUN-1: the gate re-judges DefenderXdr from the same live catalog (Get-PimEngineDefenderInferredView)
+    $g = Get-PimEngineWorkloadAssignmentGate -Workload $Workload -DataOperations:$useDo -Catalog $cat
     if (-not $g.held) { return $null }
+    if ($g.PSObject.Properties['dataOpsOnly'] -and [bool]$g.dataOpsOnly) {   # $g is a [pscustomobject] (Get-PimEngineWorkloadAssignmentGate)
+        # DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "sentinel is optional"): calm and specific, a warning on this row
+        # only (the scope does not fail).
+        $msg = ("{0} {1}" -f $What, $g.reason).Trim()
+        Write-Warning "  [$Scope] $msg"
+        if ($Context -and $Context['__pimScopeWarnings'] -is [System.Collections.Generic.List[string]]) { $Context['__pimScopeWarnings'].Add($msg) }
+        return [pscustomobject]@{ pimApplied = $false; held = $true; workload = "$($g.workload)"; state = 'dataOps'; reason = $msg }
+    }
     $msg = ("HELD: {0} is NOT assigned -- held: {1} prerequisites not green ({2}) -- run Initialize-PimWorkloadPrereqs.ps1 -Workload {1}. {3}. The group itself is created; the assignment is made on the first run after the prerequisites are green." -f $What, $g.workload, $g.state, (@($g.reasons) -join '; '))
     Write-Warning "  [$Scope] $msg"
     if ($Context -and $Context['__pimScopeWarnings'] -is [System.Collections.Generic.List[string]]) { $Context['__pimScopeWarnings'].Add($msg) }
@@ -887,6 +970,25 @@ function Get-PimWorkloadLiveOrphanFindings {
         if ($heldBy.ContainsKey($gid)) { continue }
         if ($tag -and $roleMissingTags.ContainsKey($tag.ToLowerInvariant())) { continue }   # role-missing (section 3), not an orphan
         $rk = @(); if ($tag -and $RelatedKeysByTag.ContainsKey($tag.ToLowerInvariant())) { $rk = @($RelatedKeysByTag[$tag.ToLowerInvariant()]) }
+        # DEFENDER-SENTINEL-OPTIONAL-1: with the core green and the optional Data Operations group not set up
+        # (HeldGate.dataOpsHeld), a Data Operations group (by its name -- Test-PimDefenderRowUsesDataOperations) is waiting too.
+        # The group's own BINDING row (spec / role name) decides; a name-only stand-in when there is none.
+        $doWait = $false
+        if ($HeldGate -and -not $HeldGate.held -and (Get-Command Get-PimWorkloadPrereqRecordField -ErrorAction SilentlyContinue) -and [bool](Get-PimWorkloadPrereqRecordField -Object $HeldGate -Name 'dataOpsHeld') -and
+            (Get-Command Test-PimDefenderRowUsesDataOperations -ErrorAction SilentlyContinue)) {
+            $bRow = $null
+            if ($tag) { $bRow = @(@($SpecBindings) | Where-Object { $null -ne $_ -and (Get-PimWlRoleField -Row $_ -Names @('GroupTag')) -ieq $tag })[0] }
+            if ($null -eq $bRow) { $bRow = [pscustomobject]@{ RoleDefinitionName = $gn; GroupName = $gn; GroupTag = $tag } }
+            $doWait = [bool](Test-PimDefenderRowUsesDataOperations -Row $bRow -Catalog $Catalog)
+        }
+        if ($doWait -and $tag -and $BoundTags -and $BoundTags.ContainsKey($tag.ToLowerInvariant())) {
+            $out.Add([pscustomobject]@{
+                type = 'warning'; kind = 'held-prerequisites'; key = ("held-prerequisites|$tag").ToLowerInvariant(); group = $gn; role = ''
+                label = ("'{0}' (tag '{1}') holds no live {2} role yet -- its assignment {3}" -f $gn, $tag, $area, (Get-PimDefenderDataOpsWaitText))
+                relatedKeys = $rk
+            })
+            continue
+        }
         if ($HeldGate -and $HeldGate.held -and $tag -and $BoundTags -and $BoundTags.ContainsKey($tag.ToLowerInvariant())) {
             $out.Add([pscustomobject]@{
                 type = 'warning'; kind = 'held-prerequisites'; key = ("held-prerequisites|$tag").ToLowerInvariant(); group = $gn; role = ''
@@ -1296,4 +1398,5 @@ function Clear-PimWorkloadRoleCaches {
     # is a fresh process).
     $script:PimDefenderRoleCatalog = $null
     $script:PimEngineWorkloadPrereqs = $null
+    $script:PimEngineDefenderInferred = $null   # DEFENDER-INFER-AT-RUN-1
 }

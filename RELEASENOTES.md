@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.30 -- 2026-11-16
+
+- Each engine run judges the Defender XDR prerequisites from the live Defender roles it already read, so assignments a new version allows are made on the first run, and the prerequisite check runs once right after an update.
+
+## 3.1.29 -- 2026-11-16
+
+- An open Manager page renews its sign-in before it ends and stops calling when renewal is not possible, a refused call is logged with the signed-in user, address and browser type (rate-limited, never the token), and a row whose role was deleted in the workload after PIM Manager had assigned it is a warning instead of a failure on every run.
+
+## 3.1.28 -- 2026-11-16
+
+- Defender XDR runs on Unified RBAC alone with Microsoft Sentinel optional (only Data Operations roles wait for it), Unified RBAC and Sentinel are recognised from the live Defender roles so nothing has to be confirmed by hand, a Defender assignment answered with Microsoft's redirect is read back instead of failing, and a commit that changed something refreshes the tenant cache and the coverage report.
+
+## 3.1.27 -- 2026-11-16
+
+- Each update applies the sign-in standard itself (offline_access sessions that renew, the retired sign-in front cleaned up) and AI chat settings; the report to support has its own slot and goes out right after an update; discovery gives two same-named roles their own keys; Defender XDR assignments carry the data-source scope Defender requires; the start-up token check also refuses an expired token; a refused change is judged once; the request API app is pinned by id.
+
 ## 3.1.26 -- 2026-11-15
 
 - Security release: every sign-in token is checked with Microsoft's own token library (Microsoft.IdentityModel 8.23.0), which PIM Manager tests at every start before it serves a request; the access request API accepts only Microsoft Entra application tokens with an app role, and API keys are removed (allow-listed applications get the role automatically); the page renews your sign-in before it ends, with Sign in again or Sign in with another account when needed; Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job; the web app holds no Key Vault role, and the break-glass passphrase is checked against a protected verifier in the PIM database; discovery mails are marked as information, not as warnings; Pro: chat in the Manager, answered by your own Azure OpenAI deployment without any key, under your own role (changes are only prepared, off by default).

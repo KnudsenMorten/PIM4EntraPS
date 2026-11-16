@@ -2820,12 +2820,12 @@
   // they have no reason to open.
   try { refreshQueueBadge(); } catch (e) { }
   // The queue is SHARED -- another operator's revoke must show up here too, without a reload.
-  try { setInterval(() => { if (!document.hidden) { refreshQueueBadge(); } }, 60000); } catch (e) { }
+  try { setInterval(() => { if (!document.hidden && !pimAuthHalted) { refreshQueueBadge(); } }, 60000); } catch (e) { }
   // 2026-09-21 (operator: "it shows as green, but errors exist - we must have count here of errors (red only)"): the
   // Engine logs & errors menu item carries the number of failed runs nobody has acknowledged -- red only, no
   // overdue/held counts, so a number there always means "something failed".
   try { refreshEngineErrBadge(); } catch (e) { }
-  try { setInterval(() => { if (!document.hidden) { refreshEngineErrBadge(); } }, 60000); } catch (e) { }
+  try { setInterval(() => { if (!document.hidden && !pimAuthHalted) { refreshEngineErrBadge(); } }, 60000); } catch (e) { }
   document.querySelectorAll('.tab').forEach(t => {
     t.onclick = () => switchTab(t.dataset.tab);
   });
@@ -5163,6 +5163,17 @@
     if (/[zZ]$/.test(s) || /T.*[+\-]\d{2}:?\d{2}$/.test(s)) return s;
     return s + 'Z';
   }
+  // COVERAGE-AFTER-COMMIT-1 (owner 2026-11-16, "and these gaps are old"): the coverage attention line says how old the report
+  // is once it is older than 1 hour -- ' (computed 7 h ago)' / ' (computed 3 days ago)'; a fresh, missing or unreadable
+  // stamp = ''. nowMs: test seam (default Date.now()).
+  function homeCoverageAgeSuffix(iso, nowMs) {
+    if (!iso || !String(iso).trim()) return '';
+    const d = new Date(pimAsUtc(iso)); if (isNaN(d.getTime())) return '';
+    const age = (typeof nowMs === 'number' ? nowMs : Date.now()) - d.getTime();
+    if (!(age >= 3600000)) return '';
+    const h = Math.floor(age / 3600000);
+    return h < 48 ? ' (computed ' + h + ' h ago)' : ' (computed ' + Math.floor(h / 24) + ' days ago)';
+  }
   function homeFmtWhen(iso) {
     if (!iso || !String(iso).trim()) return '';
     const d = new Date(pimAsUtc(iso)); if (isNaN(d.getTime())) return String(iso);
@@ -5794,7 +5805,7 @@
       const parts = [[gc.gap, 'gap(s)'], [gc.orphanGroup, 'orphan group(s)'], [gc.unmanagedBinding, 'unmanaged binding(s)'],
                      [gc.wrongPermissions, 'wrong permission(s)'], [gc.unmanagedPrivilegedGroup, 'unmanaged privileged group(s)']];
       const partStr = parts.filter(p => (Number(p[0]) || 0) > 0).map(p => (Number(p[0]) || 0) + ' ' + p[1]).join(', ');
-      if (totalGaps > 0) { homeAddAttn('amber', 'Coverage check: ' + partStr + ' &mdash; see Discovery &amp; gaps', 'coverage'); }
+      if (totalGaps > 0) { homeAddAttn('amber', 'Coverage check: ' + partStr + homeCoverageAgeSuffix(gp.computedUtc) + ' &mdash; see Discovery &amp; gaps', 'coverage'); }
       h += homeTile({
         title: 'Coverage gaps',
         value: totalGaps,
@@ -13374,7 +13385,8 @@
   // The unit's identity in pending rows: its binding row (the last row of the unit).
   function covUnitBinding(u) { const rs = asList(u && u.rows); return rs.length ? rs[rs.length - 1] : null; }
   function covRowMatches(a, b) {
-    const f = ['GroupTag', 'RoleDefinitionName', 'RoleName', 'AzScope', 'AzScopePermission', 'Scope', 'Workload', 'AUDisplayName'];   // AUDisplayName: an administrative unit's definition is the whole unit (100.100)
+    // WORKLOAD-DUPKEY-1: RoleDefinitionId too -- two live roles of one name are two different bindings.
+    const f = ['GroupTag', 'RoleDefinitionName', 'RoleName', 'RoleDefinitionId', 'AzScope', 'AzScopePermission', 'Scope', 'Workload', 'AUDisplayName'];   // AUDisplayName: an administrative unit's definition is the whole unit (100.100)
     return f.every(k => !(k in b) || String(a[k] == null ? '' : a[k]).trim().toLowerCase() === String(b[k] == null ? '' : b[k]).trim().toLowerCase());
   }
   // Already staged (this session) or already present in the pending rows of its binding entity.
@@ -13400,7 +13412,9 @@
   function covSelectedVisibleUnits(d) {
     const out = [];
     // TRUST-1 round 5 G4: each unit knows the coverage row it came from (_srcKey), so its staged rows carry it to the commit
-    covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => { if (COV_SEL.has(u.id) && !covUnitStaged(u)) { u._srcKey = 'coverage:' + String(r.key || ''); out.push(u); } }));
+    // WORKLOAD-DUPKEY-1: one unit id is staged ONCE per pass, whichever rows list it.
+    const seen = new Set();
+    covVisibleRows(d).forEach(r => covUnitsOf(r).forEach(u => { if (COV_SEL.has(u.id) && !covUnitStaged(u) && !seen.has(u.id)) { seen.add(u.id); u._srcKey = 'coverage:' + String(r.key || ''); out.push(u); } }));
     return out;
   }
 
@@ -13429,6 +13443,10 @@
     // 100.100: the explanation is under "What this is & how to use it" (TAB_GUIDANCE.coverage), not a paragraph here.
     // One plain block per workload that was NOT READ (what is missing + the steps), filled below.
     h.push('<div id="covNotRead"></div>');
+    // WORKLOAD-DUPKEY-1 (d): calm information lines a source carries (e.g. two Defender XDR roles share a name) -- not a
+    // status, not counted; just said.
+    { const infos = [].concat.apply([], asList(d.sources).map(s => asList(s && s.info).map(t => String(t || '').trim()).filter(Boolean)));
+      if (infos.length && !d.snapshotMissing) h.push('<div id="covInfo" style="color:#57606a;font-size:12px;margin-bottom:8px;">' + infos.map(t => '<div class="covInfoLine">&#9432; ' + escapeHtml(t) + '</div>').join('') + '</div>'); }
     // COVERAGE-PREIMPORT-1: an install with no definitions yet (before its import) -- one calm line; no orphan alert is mailed.
     if (d.noDefinitions && !d.snapshotMissing) h.push('<div id="covNoDefs" style="color:#57606a;font-size:12px;margin-bottom:8px;">' + esc(String(d.noDefinitionsNote || '')) + '</div>');
     // PIM 100.142 (4): Power BI workspaces listed while PIM Manager cannot reach Power BI's admin API yet -> one calm line + command.
@@ -13724,11 +13742,62 @@
     return keys.filter(k => row[k] != null && String(row[k]).trim()).map(k => k + '=' + String(row[k])).join(' · ');
   }
 
+  // WORKLOAD-DUPKEY-1 (owner's commit at internal 2026-11-15: "... is used by #34 and #35"): the approve path never stages
+  // two binding rows with one key. Before a unit is staged, its binding row's store key (pendingRowKey) is looked up in the
+  // staged + stored rows of its entity:
+  //   * free                                  -> the unit as it is
+  //   * taken by the SAME live role            -> 'merge': nothing is staged (it is already there)
+  //   * taken by ANOTHER role, the row has an id -> the unit's tag (and group name) get the role id's first 8 characters
+  //   * taken by another role, no id            -> refused with the key named (never a duplicate)
+  function covTagWithSuffix(tag, roleId) {
+    const d = String(roleId || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
+    const t = String(tag || '');
+    if (!d) return t;
+    const m = t.match(/^(.+)(-L\d)((?:-[^-]+)*)$/);   // the engine's Add-PimCoverageTagDisambiguator: just before the last level
+    return m ? (m[1] + '-' + d + m[2] + m[3]) : (t + '-' + d);
+  }
+  function covSameLiveRole(a, b) {
+    const s = (v) => String(v == null ? '' : v).trim().toLowerCase();
+    if (s(a.Workload) !== s(b.Workload) || s(a.RoleName || a.RoleDefinitionName) !== s(b.RoleName || b.RoleDefinitionName)) return false;
+    const ia = s(a.RoleDefinitionId), ib = s(b.RoleDefinitionId);
+    return ia === ib;   // both blank (one role of that name) or the same id; one id and one blank is not proven the same role
+  }
+  async function covUnitKeyPlan(u) {
+    const b = covUnitBinding(u);
+    if (!b || !b.entity || !b.row || /^PIM-Definitions-/.test(b.entity)) return { action: 'stage', rows: asList(u && u.rows) };
+    let data = null;
+    try { data = await loadCsv(b.entity); } catch (e) { if (!e || e.status !== 404) throw new Error('could not read ' + b.entity + ' -- nothing was staged. ' + ((e && e.message) || '')); }
+    ensurePending(b.entity, (data && Array.isArray(data.header) && data.header.length) ? data.header : Object.keys(b.row), (data && Array.isArray(data.rows)) ? data.rows : []);
+    const have = pendingFinalRows(b.entity) || [];
+    const keyOf = (row) => pendingRowKey(b.entity, row);
+    const k0 = keyOf(b.row);
+    const hit = k0 ? have.find(r => keyOf(r) === k0) : null;
+    if (!hit) return { action: 'stage', rows: asList(u.rows) };
+    if (covSameLiveRole(hit, b.row)) return { action: 'merge', rows: [] };
+    const rid = String(b.row.RoleDefinitionId || '').trim();
+    if (!rid) throw new Error('the key ' + k0 + ' is already used by another ' + b.entity + ' row (' + String(hit.RoleName || hit.RoleDefinitionName || '') + ') -- nothing was staged for this gap');
+    const oldTag = String(b.row.GroupTag || ''), newTag = covTagWithSuffix(oldTag, rid);
+    const rows = asList(u.rows).map(x => {
+      const row = Object.assign({}, x.row);
+      if (String(row.GroupTag || '') === oldTag) {
+        row.GroupTag = newTag;
+        if (row.GroupName) row.GroupName = String(row.GroupName).indexOf(oldTag) >= 0 ? String(row.GroupName).replace(oldTag, newTag) : (String(row.GroupName) + '-' + rid.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8));
+      }
+      return { entity: x.entity, row };
+    });
+    const nb = rows[rows.length - 1];
+    if (have.some(r => keyOf(r) === keyOf(nb.row))) throw new Error('the key ' + k0 + ' and ' + keyOf(nb.row) + ' are both already used -- nothing was staged for this gap');
+    return { action: 'stage', rows };
+  }
+
   // Stage ONE unit whole: every row goes in, or none does (a failure takes back what this unit already staged).
   async function covStageUnit(u) {
     const done = [];
+    // WORKLOAD-DUPKEY-1: never a second row with one key (merge, disambiguate or refuse -- covUnitKeyPlan).
+    const plan = await covUnitKeyPlan(u);
+    if (plan.action === 'merge') return 0;
     try {
-      for (const x of asList(u.rows)) {
+      for (const x of asList(plan.rows)) {
         if (!x || !x.entity || !x.row) continue;
         // A definition whose group is already in the rows (another unit staged it, or it exists) is not staged twice.
         // 100.100: an administrative unit's definition has no GroupTag -- it is known by its AdministrativeUnitTag
@@ -13765,6 +13834,8 @@
     if (btn) btn.disabled = true;
     let okUnits = 0, rows = 0; const failed = [];
     for (const u of units) {
+      // WORKLOAD-DUPKEY-1: an earlier unit of this pass may have staged the very same binding -- approving it twice is one row.
+      if (covUnitStaged(u)) { COV_STAGED.add(u.id); COV_SEL.delete(u.id); okUnits++; continue; }
       try { rows += await covStageUnit(u); okUnits++; COV_STAGED.add(u.id); COV_SEL.delete(u.id); }
       catch (e) { failed.push((u.groupName || u.id) + ': ' + (e && e.message ? e.message : e)); }
     }
@@ -22210,13 +22281,62 @@
   // The page token travels in X-PIM-Token only -- 'Authorization' is never set by this page.
   let pimAuthMode = '';   // '' not known yet | 'builtin' (/.auth/me answered) | 'other' (it did not: the front, or local)
   let _pimRefreshing = null;
+  // SIGNIN-RENEW-2 (internal 2026-11-16, owner: "is it a hacker"). An open tab whose access token had ended -- and whose
+  // renewal failed -- kept polling the API once a minute, and every call was logged as REJECTED. When a renewal FAILS the
+  // page now HALTS: the sign-in bar is shown once and no API call is sent (timers or otherwise) until the person acts
+  // (a click or a key press clears the halt for that action; a failing renewal halts again). One flag gates every poller:
+  // api() and pimAuthRetry() refuse while it is set, and the timers check it before they fire.
+  // 'var', never 'let': api() runs (from the badge pollers near the top of this script) BEFORE this line is reached, and a
+  // 'let' read there would throw (temporal dead zone) -- a hoisted var reads as undefined (= not halted).
+  var pimAuthHalted = false;
+  function pimHaltForSignIn() {
+    if (pimAuthMode !== 'builtin') return;
+    pimAuthHalted = true;
+    showStaleSessionBanner('signin');
+  }
+  try {
+    const _pimAuthWake = (ev) => { if (pimAuthHalted && ev && ev.isTrusted) pimAuthHalted = false; };
+    document.addEventListener('pointerdown', _pimAuthWake, true);
+    document.addEventListener('keydown', _pimAuthWake, true);
+  } catch (_) { }
   function pimRefreshToken() {
     if (pimAuthMode !== 'builtin') return Promise.resolve(false);
     if (_pimRefreshing) return _pimRefreshing;   // one renewal at a time, whatever number of panels asked for it
     _pimRefreshing = fetch('/.auth/refresh', { method: 'GET', credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
       .then(r => r.ok, () => false)
-      .then(ok => { _pimRefreshing = null; return ok; });
+      .then(ok => { _pimRefreshing = null; if (!ok) pimHaltForSignIn(); return ok; });
     return _pimRefreshing;
+  }
+  // SIGNIN-RENEW-2 (a): the end of the ACCESS token the platform sends to the Manager, read from its own 'exp' claim
+  // (base64url JWT payload; read only, never validated here -- the server validates it). /.auth/me's expires_on is the
+  // sign-in session's end, not the access token's, so it is the fallback only when no access token is present.
+  function pimJwtExpMs(jwt) {
+    try {
+      const parts = String(jwt || '').split('.');
+      if (parts.length < 2 || !parts[1]) return NaN;
+      let b = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b.length % 4) b += '=';
+      const claims = JSON.parse(atob(b));
+      const exp = Number(claims && claims.exp);
+      return (isFinite(exp) && exp > 0) ? exp * 1000 : NaN;
+    } catch (_) { return NaN; }
+  }
+  function pimAccessTokenExpiryMs(me) {
+    const m = (Array.isArray(me) && me[0]) ? me[0] : null;
+    if (!m) return NaN;
+    if (m.access_token) return pimJwtExpMs(m.access_token);
+    return m.expires_on ? Date.parse(m.expires_on) : NaN;
+  }
+  // Under 6 minutes left -> /.auth/refresh; after a successful renewal check ONCE more at once (the new token's own end).
+  function pimCheckTokenExpiry(again) {
+    if (pimAuthMode !== 'builtin' || pimAuthHalted) return;
+    fetch('/.auth/me', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+      .then(m => (m.ok ? m.json() : null)).then(me => {
+        const e = pimAccessTokenExpiryMs(me);
+        if (!isNaN(e) && e - Date.now() < 6 * 60 * 1000) {
+          pimRefreshToken().then(ok => { if (ok && !again) pimCheckTokenExpiry(true); });
+        }
+      }, () => { });
   }
   function pimSignInUrl() { return '/.auth/login/aad?post_login_redirect_uri=' + encodeURIComponent(location.pathname + location.search + location.hash); }
   function pimOtherAccountUrl() { return '/.auth/logout?post_logout_redirect_uri=' + encodeURIComponent(pimSignInUrl()); }
@@ -22228,19 +22348,17 @@
       return r.json().then(j => {
         if (!Array.isArray(j)) { pimAuthMode = 'other'; return; }
         pimAuthMode = 'builtin';
-        setInterval(() => {
-          fetch('/.auth/me', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-            .then(m => (m.ok ? m.json() : null)).then(me => {
-              const e = me && me[0] && me[0].expires_on ? Date.parse(me[0].expires_on) : NaN;
-              if (!isNaN(e) && e - Date.now() < 6 * 60 * 1000) pimRefreshToken();
-            }, () => { });
-        }, 4 * 60 * 1000);
+        pimCheckTokenExpiry(false);
+        setInterval(() => { if (!pimAuthHalted) pimCheckTokenExpiry(false); }, 4 * 60 * 1000);
+        // a laptop that slept: timers were paused, so the token may have ended -- check as soon as the tab is seen again
+        try { document.addEventListener('visibilitychange', () => { if (!document.hidden && !pimAuthHalted) pimCheckTokenExpiry(false); }); } catch (_) { }
       }, () => { pimAuthMode = 'other'; });
     }, () => { pimAuthMode = 'other'; });
   } catch (_) { pimAuthMode = 'other'; } }, 0);
   // The few calls that do not go through api() (downloads) wrap their literal fetch in this: the same ONE renewal on a 401,
   // then the same request once more -- never a loop.
   async function pimAuthRetry(send) {
+    if (pimAuthHalted) { const eH = new Error('Your sign-in session is missing or expired -- sign in again to continue. Nothing is wrong with the data.'); eH.status = 401; eH.staleSession = true; eH.signInRequired = true; throw eH; }
     const r = await send();
     if (r.status === 401 && pimAuthMode === 'builtin' && await pimRefreshToken()) return send();
     return r;
@@ -22296,6 +22414,12 @@
 
   async function api(method, path, body, opts2) {
     if (!isServer) throw new Error('static mode -- API not available');
+    // SIGNIN-RENEW-2 (b): the renewal failed -- no API call leaves this page (no poller, no timer) until the person acts.
+    if (pimAuthHalted) {
+      const eH = new Error('Your sign-in session is missing or expired -- sign in again to continue. Nothing is wrong with the data.');
+      eH.status = 401; eH.staleSession = true; eH.signInRequired = true; eH.halted = true;
+      throw eH;
+    }
     // Timeout guard: the server is single-threaded, so a slow endpoint
     // queues everything behind it and an aborted connection used to leave
     // this fetch hanging FOREVER (wizard Finish frozen with no error).
@@ -22343,6 +22467,8 @@
         if (noPrincipal && pimAuthMode === 'builtin' && !(opts2 && opts2._authRetried) && await pimRefreshToken()) {
           return api(method, path, body, Object.assign({}, opts2 || {}, { _authRetried: true }));
         }
+        // SIGNIN-RENEW-2 (b): the renewal did not help (it failed, or the renewed call is refused again) -- halt the pollers
+        if (noPrincipal && pimAuthMode === 'builtin') pimHaltForSignIn();
         showStaleSessionBanner(noPrincipal ? 'signin' : 'restart', String((data && data.version) || ''));
         const e401 = new Error(noPrincipal
           ? 'Your sign-in session is missing or expired -- reload the page to sign in again. Nothing is wrong with the data.'
@@ -22379,7 +22505,7 @@
 
   // Heartbeat every 10s while the page is open.
   if (isServer) {
-    setInterval(() => { api('POST', '/api/heartbeat').catch(() => {}); }, 10000);
+    setInterval(() => { if (pimAuthHalted) return; api('POST', '/api/heartbeat').catch(() => {}); }, 10000);
     // Fire one immediately so the server's grace window resets.
     api('POST', '/api/heartbeat').catch(() => {});
   }
@@ -32177,10 +32303,12 @@
     { const cwRole = (typeof pimCustomWorkloadRole === 'function') ? pimCustomWorkloadRole(s) : null; const wlDef = out.stages[out.stages.length - 1].row;
       if (cwRole && !wlDef.PolicyTemplate && cwRole.defaultPolicyTemplate) wlDef.PolicyTemplate = String(cwRole.defaultPolicyTemplate); }
     for (const role of roles) {
+      // WORKLOAD-DUPKEY-1: a role whose name several live roles share carries its id (the engine binds it by that id).
+      const shared = pimWorkloadSharedRole(role);
       out.stages.push({ base: 'PIM-Assignments-Workloads', row: Object.assign({
-        Workload: s.workload || '', RoleName: role, GroupTag: tag, Scope: s.scope || '',
+        Workload: s.workload || '', RoleName: shared ? shared.name : role, GroupTag: tag, Scope: s.scope || '',
         Action: 'Assign', Notes: 'staged by the Create resource delegation wizard'
-      },
+      }, shared ? { RoleDefinitionId: shared.id } : {},
       // 100.26: the per-row target (BC environment, Dataverse org, ...) -- without it the engine cannot apply the row. Only
       // a per-row-resource connector carries it, so every other workload stages the same bytes as before.
       (pimWorkloadResourceFormat(s.workload) && String(s.resource || '').trim()) ? { Resource: String(s.resource).trim() } : {},
@@ -32417,6 +32545,21 @@
     else if (/^Default-[0-9a-f]{8}-/i.test(v)) v = 'Default';
     return v.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
   }
+  // WORKLOAD-DUPKEY-1: the lower-cased names that two or more DIFFERENT live roles share (internal has two Defender XDR roles
+  // named "Microsoft Defender for Identity Administrator"). PURE.
+  function pimWorkloadAmbiguousNames(roles) {
+    const ids = new Map();
+    asList(roles).forEach(x => {
+      const n = String((x && (x.name || x.displayName || x.roleName)) || '').trim().toLowerCase(); if (!n) return;
+      if (!ids.has(n)) ids.set(n, new Set());
+      const id = String((x && x.id) || '').trim().toLowerCase(); if (id) ids.get(n).add(id);
+    });
+    const out = new Set(); ids.forEach((s, n) => { if (s.size > 1) out.add(n); });
+    return out;
+  }
+  // The wizard's role key for a role whose name is shared: 'Name (id 1a2b3c4d)' -> { name, id }. null for any other key.
+  const PIM_WL_SHARED_ROLE = {};
+  function pimWorkloadSharedRole(key) { return Object.prototype.hasOwnProperty.call(PIM_WL_SHARED_ROLE, String(key || '')) ? PIM_WL_SHARED_ROLE[String(key)] : null; }
   function loadWorkloadRoles(id, onDone, resource) {
     const wid = String(id || '').trim().toLowerCase();
     const res = String(resource || '').trim();
@@ -32426,12 +32569,23 @@
     if (wlRoleCache[k] && (wlRoleCache[k].items || wlRoleCache[k].loading || wlRoleCache[k].error)) return;
     wlRoleCache[k] = { items: null, loading: true, error: '' };
     api('GET', '/api/workload-roles?id=' + encodeURIComponent(wid) + (res ? '&resource=' + encodeURIComponent(res) : '')).then(r => {
-      wlRoleCache[k].items = ((r && (r.roles || r.value)) || []).map(x => ({
-        key: (x.name || x.displayName || x.roleName || String(x)),
-        label: (x.name || x.displayName || x.roleName || String(x)),
-        // 100.17: a custom workload's role carries its tier (and what it is for) from the definition.
-        sub: (r && r.custom) ? ('T' + x.tier + (x.description ? ' -- ' + x.description : '')) : undefined
-      }));
+      const __list = ((r && (r.roles || r.value)) || []);
+      const __amb = pimWorkloadAmbiguousNames(__list);
+      wlRoleCache[k].items = __list.map(x => {
+        const nm = (x.name || x.displayName || x.roleName || String(x));
+        // WORKLOAD-DUPKEY-1: a name several live roles share is offered once PER ROLE, keyed with the id's first 8 characters
+        // (shown at add time); staging stores the real name + the role id (RoleDefinitionId).
+        if (__amb.has(String(nm).trim().toLowerCase()) && x && x.id) {
+          const kk = nm + ' (id ' + String(x.id).slice(0, 8) + ')';
+          PIM_WL_SHARED_ROLE[kk] = { name: nm, id: String(x.id) };
+          return { key: kk, label: kk, sub: 'several roles share this name -- this one is id ' + String(x.id) };
+        }
+        return {
+          key: nm, label: nm,
+          // 100.17: a custom workload's role carries its tier (and what it is for) from the definition.
+          sub: (r && r.custom) ? ('T' + x.tier + (x.description ? ' -- ' + x.description : '')) : undefined
+        };
+      });
       wlRoleCache[k].loading = false; if (onDone) onDone();
     }).catch(e => {
       // A live workload-role read needs the tenant connection and the connector's permission.
@@ -35598,8 +35752,12 @@
       if (!wSel.value) { rSel.innerHTML = '<option value="">(role -- pick workload first)</option>'; return; }
       try {
         const r = await api('GET', '/api/workload-roles?id=' + encodeURIComponent(wSel.value));
-        rSel.innerHTML = '<option value="">(pick role)</option>' + (r.roles || []).map(x =>
-          `<option value="${escapeHtml(x.name)}" title="${escapeHtml(x.description || '')}">${escapeHtml(x.name)}</option>`).join('');
+        // WORKLOAD-DUPKEY-1: a name several live roles share is shown with each role's id, and the row stores that id.
+        const amb = pimWorkloadAmbiguousNames(r.roles || []);
+        rSel.innerHTML = '<option value="">(pick role)</option>' + (r.roles || []).map(x => {
+          const shared = amb.has(String(x.name || '').trim().toLowerCase());
+          return `<option value="${escapeHtml(x.name)}" data-role-id="${shared ? escapeHtml(String(x.id || '')) : ''}" title="${escapeHtml((shared ? 'Several roles share this name -- this one is id ' + String(x.id || '') + '. ' : '') + (x.description || ''))}">${escapeHtml(x.name)}${shared ? ' (id ' + escapeHtml(String(x.id || '').slice(0, 8)) + ')' : ''}</option>`;
+        }).join('');
         rSel.disabled = false;
         st.textContent = (r.roles || []).length + ' role(s) loaded live from the tenant';
       } catch (e) {
@@ -35617,14 +35775,18 @@
         const data = await loadCsv(base);
         ensurePending(base, data.header, data.rows);
         const p = pendingChanges[base];
+        const opt = rSel.options[rSel.selectedIndex];
+        const roleId = String((opt && opt.getAttribute('data-role-id')) || '').trim();
         const dup = p.rows.some(r => (r.Workload || '').toLowerCase() === wSel.value.toLowerCase() &&
           (r.RoleName || '').toLowerCase() === rSel.value.toLowerCase() &&
-          (r.GroupTag || '').toLowerCase() === gSel.value.toLowerCase());
+          (r.GroupTag || '').toLowerCase() === gSel.value.toLowerCase() &&
+          String(r.RoleDefinitionId || '').trim().toLowerCase() === roleId.toLowerCase());
         if (dup) { st.textContent = 'already staged / present'; return; }
         const row = {};
         for (const c of p.header) row[c] = '';
         row.Workload = wSel.value; row.RoleName = rSel.value; row.GroupTag = gSel.value;
         row.Scope = ''; row.Action = 'Assign'; row.Notes = 'staged via Manager';
+        if (roleId) { if (!p.header.includes('RoleDefinitionId')) p.header.push('RoleDefinitionId'); row.RoleDefinitionId = roleId; }
         p.rows.push(row);
         markBadges();
         st.innerHTML = '&#10003; staged: ' + escapeHtml(wSel.value) + ' / ' + escapeHtml(rSel.value) + ' &rarr; ' + escapeHtml(gSel.value) + ' &mdash; commit under Pending changes; the engine applies it on its next run';
@@ -37657,10 +37819,43 @@
   }
   function pimWorkloadPrereqChecksHtml(w, canAct) {
     const esc = escapeHtml;
-    const checks = (w.checks || []).filter(c => c && (!c.ok || c.canWithdraw || c.status === 'confirmed' || c.status === 'skipped'));
+    // DEFENDER-SENTINEL-OPTIONAL-1 (owner 2026-11-16: "sentinel is optional"): the Data Operations checks (group 'dataOps')
+    // are an OPTIONAL group shown as information with its own state -- never counted as "to look at", never red.
+    const coreAll = (w.checks || []).filter(c => c && String(c.group || '') !== 'dataOps');
+    const optAll = (w.checks || []).filter(c => c && String(c.group || '') === 'dataOps');
+    const checks = coreAll.filter(c => (!c.ok || c.canWithdraw || c.status === 'confirmed' || c.status === 'skipped'));
     const open = checks.filter(c => !c.ok);
-    if (!checks.length) return '';
-    const items = checks.map(c => {
+    const optHtml = pimWorkloadPrereqOptionalHtml(w, optAll, canAct);
+    if (!checks.length) return optHtml;
+    const items = checks.map(c => pimWorkloadPrereqCheckItemHtml(w, c, canAct)).join('');
+    // UX-PORTAL-STEP-CONFIRM (owner 2026-11-04: "these steps are completed. dont know what is missing"): a portal-only step
+    // (no API shows it) closes ONLY with a person's Confirm -- say that FIRST, in one calm line, never only at the end.
+    const portalOpen = canAct ? open.filter(c => c && String(c.status) === 'manual' && c.canConfirm) : [];   // a Reader has no Confirm button
+    const portalLead = portalOpen.length
+      ? '<div class="prereq-portal-lead" style="margin:2px 0 4px;color:#24292f;"><b>PIM cannot check ' + (portalOpen.length === 1 ? 'this portal step' : 'these ' + portalOpen.length + ' portal steps') +
+        ' itself.</b> When you have done ' + (portalOpen.length === 1 ? 'it' : 'them') + ', press <b>Confirm</b> on each' +
+        (portalOpen.some(c => c.canSkip) ? ' (or <b>Not used</b> if you do not use it)' : '') + ' -- <i>Check again</i> does not change a portal step.</div>'
+      : '';
+    return '<details class="prereq-details"' + (open.length && w.chip !== 'green' ? ' open' : '') + ' style="margin-top:3px;"><summary style="cursor:pointer;">' +
+      (open.length ? open.length + ' check' + (open.length === 1 ? '' : 's') + ' to look at' : 'confirmed by a person') + '</summary>' +
+      portalLead + '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>' + optHtml;
+  }
+  function pimWorkloadPrereqOptionalHtml(w, optChecks, canAct) {
+    // DEFENDER-SENTINEL-OPTIONAL-1: "Data Operations (optional -- needs Microsoft Sentinel connected to Defender)": in place /
+    // not set up / not used, grey information (never red); Confirm / Not used / Withdraw keep working on its checks.
+    const esc = escapeHtml;
+    const g = w && w.dataOps;
+    if (!g || !optChecks.length) return '';
+    const word = { inPlace: 'in place', notSetUp: 'not set up', notUsed: 'not used' }[String(g.state)] || String(g.state || '');
+    const items = optChecks.map(c => pimWorkloadPrereqCheckItemHtml(w, c, canAct)).join('');
+    return '<details class="prereq-optional" data-group="dataOps" data-state="' + esc(String(g.state || '')) + '" style="margin-top:3px;color:#57606a;"><summary style="cursor:pointer;">' +
+      esc(String(g.title || 'Data Operations (optional)')) + ' &mdash; ' + esc(word) + '</summary>' +
+      (g.detail ? '<div style="margin:2px 0 4px;overflow-wrap:anywhere;">' + esc(String(g.detail)) + '</div>' : '') +
+      '<ul style="margin:2px 0 0 16px;padding:0;">' + items + '</ul></details>';
+  }
+  function pimWorkloadPrereqCheckItemHtml(w, c, canAct) {
+    const esc = escapeHtml;
+    {
       const st = String(c.status || 'notChecked');
       const btns = canAct ? [
         c.canConfirm ? '<button class="prereq-act" type="button" data-action="confirm" data-workload="' + esc(w.workload) + '" data-check="' + esc(c.id) + '" title="Record that this step is done (attested by you, not API-verified). Withdraw undoes it." style="font-size:10.5px;padding:1px 6px;">Confirm</button>' : '',
@@ -37673,18 +37868,7 @@
         (c.detail ? '<div style="color:#57606a;overflow-wrap:anywhere;">' + esc(c.detail) + '</div>' : '') +
         (c.manualStep && !c.ok ? '<div style="overflow-wrap:anywhere;"><i>To do:</i> ' + esc(c.manualStep) + (c.learn ? ' <a href="' + esc(c.learn) + '" target="_blank" rel="noopener">Learn</a>' : '') + '</div>' : '') +
         (btns.trim() ? '<div style="margin-top:2px;">' + btns + '</div>' : '') + '</li>';
-    }).join('');
-    // UX-PORTAL-STEP-CONFIRM (owner 2026-11-04: "these steps are completed. dont know what is missing"): a portal-only step
-    // (no API shows it) closes ONLY with a person's Confirm -- say that FIRST, in one calm line, never only at the end.
-    const portalOpen = canAct ? open.filter(c => c && String(c.status) === 'manual' && c.canConfirm) : [];   // a Reader has no Confirm button
-    const portalLead = portalOpen.length
-      ? '<div class="prereq-portal-lead" style="margin:2px 0 4px;color:#24292f;"><b>PIM cannot check ' + (portalOpen.length === 1 ? 'this portal step' : 'these ' + portalOpen.length + ' portal steps') +
-        ' itself.</b> When you have done ' + (portalOpen.length === 1 ? 'it' : 'them') + ', press <b>Confirm</b> on each' +
-        (portalOpen.some(c => c.canSkip) ? ' (or <b>Not used</b> if you do not use it)' : '') + ' -- <i>Check again</i> does not change a portal step.</div>'
-      : '';
-    return '<details class="prereq-details"' + (open.length && w.chip !== 'green' ? ' open' : '') + ' style="margin-top:3px;"><summary style="cursor:pointer;">' +
-      (open.length ? open.length + ' check' + (open.length === 1 ? '' : 's') + ' to look at' : 'confirmed by a person') + '</summary>' +
-      portalLead + '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>';
+    }
   }
   // PIM 100.108 (e) (owner 2026-10-12: "5 of 5 workloads ready" stood green under "Power BI was not read (HTTP 401)"): a
   // workload is READY when the server says so (ready -- its state is ok AND, where the workload has a confirmation call,
