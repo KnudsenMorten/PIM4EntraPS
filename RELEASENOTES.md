@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.33 -- 2026-11-16
+
+- The MCP server (/mcp) is closed by default on every installation and answers 404 until the installation is deliberately opened; an update no longer reports its own short-lived consent job as still on the previous build.
+
 ## 3.1.32 -- 2026-11-16
 
 - The REST application API (/api/app/*) is closed by default on every installation and answers 404 until the installation is deliberately opened; the Manager pages, sign-in and the person-only assistant are unchanged.

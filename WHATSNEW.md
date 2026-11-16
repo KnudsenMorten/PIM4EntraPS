@@ -1,5 +1,18 @@
 # What's new in PIM Manager
 
+## 3.1.33 · 2026-11-16 · Security
+
+The assistant connection (MCP) is closed by default, and an update no longer reports a short-lived helper job as not updated.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Assistant connection closed by default** - The MCP connection for AI assistants is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages and sign-in are not affected.
+- **Update report without a false alarm** - An update no longer reports a short-lived helper job, which the same update creates and removes, as still on the previous version.
+
 ## 3.1.32 · 2026-11-16 · Security
 
 The application API for scripts and services is closed by default.

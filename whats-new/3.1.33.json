@@ -1,0 +1,5 @@
+{"version":"3.1.33","date":"2026-11-16","type":"security",
+ "summary":"The assistant connection (MCP) is closed by default, and an update no longer reports a short-lived helper job as not updated.",
+ "new":[],
+ "fixes":[{"title":"Assistant connection closed by default","text":"The MCP connection for AI assistants is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages and sign-in are not affected."},
+          {"title":"Update report without a false alarm","text":"An update no longer reports a short-lived helper job, which the same update creates and removes, as still on the previous version."}]}

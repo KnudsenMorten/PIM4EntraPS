@@ -1073,6 +1073,12 @@ function Get-PimManagerApiAppAuthConfig {
     return @{ audiences = $aud; issuers = $iss; tenantId = $tid }
 }
 
+function Test-PimManagerMcpOpen {
+    # MCP-DOOR-1 (framework 12.35): is the MCP server (/mcp) deliberately OPENED on this install? Only the literal
+    # PIM_MCP_OPEN = 1 / true / yes / on opens it; unset or anything else = CLOSED (the default, every ring).
+    return [bool]("$env:PIM_MCP_OPEN".Trim() -match '^(?i)(1|true|yes|on)$')
+}
+
 function Test-PimManagerAppApiOpen {
     # API-DOOR-1 (framework 12.35): is the REST application API (/api/app/*) deliberately OPENED on this install? Only the
     # literal PIM_API_APPS_OPEN = 1 / true / yes / on opens it; unset or anything else = CLOSED (the default, every ring).
@@ -15995,6 +16001,11 @@ function Handle-Request {
         return 200
     }
     if ($path -eq '/mcp') {
+        # MCP-DOOR-1 (framework 12.35; owner 2026-11-16: "close mcp too"). The MCP server answers 404 -- before the method, the
+        # bearer, the signing keys or any tool is touched -- unless this install was DELIBERATELY opened (Test-PimManagerMcpOpen:
+        # PIM_MCP_OPEN = 1 on ca-pim-manager, set only by a person/owner step; nothing in PIM sets it). New installs = closed.
+        # The RFC 9728 metadata (/.well-known/oauth-protected-resource) carries no data and is left as it is.
+        if (-not (Test-PimManagerMcpOpen)) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'not found' }; return 404 }
         if ($method -ne 'POST') { $resp.Headers['Allow'] = 'POST'; Write-JsonResponse -Response $resp -Status 405 -Body @{ error = 'POST one JSON-RPC message (streamable HTTP, JSON responses; no SSE stream)' }; return 405 }
         $ah = "$($req.Headers['Authorization'])"
         if ($script:PimHosted) {

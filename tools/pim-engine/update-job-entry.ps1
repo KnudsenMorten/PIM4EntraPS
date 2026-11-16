@@ -2311,7 +2311,13 @@ Clear-PimUpdaterSchemaHold
 $discovered = 0
 try {
     $all  = Get-PimAcaJobs -SubscriptionId $sub -ResourceGroup $rg
-    $plan = Get-PimAcaJobRollPlan -Jobs $all -TargetImage $targetImg -Exclude @($tickJob, $selfJob)
+    # ROLL-RACE-1 (SUP-2026-00612, a ring-2 install, 2026-11-16): the support-consent step of THIS run creates and removes its
+    # own one-time job (Get-PimSupportConsentJobName). Listed here between its create and its remove, the roll PATCHed it, got
+    # 404 once the step had removed it, and reported "still on the previous build" for a job that no longer existed. The
+    # updater's own one-time job is never rolled (it is built from the current image each time it is created).
+    $rollExclude = @($tickJob, $selfJob)
+    if (Get-Command Get-PimSupportConsentJobName -ErrorAction SilentlyContinue) { $rollExclude += (Get-PimSupportConsentJobName) } else { $rollExclude += 'caj-pim-supportconsent' }
+    $plan = Get-PimAcaJobRollPlan -Jobs $all -TargetImage $targetImg -Exclude $rollExclude
     foreach ($s in @($plan.skip)) { Say "  skipping $($s.name): $($s.reason)" 'DarkGray' }
     foreach ($r in @($plan.roll)) {
         # 100.61 (live 2026-10-11): the as-built converge (2e, above) already moved caj-pim-asbuilt to the target image THIS run;
@@ -2334,7 +2340,12 @@ try {
             # Invoke-PimArmBusyRetry -- the GET inside Set-PimAcaJobImage is repeated on each attempt), never a failed update.
             [void](Invoke-PimArmBusyRetry -NetworkWaits @(5, 15, 30) -Write { Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg })
             $discovered++
-        } catch { $jobFailed += $r.name; Say "  $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
+        } catch {
+            # ROLL-RACE-1: a job that was listed and is GONE now (404 ContainerAppsJobNotFound) was removed meanwhile -- there is
+            # nothing left on the previous build; counted as gone, never as "not rolled".
+            if ("$($_.Exception.Message)" -match '(?i)HTTP 404|ContainerAppsJobNotFound') { Say "  $($r.name): removed while this run was rolling -- nothing to roll" 'DarkGray' }
+            else { $jobFailed += $r.name; Say "  $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
+        }
     }
 } catch {
     # 🪤 Enumeration failing is NOT "there was nothing else". Saying so is the difference between a
