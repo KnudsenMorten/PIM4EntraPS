@@ -1341,37 +1341,10 @@ try {
     if (-not $scRun.ok -or "$($scRun.action)" -ne 'nothing') { Say $scRun.line $(if (-not $scRun.ok) { 'Yellow' } else { 'Cyan' }) }
 } catch { Say "support consent: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
 
-# ---- SUPPORT-SQL-JIT-1 (framework rule, owner-approved 2026-11-09) -- THE SUPPORT APP IN THE SQL ADMIN GROUP, TIME-LIMITED ----
-# Right after the consent decision, on EVERY run: while Invardia's answer says the support session is open (setup), the
-# updater asks a TIME-LIMITED ACTIVE PIM-for-Groups MEMBER assignment of the Support app on the SQL admin group (the SQL
-# server's Entra admin), ending at min(maxUntil, now + 24 h) -- never owner, never permanent -- reads it back and records it
-# (pim.Settings SupportConsentState.sqlGroup, the support state of this run). Closed: THIS code's grant is removed and read
-# back gone. No answer: nothing changes (the assignment ends by itself). IDENTITY-MOVE-1 13 (the product finishes the move):
-# in an OPEN setup session, until sqlGroup.swapDone, the Support app's PERMANENT member / owner assignments are recorded
-# FIRST (sqlGroup.permanentRemoved), then removed and swapped for the time-limited member -- never put back, ownership never
-# given (engine/_shared/PIM-SupportSqlGroupJit.ps1). Never fails the update.
-try {
-    if ($scRun -and $scRun.record -and $scSet) {
-        . (Join-Path $solRoot 'engine\_shared\PIM-SupportSqlGroupJit.ps1')
-        $sgArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
-        $sgGraph = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
-        $sgResolve = {
-            $sgSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
-            $sgAdm = Get-PimDbInitAdminGroup -Arm $sgArm -ResourceGroupId "/subscriptions/$sub/resourceGroups/$rg" -SqlServer $sgSrv
-            if ($sgAdm.isGroup -eq $false) { @{ groupId = ''; name = "$($sgAdm.name)"; reason = "$($sgAdm.reason)" } } else { $sgAdm }
-        }
-        $sgPrev = $null; if ($scRun.record.PSObject.Properties['sqlGroup']) { $sgPrev = $scRun.record.sqlGroup }
-        # IDENTITY-MOVE-1 13: the swap writes the permanent assignments it removes BEFORE the first remove (throws = not started)
-        $sgSave = { param($r) $scRun.record | Add-Member -NotePropertyName 'sqlGroup' -NotePropertyValue $r -Force; & $scSet $scRun.record }
-        $sgRun = Invoke-PimSupportSqlGroupJitStep -Answer $scRun.answer -AppId "$($scRun.appId)" -Previous $sgPrev -Graph $sgGraph -ResolveGroup $sgResolve -SaveRecord $sgSave
-        if ($sgRun.changed -and $null -ne $sgRun.record) {
-            $scRun.record | Add-Member -NotePropertyName 'sqlGroup' -NotePropertyValue $sgRun.record -Force
-            try { & $scSet $scRun.record } catch { $sgRun.say = $true; $sgRun.line += " -- NOT recorded ($((("$($_.Exception.Message)") -split "`n")[0])); a time-limited membership ends by itself" }
-        }
-        # the 15-minute check stays ONE line: only an action taken, a failure or a NEW finding is printed
-        if ($sgRun.say) { Say $sgRun.line $(if (-not $sgRun.ok -or "$($sgRun.finding)") { 'Yellow' } else { 'Cyan' }) }
-    }
-} catch { Say "support SQL group: not checked ($($_.Exception.Message)) -- the update continues" 'Yellow' }
+# ---- SUPPORT-SQL-JIT-1 RETIRED (owner 2026-11-17: "but we chg to jit") -- support database access is the SQL-level JIT of the
+# support SQL access job (tools/setup/Invoke-PimSupportSqlAccessJob.ps1): the Support app's database user in db_owner until a
+# set time, taken back by that job. The updater no longer puts the Support app into the SQL admin GROUP (and since framework
+# G5a, 3.1.26, it holds no PIM-for-Groups right to do so -- the step could only refuse); its library is deleted.
 
 $script:PimUpdateNowSignal = $null
 $script:PimUpdateRollRetry = $null   # ROLL-RETRY-1: the retry decision when THIS quick run retries a roll the quiesce held

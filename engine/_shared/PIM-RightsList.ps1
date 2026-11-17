@@ -69,9 +69,10 @@ function Get-PimRightsSetupMapFromSource {
     <#
       PURE (reads a file). A role-name -> appRole-id hashtable literal assigned to -Variable in tools\setup\_PimSetupShared.ps1,
       READ BY PARSING the file (never dot-sourced). Throws when the map is missing, not a literal, or empty -- a list built from
-      no grant set proves nothing.
+      no grant set proves nothing. -AllowEmpty: an EMPTY literal (@{}) is a real, deliberate set -- the web identity's Graph set
+      is empty since 3.1.42 (GRAPH-PICKER: the pickers read PIM's database); a missing or non-literal map still throws.
     #>
-    param([Parameter(Mandatory)][string]$Variable, [string]$Path = (Join-Path (Get-PimRightsListRoot) 'tools\setup\_PimSetupShared.ps1'))
+    param([Parameter(Mandatory)][string]$Variable, [string]$Path = (Join-Path (Get-PimRightsListRoot) 'tools\setup\_PimSetupShared.ps1'), [switch]$AllowEmpty)
     if (-not (Test-Path -LiteralPath $Path)) { throw "the Graph grant source is missing: $Path" }
     $errs = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errs)
@@ -85,7 +86,7 @@ function Get-PimRightsSetupMapFromSource {
         $v = "$($kv.Item2.Extent.Text)".Trim().Trim("'", '"')
         if ($k) { $map[$k] = $v.ToLowerInvariant() }
     }
-    if (-not $map.Count) { throw "$Variable in $Path is empty" }
+    if (-not $map.Count -and -not $AllowEmpty) { throw "$Variable in $Path is empty" }
     return $map
 }
 
@@ -96,7 +97,8 @@ function Get-PimRightsCodeGraphSets {
     #>
     param([string]$SetupSharedPath = (Join-Path (Get-PimRightsListRoot) 'tools\setup\_PimSetupShared.ps1'))
     $engine = Get-PimRightsSetupMapFromSource -Variable '$script:PimGraphAppRoles' -Path $SetupSharedPath
-    $web = Get-PimRightsSetupMapFromSource -Variable '$script:PimGraphAppRolesManager' -Path $SetupSharedPath
+    # GRAPH-PICKER (2026-11-17): the web identity's Graph set is EMPTY -- the pickers and lookups read PIM's database
+    $web = Get-PimRightsSetupMapFromSource -Variable '$script:PimGraphAppRolesManager' -Path $SetupSharedPath -AllowEmpty
     if (-not (Get-Command Get-PimUpdaterGraphAppRoles -ErrorAction SilentlyContinue)) { throw 'Get-PimUpdaterGraphAppRoles is not loaded (engine\_shared\PIM-UpdaterGraphRoles.ps1)' }
     $u = Get-PimUpdaterGraphAppRoles
     $updater = [ordered]@{}; foreach ($k in @($u.Keys)) { $updater["$k"] = "$($u[$k])".ToLowerInvariant() }
@@ -111,15 +113,14 @@ function Get-PimRightsGraphPurpose {
     #>
     param([Parameter(Mandatory)][string]$Role, [string]$Identity = '')
     $own = @{
-        'updater|PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup' = 'Keeps the database job identity a time-limited member of the SQL admin group (PIM for Groups)'
-        'updater|PrivilegedAssignmentSchedule.Read.AzureADGroup'      = 'Reads that membership back'
-        'updater|RoleManagementPolicy.Read.AzureADGroup'              = 'Reads the SQL admin group''s PIM policy maximum, so the membership asks for exactly that length'
+        # 2026-11-17: no updater purpose text for the PIM-for-Groups rights (PrivilegedAssignmentSchedule, RoleManagementPolicy) -- the
+        # updater holds no PIM-for-Groups right since framework G5a (3.1.26), and its SQL admin group step is retired
         'updater|GroupMember.Read.All'                                = 'Reads the SQL admin group and the database job identity''s memberships, and the web identity''s group memberships for its trim (read only)'
         'updater|Application.Read.All'                                = 'Reads the database job identity''s service principal memberships, and the web identity''s app roles and memberships for its trim (read only)'
         'updater|Application.ReadWrite.OwnedBy'                       = 'Changes only the PIM app registrations it owns'
         'updater|User.ReadBasic.All'                                  = 'Reads the SuperAdmins'' mail addresses for the alert recipients (basic profile only)'
-        'web|User.ReadBasic.All'                                      = 'The people picker and the user name to object id lookups an admin triggers (basic profile only)'
-        'web|GroupMember.Read.All'                                    = 'The group picker and the group id to name lookups (basic group properties)'
+        # GRAPH-PICKER (2026-11-17): no 'web|...' entry -- the web identity holds no Graph permission (the pickers and the user /
+        # group lookups read PIM's database, written by the engine; proven live on 3.1.40 / 3.1.41)
     }
     $k = "$Identity|$Role"
     if ($own.ContainsKey($k)) { return $own[$k] }
@@ -206,6 +207,11 @@ function Get-PimRightsAzureTable {
         (& $r 'engine' 'user-access-administrator@defined-scopes' 'azure-rbac' 'User Access Administrator' $uaa 'subscription' 'each top Azure scope the store defines (subscription, management group or resource group of PIM-Assignments-Azure-Resources / PIM-Definitions-Resources) -- never Owner' 'feature' 'azure-rbac' 'Assigns Azure resource roles (eligible / active) and sets their PIM policies where Azure delegations are defined' 'engine\_shared\PIM-EngineAzureAccess.ps1 (95.2k) + engine\_shared\PIM-EngineAzureScopeTrim.ps1 (4.3); tools\setup\_PimWorkloadPrereqRunner.ps1 Invoke-PimPrereqAzureRbac')
         (& $r 'engine' 'user-access-administrator@tenant-root' 'azure-rbac' 'User Access Administrator' $uaa 'tenant-root' 'only with the install opt-in -EngineAzureRootUserAccessAdmin; then it replaces the per-scope grants' 'feature' 'azure-rbac' 'Assigns Azure resource roles at every subscription (opt-in)' 'tools\setup\_PimSetupShared.ps1 Get-PimEngineRootAzurePlan -IncludeUserAccessAdministrator')
         (& $r 'engine' 'storage-table-data-contributor@rfa-store' 'azure-rbac' 'Storage Table Data Contributor' $stdc 'resource' 'the RFA broker''s storage account' 'feature' 'rfa.portal' 'Pulls the requests and answers of the RFA portal / access request API' 'tools\setup\_PimRfaBrokerPlan.ps1 (role-engine-<id>), tools\setup\Deploy-PimRfaBroker.ps1')
+        # 2026-11-17 (owner kept it 2026-11-13): the engine's ONE custom role. A managing tenant whose bundle store is reached over
+        # the internet (access publicSigned) lets the engine set that store's network rules for the enrolled tenants. Its role
+        # definition is created per install (a new guid, the storage account in its name), so the row has NO roleId: it is
+        # matched by its NAME PREFIX (Get-PimRightsCustomRolePrefix / Test-PimRightsRoleNameMatch).
+        (& $r 'engine' 'bundle-store-network-rules@bundle-store' 'azure-rbac' 'PIM Manager bundle store network rules - <account>' '' 'resource' 'the managing tenant''s bundle store (one storage account) only, and only when that store is reached over the internet (access publicSigned); a custom role with Microsoft.Storage/storageAccounts/read + write only -- no data access, no keys. Its id differs per install: matched by the name prefix' 'feature' 'msp.downlink' 'The enrolled-tenants job reads the bundle store and sets its network rules, so each enrolled managed tenant can reach the signed bundle' 'tools\setup\Publish-PimEnrollmentFacts.ps1 (step enrollment, -Access publicSigned: creates the custom role and assigns it to the engine); used by engine\msp\PIM-InvardiaEnrollment.ps1 Invoke-PimEnrolledTenantsJob')
         (& $r 'engine' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls the engine image' 'tools\setup\Setup-PimContainers.ps1 (AcrPull per workload identity); engine\_shared\PIM-IdentityMove.ps1 Get-PimIdentityMoveRoleNeeds')
         (& $r 'engine' 'fabric-administrator@tenant' 'entra-directory-role' 'Fabric Administrator' $fabric 'tenant' 'directory scope / (active, permanent); older tenants show it as Power BI Administrator' 'feature' 'connectors.powerbi' 'Gives Power BI workspace roles through the Fabric admin API' 'tools\setup\_PimWorkloadPrereqRunner.ps1 (powerbi.fabricAdmin, Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator)')
         # ---- web (the web app's identity)
@@ -371,6 +377,30 @@ function Test-PimRightsInternetFacing {
     return @{ violations = @($bad); excepted = @($okx) }
 }
 
+function Get-PimRightsCustomRolePrefix {
+    <#
+      PURE. A CUSTOM role in the list is named with a placeholder for the per-install part ('<name> - <account>'): its role
+      definition is created per install (a new id), so it is matched by the text BEFORE the placeholder. Returns that prefix
+      ('PIM Manager bundle store network rules - '), or '' for a built-in role (matched exactly, by id).
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Role)
+    $i = "$Role".IndexOf('<')
+    if ($i -le 0 -or "$Role" -notmatch '<[A-Za-z0-9 _-]+>\s*$') { return '' }
+    return "$Role".Substring(0, $i)
+}
+
+function Test-PimRightsRoleNameMatch {
+    <#
+      PURE. Does a HELD role name match a LISTED one? A built-in: the same name (case-insensitive). A custom role (a listed name
+      with a placeholder): the held name starts with the listed prefix and has a non-empty per-install part.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Listed, [AllowEmptyString()][AllowNull()][string]$Held)
+    $h = "$Held".Trim(); if (-not $h) { return $false }
+    $p = Get-PimRightsCustomRolePrefix -Role $Listed
+    if ($p) { return ($h.Length -gt $p.Length -and $h.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) }
+    return ($h -ieq "$Listed".Trim())
+}
+
 function Get-PimRightsSortedOrdinal {
     <# PURE. Strings sorted ordinally (culture-independent: the same order on every machine). #>
     param([AllowEmptyCollection()][string[]]$Items = @())
@@ -415,7 +445,10 @@ function Get-PimApprovedRightsList {
             $tag = $(if ($a.kind -eq 'entra-directory-role') { 'directory' } else { 'azure' })
             $rid = "$($id.role).$tag.$($a.key)"
             if ($rights.ContainsKey($rid)) { throw "Get-PimApprovedRightsList: duplicate right id $rid" }
-            $o = [ordered]@{ id = $rid; kind = $a.kind; role = $a.role; roleId = $a.roleId; scope = $a.scope }
+            $o = [ordered]@{ id = $rid; kind = $a.kind; role = $a.role }
+            # a custom role (its id differs per install) carries no roleId: it is matched by its name prefix
+            if ("$($a.roleId)".Trim()) { $o['roleId'] = $a.roleId }
+            $o['scope'] = $a.scope
             if ("$($a.scopeNote)".Trim()) { $o['scopeNote'] = $a.scopeNote }
             $o['when'] = $a.when
             if ($a.when -eq 'feature') { $o['featureKey'] = $a.featureKey }

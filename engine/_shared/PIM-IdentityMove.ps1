@@ -479,6 +479,15 @@ function Get-PimIdentityMoveRootRoleIds {
     @('18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', '8e3af657-a8ff-443c-a75c-2fe8c4bcb635')
 }
 
+function Get-PimIdentityMoveUpdaterRetiredGraphIds {
+    <#
+      PURE. LITERAL. framework G5a (Invardia 2026-11-15, 3.1.26): the Microsoft Graph app-role ids the UPDATER no longer holds
+      and must never get back (a move copies none of them, from any source): PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup,
+      PrivilegedAssignmentSchedule.Read.AzureADGroup, RoleManagementPolicy.Read.AzureADGroup. The engine's own rights are separate.
+    #>
+    return @('41202f2c-f7ab-45be-b001-85c9728b9d69', 'cd4161cb-f098-48f8-a884-1eda9a42434c', '69e67828-780e-47fd-b28c-7b27d14864e6')
+}
+
 function Select-PimIdentityMoveNeeded {
     <# PURE. Splits ONE shared source's rights into what -Role needs (kept) and what it does not (notCopied, named). #>
     param([Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][hashtable]$Rights, [string]$SourceName = 'the shared identity')
@@ -575,6 +584,17 @@ function Get-PimIdentityMovePlan {
                 if ($drop.Count) {
                     $use = @{ azure = @($use.azure | Where-Object { $_ -and $never -notcontains (@("$($_.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()) }); graph = @($use.graph); groups = @($use.groups); dirRoles = @($use.dirRoles); kv = @($use.kv) }
                     foreach ($d in $drop) { $notCopied.Add("Azure role $(@("$($d.roleDefinitionId)" -split '/')[-1].ToLowerInvariant()) at $($d.scope) (from $($s.name); SEC-108: User Access Administrator / Owner are the engine's only)") }
+                }
+            }
+            # framework G5a (3.1.26) + 2026-11-17 (Invardia: the three PIM-for-Groups rights came BACK on an updater after the
+            # 11-15 clean): the updater's PIM-for-Groups rights are NEVER copied -- from ANY source, its own old system identity
+            # included -- PrivilegedAssignmentSchedule.ReadWrite / .Read.AzureADGroup and RoleManagementPolicy.Read.AzureADGroup.
+            if ($role -eq 'updater') {
+                $g5a = @(Get-PimIdentityMoveUpdaterRetiredGraphIds)
+                $gDrop = @($use.graph | Where-Object { $_ -and $g5a -contains "$($_.appRoleId)".ToLowerInvariant() })
+                if ($gDrop.Count) {
+                    $use = @{ azure = @($use.azure); graph = @($use.graph | Where-Object { $_ -and $g5a -notcontains "$($_.appRoleId)".ToLowerInvariant() }); groups = @($use.groups); dirRoles = @($use.dirRoles); kv = @($use.kv) }
+                    foreach ($d in $gDrop) { $notCopied.Add("Graph app role $($d.appRoleId) (from $($s.name); framework G5a: the updater holds no PIM-for-Groups right)") }
                 }
             }
             foreach ($k in @('azure', 'graph', 'groups', 'dirRoles', 'kv')) { $sr[$k] = @(@($sr[$k]) + @($use[$k])) }

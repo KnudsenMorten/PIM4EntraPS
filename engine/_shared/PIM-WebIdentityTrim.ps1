@@ -8,7 +8,8 @@
 .DESCRIPTION
     THE APPROVED SET is read from the code's own rights list (engine\_shared\PIM-RightsList.ps1 Get-PimApprovedRightsList,
     identity 'web'; its Graph part is tools\setup\_PimSetupShared.ps1 $script:PimGraphAppRolesManager = Get-PimGraphAppRoleMap
-    -RoleSet Manager): Graph User.ReadBasic.All + GroupMember.Read.All; Reader on the PIM resource group; Storage Blob Data
+    -RoleSet Manager): NO Graph permission (GRAPH-PICKER 3.1.42; User.ReadBasic.All + GroupMember.Read.All until 3.1.41 are
+    now EXCESS); Reader on the PIM resource group; Storage Blob Data
     Contributor on the container pim-auth-tokens; Storage Queue Data Message Sender on the queue pim-wake; AcrPull on the
     registry the Manager pulls from; Cognitive Services OpenAI User on the AI chat's account only while the AI chat is on.
     A 'kept' row of the list (a retired right an OLD version still used) is NOT approved here: this code is past it.
@@ -91,12 +92,21 @@ function Get-PimWebTrimMode {
     return 'on'
 }
 
+function Get-PimWebTrimCustomRolePrefix {
+    <# PURE. The rights list's custom-role rule (PIM-RightsList.ps1 Get-PimRightsCustomRolePrefix), usable without that file. #>
+    param([AllowEmptyString()][AllowNull()][string]$Role)
+    if (Get-Command Get-PimRightsCustomRolePrefix -ErrorAction SilentlyContinue) { return (Get-PimRightsCustomRolePrefix -Role $Role) }
+    $i = "$Role".IndexOf('<')
+    if ($i -le 0 -or "$Role" -notmatch '<[A-Za-z0-9 _-]+>\s*$') { return '' }
+    return "$Role".Substring(0, $i)
+}
+
 function Get-PimWebTrimApprovedSet {
     <#
       PURE (reads the code's grant files through the rights list). The web identity's APPROVED rights:
         @{ ok; reason; graph = <appRoleId -> name> (Microsoft Graph); azure = @(@{ key; roleId; role }) }
       -List: an already built rights list (tests); else Get-PimApprovedRightsList -Version. ANY doubt = ok $false (the
-      caller then removes NOTHING): no web identity, an empty Graph or Azure part, a Graph row on another resource, a
+      caller then removes NOTHING): no web identity, an empty Azure part, a Graph row on another resource, a
       directory-role row (the web never holds one), an unknown kind.
     #>
     param([string]$Version = '', [AllowNull()][object]$List = $null)
@@ -115,6 +125,16 @@ function Get-PimWebTrimApprovedSet {
             if ("$(Get-PimWebTrimField $r 'when')" -eq 'kept') { continue }
             $kind = "$(Get-PimWebTrimField $r 'kind')"
             $rid = "$(Get-PimWebTrimField $r 'roleId')".Trim().ToLowerInvariant()
+            # 2026-11-17: a CUSTOM Azure role (its id differs per install) has no roleId in the list -- it is matched by its NAME
+            # PREFIX ('<name> - <account>'; engine\_shared\PIM-RightsList.ps1 Get-PimRightsCustomRolePrefix)
+            $cpfx = Get-PimWebTrimCustomRolePrefix -Role "$(Get-PimWebTrimField $r 'role')"
+            if ($kind -eq 'azure-rbac' -and -not $rid -and $cpfx) {
+                $id = "$(Get-PimWebTrimField $r 'id')"
+                $key = if ($id -match '^web\.azure\.(.+)$') { $Matches[1] } else { '' }
+                if (-not $key) { throw "the approved Azure right '$id' has no key" }
+                $az.Add([ordered]@{ key = $key; roleId = ''; role = "$(Get-PimWebTrimField $r 'role')"; namePrefix = $cpfx })
+                continue
+            }
             if ($rid -notmatch '^[0-9a-f-]{36}$') { throw "the approved right $(Get-PimWebTrimField $r 'id') has no role id" }
             switch ($kind) {
                 'graph-app-role' {
@@ -130,7 +150,8 @@ function Get-PimWebTrimApprovedSet {
                 default { throw "the approved right $(Get-PimWebTrimField $r 'id') has a kind this step does not place ($kind)" }
             }
         }
-        if (-not $o.graph.Count) { throw 'the approved set has no Graph right' }
+        # GRAPH-PICKER (3.1.42): an EMPTY Graph part is the approved set now (the web identity holds no Graph permission);
+        # the Azure part stays the fail-closed anchor -- an empty one still means the list was not read right
         if (-not $az.Count) { throw 'the approved set has no Azure right' }
         $o.azure = @($az.ToArray()); $o.ok = $true
     } catch { $o.ok = $false; $o.reason = ((("$($_.Exception.Message)") -split "`n")[0]).Trim(); $o.graph = [ordered]@{}; $o.azure = @() }
@@ -346,42 +367,36 @@ function New-PimWebTrimMailPayload {
     <#
       PURE. ONE queued notify request for the admins (the SECURE-WEB-1 path: pim.ChangeQueue, Kind Action, type
       'notify-mail' -- the SAME shape as engine\_shared\PIM-Notify.ps1 New-PimNotifyMailAction; the ENGINE sends it as its own
-      identity, Invoke-PimQueueNotifyMail). Template 'alert-notice'; the findings are the removed and the reported items.
-      Returns $null when there is no recipient or nothing to say.
+      identity, Invoke-PimQueueNotifyMail). Template 'alert-notice'.
+      TRIM-INTERNAL-1 (coordinator, URGENT, 2026-11-17 -- a customer received "Warning: The update found database access
+      outside ..." and forwarded it): ONLY a REMOVAL is mailed (the owner's 102 decision covers removals), calmly, as a
+      least-privilege clean-up (Information). A REPORTED-only item (WEB-IDENTITY-EXCESS, SQL-SUPPORT-OWNER) and the listed old
+      database users are support-access hygiene the customer cannot act on: they go to Invardia as fix requests only, never
+      into this mail. -Reported / -Listed are accepted and IGNORED. Returns $null when there is no recipient or nothing removed.
     #>
     param([AllowEmptyCollection()][object[]]$Removed = @(), [AllowEmptyCollection()][object[]]$Reported = @(), [AllowEmptyCollection()][object[]]$Listed = @(),
           [AllowEmptyCollection()][string[]]$Recipients = @(), [string]$Identity = 'id-pim-web', [string]$RaisedBy = 'update', [datetime]$NowUtc = [datetime]::UtcNow)
     $to = @(@($Recipients) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
     if (-not $to.Count) { return $null }
-    $rm = @($Removed | Where-Object { $_ }); $rp = @($Reported | Where-Object { $_ }); $ls = @($Listed | Where-Object { $_ })
-    if (-not $rm.Count -and -not $rp.Count -and -not $ls.Count) { return $null }
+    $rm = @($Removed | Where-Object { $_ })
+    if (-not $rm.Count) { return $null }
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
-    $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($x in $rm) { $lines.Add('Removed: ' + (& $enc $x.text)) }
-    foreach ($x in $rp) { $lines.Add('Reported, not removed: ' + (& $enc $x.text) + ' -- ' + (& $enc $x.reason)) }
-    foreach ($x in $ls) { $lines.Add('Listed only (not removed in this release): ' + (& $enc $x.text)) }
-    $webRp = @($rp | Where-Object { "$($_.class)" -notlike 'sql-*' })
-    $title = if ($webRp.Count) { "The internet-facing web identity $Identity holds rights outside its approved set" }
-             elseif ($rm.Count) { "The internet-facing web identity $Identity was trimmed to its approved set" }
-             else { 'The update found database access outside the approved set' }
-    $find = @(@($rm | ForEach-Object { @{ kind = 'Removed by the update'; name = "$($_.text)" } }) +
-              @($rp | ForEach-Object { @{ kind = 'Held, reported to PIM Manager support'; name = "$($_.text)" } }) +
-              @($ls | ForEach-Object { @{ kind = 'Database users of identities that no longer exist (listed only)'; name = "$($_.text)" } }))
-    $act = $rp.Count
+    $lines = @($rm | ForEach-Object { 'Removed: ' + (& $enc $_.text) })
+    $title = "Least-privilege clean-up of the web app identity $Identity"
     $tokens = [ordered]@{
         AlertTitle    = $title
         AlertEvent    = 'drift'
-        AlertDetail   = ($lines.ToArray() -join '<br>')
+        AlertDetail   = ($lines -join '<br>')
         AlertTab      = 'settings'
         Instance      = 'update'
         WhenUtc       = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-        AlertHeadline = "The update removed $($rm.Count) right(s) from $Identity, reported $($rp.Count) it may not remove itself and listed $($ls.Count) database user(s) of identities that no longer exist."
-        AlertAction   = $(if ($act) { 'No action is needed from you: PIM Manager support removes the reported rights. Contact support if you granted one of them on purpose.' } else { 'No action is needed. Contact PIM Manager support if you granted one of these rights on purpose.' })
-        AlertWho      = $(if ($act) { 'PIM Manager team' } else { 'Customer' })
-        AlertStatus   = $(if ($act) { 'Warning' } else { 'Information' })
+        AlertHeadline = "The update removed $($rm.Count) right(s) the web app identity $Identity does not need -- a routine least-privilege clean-up."
+        AlertAction   = 'No action is needed. Contact PIM Manager support if you granted one of these rights on purpose.'
+        AlertWho      = 'Customer'
+        AlertStatus   = 'Information'
         AlertProblem  = $title
-        AlertTodo     = $(if ($act) { 'PIM Manager support removes the reported rights.' } else { 'Nothing.' })
-        AlertFindings = $find
+        AlertTodo     = 'Nothing.'
+        AlertFindings = @($rm | ForEach-Object { @{ kind = 'Removed by the update (least-privilege clean-up)'; name = "$($_.text)" } })
     }
     return [ordered]@{ type = 'notify-mail'; mailType = 'alert-notice'; tokens = $tokens; recipients = $to; attachments = @()
                        event = 'web-identity-trim'; raisedBy = "$RaisedBy"; raisedUtc = $NowUtc.ToUniversalTime().ToString('o') }
@@ -474,7 +489,7 @@ function Invoke-PimSqlLeastPrivilegeCheck {
         $o.supportOwner = 'held'
         $k = "sql-support-owner|$appId"
         $o.reported += @{ class = 'sql-support-owner'; key = $k; code = 'SQL-SUPPORT-OWNER'; text = "the Support app's database user holds db_owner $held"; reason = $why; part = (Get-PimWebTrimItemPart -Class 'sql-support-owner' -Key $k) }
-        $lines.Add(@{ level = 'warn'; text = "REPORTED (not removed) the Support app's database user holds db_owner $held -- $why" })
+        $lines.Add(@{ level = 'info'; text = "reported to PIM Manager support (internal, not removed) the Support app's database user holds db_owner $held -- $why" })
     }
     # ---- (b) database users of identities that no longer exist (LISTED only)
     $seeOk = $true; $checked = 0
@@ -567,7 +582,9 @@ function Invoke-PimWebIdentityTrim {
                 foreach ($a in $ara) {
                     $resId = "$(Get-PimWebTrimField $a 'resourceId')".Trim(); $roleId = "$(Get-PimWebTrimField $a 'appRoleId')".Trim().ToLowerInvariant()
                     $onGraph = ($resId -ieq $graphSpId)
-                    $nm = if ($onGraph -and $ap.graph.Contains($roleId)) { $ap.graph[$roleId] } else { "app role $roleId" }
+                    # GRAPH-PICKER (3.1.42): the two picker rights the web held until 3.1.41 are named, not shown as a bare id
+                    $retiredNames = @{ '97235f07-e226-4f63-ace3-39588e11d3a1' = 'User.ReadBasic.All'; '98830695-27a2-44f7-8c18-0c3ebc9698f6' = 'GroupMember.Read.All' }
+                    $nm = if ($onGraph -and $ap.graph.Contains($roleId)) { $ap.graph[$roleId] } elseif ($onGraph -and $retiredNames.ContainsKey($roleId)) { $retiredNames[$roleId] } else { "app role $roleId" }
                     $txt = "Graph app role $nm on $(Get-PimWebTrimField $a 'resourceDisplayName')"
                     $it = [ordered]@{ class = 'graph-app-role'; key = "graph|$($resId.ToLowerInvariant())|$roleId"; id = "$(Get-PimWebTrimField $a 'id')"; resourceId = $resId; text = $txt; verdict = ''; why = '' }
                     if ($onGraph -and $ap.graph.Contains($roleId)) { $it.verdict = 'approved' } else { $it.verdict = 'excess'; $it.why = $(if ($onGraph) { 'not in the approved Graph set' } else { 'an app role on another resource (the web holds Graph roles only)' }) }
@@ -600,6 +617,18 @@ function Invoke-PimWebIdentityTrim {
             $rguid = ($rd.Trim().TrimEnd('/') -split '/')[-1].ToLowerInvariant()
             $v = Get-PimWebTrimAzureVerdict -RoleId $rguid -Scope $sc -Approved $ap.azure -RgScope $rgScope -RegistryNames $regNames -AiChat $AiChat
             $rn = @($ap.azure | Where-Object { "$(Get-PimWebTrimField $_ 'roleId')" -eq $rguid } | ForEach-Object { "$(Get-PimWebTrimField $_ 'role')" })[0]
+            # 2026-11-17: a CUSTOM approved role has no fixed id -- an assignment not approved by id is judged by its role
+            # definition's NAME against the approved name prefixes; a name that cannot be read is KEPT (fail closed)
+            $cust = @($ap.azure | Where-Object { "$(Get-PimWebTrimField $_ 'namePrefix')" })
+            if ($v.verdict -eq 'excess' -and $cust.Count) {
+                $rdName = ''
+                try { $rdName = "$(Get-PimWebTrimField (Get-PimWebTrimField (& $Arm 'GET' "$($rd.Trim())?api-version=2022-04-01" $null) 'properties') 'roleName')".Trim() } catch { $rdName = '' }
+                if (-not $rdName) { $v = @{ verdict = 'keep'; key = ''; why = 'a custom role is approved and this role''s name could not be read' } }
+                else {
+                    $hit = @($cust | Where-Object { $rdName.Length -gt "$($_.namePrefix)".Length -and $rdName.StartsWith("$($_.namePrefix)", [StringComparison]::OrdinalIgnoreCase) })[0]
+                    if ($hit) { $v = @{ verdict = 'approved'; key = "$($hit.key)"; why = '' }; $rn = $rdName }
+                }
+            }
             if (-not $rn) { $rn = "role $rguid" }
             $items.Add([ordered]@{ class = 'azure-rbac'; key = "azure|$rguid|$($sc.Trim().TrimEnd('/').ToLowerInvariant())"; id = "$(Get-PimWebTrimField $r 'id')"; scope = $sc; text = "Azure $rn at $sc"; verdict = $v.verdict; why = $v.why })
         }
@@ -694,7 +723,7 @@ function Invoke-PimWebIdentityTrim {
         $reportedItems = @($excess | Where-Object { -not $_['removed'] -and -not ($dry -and $_.can) })
         foreach ($it in $reportedItems) {
             $res.reported += @{ class = $it.class; key = $it.key; text = $it.text; reason = "$($it.reason)"; part = (Get-PimWebTrimItemPart -Class $it.class -Key $it.key) }
-            & $say 'warn' "REPORTED (not removed) $($it.text) -- $($it.reason)"
+            & $say 'info' "reported to PIM Manager support (internal, not removed) $($it.text) -- $($it.reason)"
         }
         foreach ($k in @($res.kept)) { & $say 'info' "kept, not provably excess: $k" }
         if (-not @($excess).Count -and -not @($res.unread).Count) { & $say 'info' "$WebName holds its approved set only ($(@($res.approved).Count) right(s))" }
@@ -746,7 +775,7 @@ function Invoke-PimWebIdentityTrim {
             if ($newRep.Count) { & $say 'info' ("fix request to PIM Manager support for $($newRep.Count) new item(s): " + (@($res.fixRequests | ForEach-Object { "$($_.part)$(if (-not $_.registered -and $_.reason) { " ($($_.reason))" })" }) -join ', ')) }
             # the mail: on a removal, or on an item reported for the first time -- never the same held item every night
             $mailNew = $(if ($storeOk) { @($newRep) + @($newListed) } else { @() })
-            if (@($res.removed).Count -or @($mailNew).Count) {
+            if (@($res.removed).Count) {   # TRIM-INTERNAL-1: ONLY a removal is mailed; a reported-only item is a fix request to Invardia, never a customer mail
                 # the old database users are listed ONCE (the mail that first finds them), never again while they stay
                 $pl = New-PimWebTrimMailPayload -Removed @($res.removed) -Reported @($res.reported) -Listed @($newListed) -Recipients $Recipients -Identity $WebName -NowUtc $NowUtc
                 if ($null -eq $pl) { $res.mail = @{ queued = $false; reason = 'no alert recipient is configured' } }

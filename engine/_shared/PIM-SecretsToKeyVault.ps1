@@ -149,9 +149,13 @@ function Test-PimSkvSecretEnvName {
       PURE. Does a container environment variable NAME say it carries a secret? The SAME rule as the setup step
       'keyvault-secrets-only' (PIM-SetupSteps.ps1 Test-PimSetupSecretEnvName): password, client secret, API / account /
       install / uplink / signing / private key, connection string, SAS. ..._URL / ..._NAME / ..._ID never match.
+      2026-11-17: a name ENDING in Id / Url / Uri / Name (..._ID, ...KeyId, ..._URL) never matches, whatever words come
+      before it -- PIM_BaselineSigningKeyId is a Key Vault key URL, not a signing key.
     #>
     param([AllowNull()][string]$Name)
-    return [bool]("$Name".Trim() -match '(?i)(SECRET|PASSWORD|PASSWD|(^|_)PWD($|_)|API_?KEY|ACCOUNT_?KEY|CONNECTION_?STRING|(^|_)SAS($|_)|PRIVATE_?KEY|INSTALL_?KEY|UPLINK_?KEY|SIGNING_?KEY)')
+    $n = "$Name".Trim()
+    if ($n -cmatch '(_(?i:ID|URL|URI|NAME)|Id|Url|Uri|Name)$') { return $false }
+    return [bool]($n -match '(?i)(SECRET|PASSWORD|PASSWD|(^|_)PWD($|_)|API_?KEY|ACCOUNT_?KEY|CONNECTION_?STRING|(^|_)SAS($|_)|PRIVATE_?KEY|INSTALL_?KEY|UPLINK_?KEY|SIGNING_?KEY)')
 }
 
 function Test-PimSkvSecretText {

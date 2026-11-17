@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.42 -- 2026-11-17
+
+- Security: the web-identity trim's reported-only findings (WEB-IDENTITY-EXCESS, SQL-SUPPORT-OWNER, leftover database users) are internal -- a fix request to Invardia and an info line, no admin mail, no warning run; the web identity's approved Graph set is empty; the updater's retired SQL admin group JIT is removed and never re-granted; the bundle store network-rules role is on the rights list; a name ending Id/Url/Uri/Name is no secret.
+
 ## 3.1.41 -- 2026-11-17
 
 - A schema step the quiesce held on the SAME version (the new updater's own follow-up run) is now retried every 15 minutes until it runs, instead of "nothing to do"; the ring approval stays the authority. Found at ring 0 on 3.1.40: pim.DirectoryPrincipal was missing and the people picker failed.

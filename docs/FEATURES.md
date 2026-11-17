@@ -220,14 +220,27 @@ deployment is a supported choice) and no credentials lying around.
   and PIM Manager each also remove any access whose end has passed, so it never outlives its window. Access that was
   already there before is recorded and left alone. Every grant, extension and removal is recorded. Proven on a real
   SQL Server and on the internal environment (PIM Manager 3.0.17).
-- **The Support app is in the database admin group only while a support session is open.** ✅ 2026-11-09 (3.0.70) —
-  At the Setup level, while Invardia's support session is open with your Setup consent, PIM Manager's updater makes the
+- **The Support app is in the database admin group only while a support session is open.** RETIRED 2026-11-17 (3.1.42):
+  support's database access is now the time-limited database-level access of the support SQL access job (the line
+  above); the updater no longer puts the Support app into the database admin group. *Until 3.1.41:* At the Setup level, while Invardia's support session is open with your Setup consent, PIM Manager's updater makes the
   Invardia Support app a member of the database admin group through a time-limited PIM for Groups membership — never a
   permanent one and never an owner. The membership is set to end when the session is due to end, never more than 24 hours
   ahead; the updater moves the end on while the session stays open, reads each change back, and takes the membership away
   when the session is closed. If the updater cannot reach Invardia, nothing changes and the membership ends by itself. A
   standing membership or ownership left from an earlier version is recorded first and then replaced by the time-limited
   membership in the next Setup session. Outside a session the Support app keeps only its read-only database user.
+- **The web app holds no Microsoft Graph permission.** ✅ 2026-11-17 (3.1.42) — The people and group pickers read what
+  the engine stores in the PIM database, so PIM Manager no longer gives its web app User.ReadBasic.All or
+  GroupMember.Read.All. Where an installation still holds them, the updater's check of the web identity lists them as
+  more than it needs.
+- **The engine's bundle-store role is on the approved rights list.** ✅ 2026-11-17 (3.1.42) — A managing tenant whose
+  bundle store is reached over the internet gives the engine one custom role, "PIM Manager bundle store network rules",
+  on that one storage account (read and set its network rules; no data, no keys). It is now listed with the engine's
+  approved rights and recognised by its name, so it is never reported as unexpected.
+- **A Key Vault key address is not taken for a secret.** ✅ 2026-11-17 (3.1.42) — The setup check "secrets only in Key
+  Vault" and the move of secrets into Key Vault read a setting whose name ends in Id, Url, Uri or Name as an address,
+  never as a secret (the baseline signing key's Key Vault address was reported as a plain secret). Real secrets are
+  still found.
 - **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
   licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
   key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own

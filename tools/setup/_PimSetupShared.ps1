@@ -476,11 +476,11 @@ $script:PimGraphAppRoles = @{
 # web app reads the cache). The 15 read roles this set held until 3.0.68 (Directory.Read.All, User.Read.All, Group.Read.All,
 # RoleManagement.Read.All, ...) are GONE. tests/Test-PimWebGraphMinimal.ps1 asserts this set is EXACTLY these two.
 # NOTE: Grant-PimMiGraph only ADDS: an install that already holds the old 15 keeps them until they are removed (a live change).
-# Ids from the Microsoft Graph permissions reference (application column), 2026-11-09.
-$script:PimGraphAppRolesManager = @{
-    'User.ReadBasic.All'                              = '97235f07-e226-4f63-ace3-39588e11d3a1'   # people picker + UPN -> id lookups (basic profile)
-    'GroupMember.Read.All'                            = '98830695-27a2-44f7-8c18-0c3ebc9698f6'   # group picker + group id -> name (basic group properties)
-}
+# GRAPH-PICKER (framework SECURE-WEB-1; 3.1.42, 2026-11-17): the set is now EMPTY. The pickers and the user / group lookups
+# read PIM's database (pim.DirectoryPrincipal, written by the engine) -- proven live on 3.1.40 / 3.1.41. The web identity holds
+# NO Microsoft Graph permission; User.ReadBasic.All + GroupMember.Read.All (3.0.69 - 3.1.41) are no longer granted, and the
+# web-identity trim (engine\_shared\PIM-WebIdentityTrim.ps1) reports them as excess where an install still holds them.
+$script:PimGraphAppRolesManager = @{}
 
 # DBINIT-MEMBERSHIP (owner 2026-11-05 "Grant updater the right"): the updater's Graph set lives in ONE engine file, read by
 # this install path (RoleSet Updater), the ops / Support-app grant and the updater's own check.
@@ -742,6 +742,8 @@ function Grant-PimMiGraph {
     # the tenant before using it. Verification, not hope -- the same rule the engine already follows.
     # 100.41: the token comes from PIM-Rest's ONE client (no az), pinned to the target tenant -- -ExpectedTenantId, else the
     # tenant -SubscriptionId belongs to.
+    # GRAPH-PICKER (3.1.42): an EMPTY set (the Manager's) grants nothing -- no Graph token, no call
+    if (-not @((Get-PimGraphAppRoleMap -RoleSet $RoleSet).Keys).Count) { Write-Host "    role set: $RoleSet (0 app-roles) -- nothing to grant" -ForegroundColor DarkGray; return }
     $gtok = Get-PimSetupGraphToken -SubscriptionId $SubscriptionId -ExpectedTenantId $ExpectedTenantId
     if (-not $gtok) { throw "Grant-PimMiGraph: no Graph token (sign in as a role-assigner: the setup identity could not get one -- $($global:PimSetupGraphTokenError))." }
     if ("$ExpectedTenantId".Trim()) {

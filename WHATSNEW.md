@@ -1,5 +1,18 @@
 # What's new in PIM Manager
 
+## 3.1.42 · 2026-11-17 · Security
+
+Support-access findings go to Invardia support only, and the web app keeps only the rights it needs.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Support-access findings stay with support** - When an update finds extra support access, it now reports it to Invardia support instead of mailing your admins. You are mailed only when PIM actually removes a right.
+- **Fewer rights for the web app** - The web app no longer needs any directory read rights. An old support step that needed extra rights is retired, and a key reference is no longer reported as a secret.
+
 ## 3.1.41 · 2026-11-17 · Fix-only
 
 An update now always finishes its own database changes, even when a PIM job was running at the time.

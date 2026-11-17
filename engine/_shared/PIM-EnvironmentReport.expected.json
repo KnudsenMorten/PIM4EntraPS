@@ -66,12 +66,11 @@
       "role": "manager",
       "label": "PIM Manager (web app managed identity)",
       "match": { "managedIdentityName": "ca-pim-manager", "self": true },
-      "purpose": "Serves the PIM Manager pages. It reads the directory only for the people and group pickers; every other directory fact is read by the engine and stored for the pages, and every change is queued and applied by the engine.",
-      "graph": [
-        { "permission": "User.ReadBasic.All", "why": "The people picker, and finding the account an admin types by its user name (basic profile only)" },
-        { "permission": "GroupMember.Read.All", "why": "The group picker, and confirming the group an admin picks (basic group properties)" }
-      ],
+      "purpose": "Serves the PIM Manager pages. It holds no Microsoft Graph permission: the people and group pickers and every other directory fact come from what the engine reads and stores for the pages, and every change is queued and applied by the engine.",
+      "graph": [],
       "graphForbidden": [
+        { "permission": "User.ReadBasic.All", "why": "No longer needed (3.1.42): the people picker and the user name lookups read what the engine stores in the PIM database" },
+        { "permission": "GroupMember.Read.All", "why": "No longer needed (3.1.42): the group picker and the group lookups read what the engine stores in the PIM database" },
         { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" },
         { "permission": "Directory.Read.All", "why": "The web app does not read the whole directory: the engine reads it and stores what the pages show" },
         { "permission": "User.Read.All", "why": "The web app reads only the basic profile the pickers need" },

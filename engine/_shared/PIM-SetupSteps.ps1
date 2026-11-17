@@ -314,8 +314,12 @@ function Get-PimSetupKeyVaultPurgeFacts {
 function Test-PimSetupSecretEnvName {
     # PURE. Does a container environment variable NAME say it carries a secret? (a password, a client secret, an API / account /
     # install / private key, a connection string, a SAS). Names like ..._URL / ..._NAME / ..._ID / ..._RING never match.
+    # 2026-11-17: a name ENDING in Id / Url / Uri / Name (..._ID, ...KeyId, ..._URL) says WHERE a secret or key lives, never
+    # the secret itself (PIM_BaselineSigningKeyId is a Key Vault key URL) -- never a secret, whatever words come before it.
     param([AllowNull()][string]$Name)
-    return [bool]("$Name".Trim() -match '(?i)(SECRET|PASSWORD|PASSWD|(^|_)PWD($|_)|API_?KEY|ACCOUNT_?KEY|CONNECTION_?STRING|(^|_)SAS($|_)|PRIVATE_?KEY|INSTALL_?KEY|UPLINK_?KEY|SIGNING_?KEY)')
+    $n = "$Name".Trim()
+    if ($n -cmatch '(_(?i:ID|URL|URI|NAME)|Id|Url|Uri|Name)$') { return $false }
+    return [bool]($n -match '(?i)(SECRET|PASSWORD|PASSWD|(^|_)PWD($|_)|API_?KEY|ACCOUNT_?KEY|CONNECTION_?STRING|(^|_)SAS($|_)|PRIVATE_?KEY|INSTALL_?KEY|UPLINK_?KEY|SIGNING_?KEY)')
 }
 
 function Get-PimSetupSecretPlainCount {
