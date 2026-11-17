@@ -1,5 +1,30 @@
 # What's new in PIM Manager
 
+## 3.1.44 · 2026-11-17 · Security
+
+Old standing database rights of the support app are removed safely, after PIM proves the time-limited support access works.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Old support database rights removed safely** - Where Invardia support still holds old standing database rights, PIM removes them after proving that read-only access and a time-limited support session both work. It reads the result back.
+
+## 3.1.43 · 2026-11-17 · Fix-only
+
+An admin account deleted outside PIM now disappears by itself, and a few bad rows give a warning instead of a failed job.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Accounts deleted outside PIM finish by themselves** - When an admin account no longer exists in Microsoft Entra ID, PIM confirms it and removes the row by itself. Delete on such an account says it is already gone.
+- **Warnings instead of failed jobs for bad rows** - A job that only meets a few rows with a missing role now ends with a warning naming those rows and what to do.
+
 ## 3.1.42 · 2026-11-17 · Security
 
 Support-access findings go to Invardia support only, and the web app keeps only the rights it needs.

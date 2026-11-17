@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.44 -- 2026-11-17
+
+- Security (SECAUDIT-1a 4a): the database job removes the Support app's LEGACY standing db_owner (no open session marker) only after both proofs at that install -- its read-only user in pim_support_read, and one real JIT open/close recorded by the job -- in one transaction that re-checks every rule; read back, audited, reported to Invardia; never while a session is open, never another principal or role.
+
+## 3.1.43 -- 2026-11-17
+
+- An admin whose Entra account is gone (Deleted or Removed, confirmed read-only by object id, user name and deleted items) finishes by itself: the row is removed with an audit entry and Going live counts it done; DELETE on it answers 200 already gone. A run whose only failures are row-level catalogued data findings is a warning naming the rows and the admin action; "auto-fix available" only when that fix can run.
+
 ## 3.1.42 -- 2026-11-17
 
 - Security: the web-identity trim's reported-only findings (WEB-IDENTITY-EXCESS, SQL-SUPPORT-OWNER, leftover database users) are internal -- a fix request to Invardia and an info line, no admin mail, no warning run; the web identity's approved Graph set is empty; the updater's retired SQL admin group JIT is removed and never re-granted; the bundle store network-rules role is on the rights list; a name ending Id/Url/Uri/Name is no secret.

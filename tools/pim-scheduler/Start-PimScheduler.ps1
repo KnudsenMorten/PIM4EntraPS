@@ -621,6 +621,31 @@ $engineHandler = {
                 detail=("engine $mode [$scope] " + ($sumW -join ' ') + ' -- ' + $waitTxt) }
         }
     }
+    # JOB-ROW-WARN-1 (owner 2026-11-17, Home: "2 job(s) FAILED: delta-workloads, full-reconcile" -- the only cause was two
+    # binding rows naming a workload role that does not exist [WORKLOAD-ROLE-NOT-FOUND]; every other step was ok). A row the
+    # admin wrote that cannot be applied is a DATA finding, not a failed job: a run whose ONLY failures are row-level
+    # catalogued data findings (Test-PimEngineFailureIsRowData: a known customer-config code the customer acts on, a named
+    # row, never a Remove) -- besides items that are only waiting -- is a WARNING run that names the rows and says what the
+    # admin does. Anything else (an uncatalogued item, a product fault, a failed removal, a hold, an unbound scope, a scope
+    # error the run did not itemise) stays FAILED below.
+    if ($bad.Count -and (Get-Command Test-PimEngineFailureIsRowData -ErrorAction SilentlyContinue) -and (Get-Command Format-PimRowDataWarning -ErrorAction SilentlyContinue)) {
+        $__rdScopes = @($bad | Where-Object { [int]$_.errors -gt 0 })
+        $__rdUnbound = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' }).Count
+        $__rdUnitemised = @($bad | Where-Object { [int]$_.errors -le 0 -or -not $_.PSObject.Properties['failures'] -or @(@($_.failures) | Where-Object { $_ }).Count -lt [int]$_.errors }).Count
+        $__rdItems = @($__rdScopes | ForEach-Object { if ($_.PSObject.Properties['failures']) { @($_.failures) | Where-Object { $_ } } })
+        $__rdRows = @($__rdItems | Where-Object { Test-PimEngineFailureIsRowData $_ })
+        $__rdRest = @($__rdItems | Where-Object { -not (Test-PimEngineFailureIsRowData $_) })
+        $__rdHolds = @($__rdItems | Where-Object { Test-PimEngineFailureIsApprovalHold $_ }).Count
+        $__rdRestOk = (-not $__rdRest.Count) -or ((Get-Command Test-PimEngineFailuresAreAllTransient -ErrorAction SilentlyContinue) -and (Test-PimEngineFailuresAreAllTransient -Failures $__rdRest -NowUtc $now))
+        if (-not $__rdUnbound -and -not $__rdUnitemised -and -not $__rdHolds -and $__rdRows.Count -and $__rdRestOk) {
+            $sumD = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
+            $rdTxt = Format-PimRowDataWarning -Failures $__rdRows
+            $wtTxt = if ($__rdRest.Count -and (Get-Command Format-PimFailureSummary -ErrorAction SilentlyContinue)) { ' ' + (Format-PimFailureSummary -Failures $__rdRest) } else { '' }
+            return [pscustomobject]@{ ran=$true; whatIf=[bool]$whatIf; warning=$true; warningKind='customer-data'; warningSummary=$rdTxt
+                rowFindings=[int]$__rdRows.Count; warnings=@($rdTxt)
+                detail=("engine $mode [$scope] " + ($sumD -join ' ') + ' -- WARNING: ' + $rdTxt + $wtTxt) }
+        }
+    }
     if ($bad.Count) {
         $unbound = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' })
         $failed  = @($bad | Where-Object { [int]$_.errors -gt 0 })

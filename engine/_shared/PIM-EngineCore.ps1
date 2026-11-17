@@ -1760,6 +1760,19 @@ function Invoke-PimEngineScope {
         } catch {
             Write-Warning ("  [engine] {0}: the finished Remove rows were NOT cleaned up (they stay and are re-checked next run): {1} | {2}" -f $Scope, $_.Exception.Message, (Get-PimEngineErrorWhere -ErrorRecord $_))
         }
+        # ADMIN-GONE-1 (owner 2026-11-17): a provider may finish rows whose work is DONE outside the diff (the Admins scope: a
+        # Deleted / Removed admin whose account is confirmed gone from Microsoft Entra ID). It returns the finished rows; each
+        # is LIVE for the commit watcher (its Going-live item is done, never "on hold"). Never fails the pass.
+        if ($p.AfterApply -is [scriptblock]) {
+            try {
+                foreach ($__fin in @(& $p.AfterApply $Context)) {
+                    if ($null -eq $__fin) { continue }
+                    & $watchAdd 'NoChange' ([pscustomobject]@{ key = "$($__fin.key)"; desired = $__fin.row }) 'ok' ''
+                }
+            } catch {
+                Write-Warning ("  [engine] {0}: the finished rows step did not complete (nothing was changed by it; re-checked next run): {1}" -f $Scope, $_.Exception.Message)
+            }
+        }
     }
     # SEC-80: keep the managed-key ledger in step with this pass -- what PIM matched to a row or created joins it, what PIM
     # removed leaves it, and (only after a COMPLETE live read: not narrowed, not partial) what is no longer live leaves it.

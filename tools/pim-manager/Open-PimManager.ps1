@@ -14124,8 +14124,11 @@ function Get-PimManagerAdminDeletePlan {
         400 confirm / justification / upn   404 no admin row   409 already Deleted   403 neither allowed nor a sponsor
     #>
     param([AllowEmptyString()][string]$Upn = '', [hashtable]$Caller, [AllowEmptyString()][string]$Confirm = '', [AllowEmptyString()][string]$Justification = '',
-          [object[]]$AdminRows = @(), [object[]]$AssignmentRows = @(), [hashtable]$DepartmentOwners = @{})
-    $res = [ordered]@{ status = 0; mode = ''; error = ''; code = ''; upn = "$Upn".Trim(); userName = ''; row = $null; delegations = @() }
+          [object[]]$AdminRows = @(), [object[]]$AssignmentRows = @(), [hashtable]$DepartmentOwners = @{},
+          # ADMIN-GONE-1 (2026-11-17): { param($upn) } -> 'gone' | 'pending' | 'present' -- what the ENGINE's record says about the
+          # account (the web app reads no directory). $null = not asked (the 409 as before).
+          [scriptblock]$AccountState = $null)
+    $res = [ordered]@{ status = 0; mode = ''; error = ''; code = ''; upn = "$Upn".Trim(); userName = ''; row = $null; delegations = @(); note = '' }
     if ("$Confirm".Trim() -cne 'DELETE') { $res.status = 400; $res.code = 'typed-delete'; $res.error = "confirmation required: send confirm = 'DELETE' (in the body, or the X-PIM-Confirm header) -- nothing was requested."; return [pscustomobject]$res }
     if (-not $res.upn) { $res.status = 400; $res.error = 'userPrincipalName is required.'; return [pscustomobject]$res }
     if (-not "$Justification".Trim()) { $res.status = 400; $res.error = 'a justification is required -- it is recorded with the delete.'; return [pscustomobject]$res }
@@ -14134,7 +14137,27 @@ function Get-PimManagerAdminDeletePlan {
     $row = $found.row; $res.row = $row
     $res.upn = $(if ("$($row.UserPrincipalName)".Trim()) { "$($row.UserPrincipalName)".Trim() } else { $res.upn })
     $res.userName = "$($row.UserName)".Trim()
-    if ("$($row.AccountStatus)".Trim() -ieq 'Deleted') { $res.status = 409; $res.error = "'$($res.upn)' is already AccountStatus=Deleted -- nothing to request."; return [pscustomobject]$res }
+    # ADMIN-GONE-1 (owner 2026-11-17: "trying to delete an account i deleted long ago but it keeps showing ... and is not deleted,
+    # why"). A normal admin already Deleted (or Removed) whose account the engine's record says is gone: the delete is DONE --
+    # 200 "already gone", and the engine finishes the row on its next run (it confirms read-only, then the row shows nowhere).
+    # Never for an existing office account or an AD account (their own answers below); a record not read yet = asked, 409.
+    $__agSt = "$($row.AccountStatus)".Trim()
+    $__agAt = if ($row -is [System.Collections.IDictionary]) { "$($row['AdminType'])" } elseif ($row.PSObject.Properties['AdminType']) { "$($row.AdminType)" } else { '' }
+    $__agTp = if ($row -is [System.Collections.IDictionary]) { "$($row['TargetPlatform'])" } elseif ($row.PSObject.Properties['TargetPlatform']) { "$($row.TargetPlatform)" } else { '' }
+    if ($__agSt -in @('Deleted', 'Removed') -and $AccountState -and $__agAt.Trim() -notmatch '^(?i)existing|^office-user$' -and $__agTp.Trim() -ine 'AD') {
+        $__ag = ''; try { $__ag = "$(& $AccountState $res.upn)".Trim().ToLowerInvariant() } catch { $__ag = '' }
+        if ($__ag -eq 'gone') {
+            $res.status = 200; $res.mode = 'already-gone'; $res.code = 'already-gone'
+            $res.note = "'$($res.upn)' is already gone from Microsoft Entra ID. Nothing more to delete: PIM Manager finishes it on the next engine run, and it then shows nowhere."
+            return [pscustomobject]$res
+        }
+        if ($__ag -eq 'pending' -and $__agSt -ieq 'Deleted') {
+            $res.status = 409; $res.code = 'checking'
+            $res.error = "'$($res.upn)' is already marked for delete. PIM is checking whether the account still exists -- try again in a minute."
+            return [pscustomobject]$res
+        }
+    }
+    if ($__agSt -ieq 'Deleted') { $res.status = 409; $res.error = "'$($res.upn)' is already AccountStatus=Deleted -- nothing to request."; return [pscustomobject]$res }
     # 2026-10-27 (owner, internal: Delete account on Admin-PimTest-AD): an on-premises AD admin has no Microsoft Entra ID
     # object to pin, and PIM Manager never deletes an AD account (the hybrid worker creates and disables, never deletes). Said
     # at once, with what to do, instead of a failed pin.
@@ -20719,7 +20742,19 @@ function Handle-Request {
                 try { $admRowsD = @(Get-PimSqlRows -ConnectionString $csD -Entity 'Account-Definitions-Admins'); $asgRowsD = @(Get-PimSqlRows -ConnectionString $csD -Entity 'PIM-Assignments-Admins') }
                 catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the admin rows could not be read ($($_.Exception.Message)) -- nothing was requested" }; return 500 }
                 $callerD = Get-PimRevauditCaller -Admins @($admRowsD)
-                $planD = Get-PimManagerAdminDeletePlan -Upn $admPathUpn -Caller $callerD -Confirm $confD -Justification $justD -AdminRows $admRowsD -AssignmentRows $asgRowsD -DepartmentOwners (Get-PimManagerDepartmentOwnersForRule)
+                # ADMIN-GONE-1 (2026-11-17): the engine's record of the account (pim.DirectoryPrincipal; no Graph in the web app)
+                $acctStateD = { param($u)
+                    $r = $null; try { $r = Resolve-PimManagerDirectoryPrincipal -Kind 'user' -KeyType 'upn' -Key "$u" -MaxAgeHours 168 -Fresh } catch { $r = $null }
+                    if (-not $r) { return '' }
+                    switch ("$($r.state)") { 'notfound' { 'gone' } 'found' { 'present' } 'pending' { 'pending' } default { '' } } }
+                $planD = Get-PimManagerAdminDeletePlan -Upn $admPathUpn -Caller $callerD -Confirm $confD -Justification $justD -AdminRows $admRowsD -AssignmentRows $asgRowsD -DepartmentOwners (Get-PimManagerDepartmentOwnersForRule) -AccountState $acctStateD
+                if ($planD.status -eq 200 -and $planD.mode -eq 'already-gone') {
+                    $kickD = $null; try { $kickD = Start-PimManagerTickNow -Reason 'admin-already-gone' } catch { $kickD = $null }
+                    Write-PimManagerAuditEvent -Action 'admin.delete.already-gone' -Target "$($planD.upn)" -Result 'ok' -After ([ordered]@{ accountStatus = "$($planD.row.AccountStatus)"; by = "$($roleD.identity)"; via = 'api' })
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; action = 'already-gone'; upn = $planD.upn; note = "$($planD.note)"
+                        engine = $(if ($kickD) { "$($kickD.detail)" } else { 'the engine finishes it on its next scheduled start' }) })
+                    return 200
+                }
                 if ($planD.status -eq 404 -and $admPathUpn -and @(Get-PimManagerCentralAdminRows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $admPathUpn }).Count) {
                     Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$admPathUpn' is a CENTRAL admin managed by the managing tenant -- it is read-only here. A SuperAdmin of the managing tenant deletes it there (Delete account on every managed tenant)." }
                     return 409

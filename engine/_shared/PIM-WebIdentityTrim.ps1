@@ -448,7 +448,7 @@ function Invoke-PimSqlLeastPrivilegeCheck {
     #>
     param([Parameter(Mandatory)][scriptblock]$SqlScalar, [Parameter(Mandatory)][scriptblock]$Graph, [string]$SupportAppId = '',
           [AllowEmptyCollection()][string[]]$CandidateUsers = @(), [datetime]$NowUtc = [datetime]::UtcNow)
-    $o = [ordered]@{ supportOwner = 'unread'; reported = @(); orphans = @(); readClasses = @(); lines = @() }
+    $o = [ordered]@{ supportOwner = 'unread'; supportAppId = ''; reported = @(); orphans = @(); readClasses = @(); lines = @() }
     $lines = New-Object System.Collections.Generic.List[object]
     $short = { param($e) ((("$($e.Exception.Message)") -split "`n")[0]).Trim() }
     $why = 'not removed: the updater''s database user (pim_updater + db_ddladmin) cannot change db_owner membership, the update path sends no security statement, and the signed revoke removes only a db_owner its own support grant added'
@@ -485,6 +485,8 @@ function Invoke-PimSqlLeastPrivilegeCheck {
         $o.supportOwner = 'unread'
         $lines.Add(@{ level = 'warn'; text = "the support session state could not be read ($("$($st.problem)")) -- the Support user's db_owner was not judged; nothing changes" })
     }
+    # SECAUDIT-1a 4a (104.8): the Support app id this check read, for the removal step after it (PIM-SupportLegacyOwner.ps1)
+    if ($appId -match '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { $o.supportAppId = $appId }
     if ($held) {
         $o.supportOwner = 'held'
         $k = "sql-support-owner|$appId"

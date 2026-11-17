@@ -50,6 +50,10 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 # and the "no open Support session before a re-sign" read is the support-access module's own state read.
 . (Join-Path $solRoot 'engine/_shared/PIM-SchemaQuiesce.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SupportJit.ps1')
+# SECAUDIT-1a 4a (REQUIREMENTS 104.8): the Support app's LEGACY standing db_owner, removed after both proofs (step
+# support-legacy-owner, a REMOVAL: never in a grants-only run). The rules first, then the job-only statements.
+. (Join-Path $solRoot 'engine/_shared/PIM-SupportLegacyOwner.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-SupportLegacyOwnerSql.ps1')
 
 # PIM_DBINIT_STEPS (per execution): unset / 'all' = every step, as before; 'grants' = ONLY the part that may run BESIDE a running
 # PIM job (users, role membership, the access roles + grants; a re-sign of the access procedure only while no Support session is
@@ -92,7 +96,7 @@ if (@($plan.problems).Count) {
 # OPEN-06: the updater writes this job on EVERY install with PIM_DBINIT_PRINCIPALS = [] (no user to create). An EMPTY list
 # skips only the user step; the schema, the access model, the feature gates, the Manager access and the update record still
 # run when they are asked for. Nothing at all asked for = exit 0. (An UNSET list is still a configuration error, exit 2.)
-$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_DROP_USERS', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED') |
+$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_DROP_USERS', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED', 'PIM_DBINIT_SUPPORT_LEGACY_OWNER') |
              Where-Object { $v = "$([Environment]::GetEnvironmentVariable($_))".Trim(); $v -and ($_ -ne 'PIM_DBINIT_SCHEMA' -or $v -in @('1', 'true', 'yes', 'TRUE', 'Yes')) }
 if (-not @($plan.users).Count) {
     if (-not @($otherWork).Count) { Say 'no principals to create and nothing else asked for.' 'Yellow'; exit 0 }
@@ -121,6 +125,10 @@ if ("$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
 if ("$($env:PIM_DBINIT_FEATURE_GATES)$($env:PIM_DBINIT_FEATURE_DISABLE)".Trim()) { [void]$askedSteps.Add('feature-gates'); [void]$explicitSteps.Add('feature-gates') }
 if ("$($env:PIM_DBINIT_MANAGER_ACCESS)".Trim()) { [void]$askedSteps.Add('manager-access'); [void]$explicitSteps.Add('manager-access') }
 if ("$($env:PIM_DBINIT_UPDATE_SEED)".Trim()) { [void]$askedSteps.Add('update-seed'); [void]$explicitSteps.Add('update-seed') }
+# SECAUDIT-1a 4a: the setting stays on the job definition once the updater set it, so it is a DEFAULT step of the definition
+# (held, one line, under 'grants' -- never a refusal of a grants-only run); it runs only in a full run (after the quiesce)
+$slAsk = ConvertTo-PimSupportLegacyOwnerAsk -Value "$([Environment]::GetEnvironmentVariable((Get-PimSupportLegacyOwnerEnvName)))"
+if ($slAsk.asked -or -not $slAsk.ok) { [void]$askedSteps.Add((Get-PimSupportLegacyOwnerStepId)) }
 $stepPlan = Get-PimSchemaQuiesceDbInitPlan -Filter $stepF.filter -Asked @($askedSteps.ToArray()) -Explicit @($explicitSteps.ToArray())
 $runStep = { param($id) (-not $grantsOnly) -or (@($stepPlan.run) -contains "$id") }
 if ($grantsOnly) {
@@ -599,6 +607,29 @@ try {
             else { Say "update state NOT recorded ($($sr.reason)) -- the update job records it on its first run" 'Yellow' }
         } catch {
             Say "update state NOT recorded: $($_.Exception.Message) -- the update job records it on its first run" 'Yellow'
+        }
+    }
+    # ---- SUPPORT-LEGACY-OWNER (framework SECAUDIT-1a 4a, REQUIREMENTS 104.8) -- THE SWITCH'S LAST STEP -------------------
+    # The Invardia Support app's LEGACY standing db_owner (one no support grant marker added, so the JIT revoke never takes it)
+    # is removed DELIBERATELY, as this job's identity (the SQL admin group), ONLY when both proofs hold at THIS install: (P1)
+    # its read-only user is in pim_support_read, (P2) a time-limited open / close worked here (a db_owner marker of its SID,
+    # PreExisting = 0, revoked by the job) -- and never while a support session is open. The user is found BY SID from the
+    # app id the updater asked for (checked against the recorded consent). Every rule is checked again inside the one batch
+    # that drops the membership; it is read back, audited, and the answer recorded for the updater (pim.Settings
+    # SupportLegacyOwner), which tells Invardia. A REMOVAL step: never in a grants-only run. Its problem is a yellow line,
+    # never a failed job (the other steps did their work). LAST: after every other step of this run.
+    if (-not $failed -and ($slAsk.asked -or -not $slAsk.ok) -and (& $runStep (Get-PimSupportLegacyOwnerStepId))) {
+        Step 'support-legacy-owner'
+        if (-not $slAsk.ok) { Say "support-legacy-owner: $($slAsk.reason)" 'Yellow' }
+        else {
+            try {
+                $slScalar = { param($sqlText) $c6 = $conn.CreateCommand(); $c6.CommandText = $sqlText; $c6.CommandTimeout = 60; $c6.ExecuteScalar() }
+                $slExec = { param($sqlText) $c7 = $conn.CreateCommand(); $c7.CommandText = $sqlText; $c7.CommandTimeout = 120; [void]$c7.ExecuteNonQuery() }
+                $slAudit = { param($rec) Write-PimSqlAuditEvent -ConnectionString $cs -Actor 'job:dbinit' -ActorSource 'job' -Action "$($rec.action)" -Target "$($rec.target)" -After $rec -Result "$($rec.result)" }
+                $slRecord = { param($val) Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimSupportLegacyOwnerSettingName) -ValueJson (ConvertTo-Json -InputObject $val -Depth 6 -Compress) }
+                $sl = Invoke-PimSupportLegacyOwnerStep -Scalar $slScalar -Exec $slExec -AppId $slAsk.appId -Audit $slAudit -Record $slRecord
+                foreach ($l in @($sl.lines)) { Say $l $(switch ($sl.state) { 'removed' { 'Green' } 'failed' { 'Yellow' } 'refused' { 'Yellow' } default { 'DarkGray' } }) }
+            } catch { Say "support-legacy-owner: not done ($($_.Exception.Message)) -- the standing db_owner stays; the updater asks again" 'Yellow' }
         }
     }
 } finally {

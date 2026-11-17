@@ -220,6 +220,12 @@ deployment is a supported choice) and no credentials lying around.
   and PIM Manager each also remove any access whose end has passed, so it never outlives its window. Access that was
   already there before is recorded and left alone. Every grant, extension and removal is recorded. Proven on a real
   SQL Server and on the internal environment (PIM Manager 3.0.17).
+- **An older, permanent support admin right is taken back by itself.** 🟡 2026-11-17 (built, not released) — Where an
+  earlier version left the Invardia Support app as a permanent database owner, PIM Manager's own database job takes that
+  right back after an update. It does so only when the Support app's read-only user is in place and one time-limited
+  support session has opened and closed on this installation, and never while a support session is open. It checks the
+  result, records it in the audit log and tells Invardia. The Support app keeps its read-only user and the time-limited
+  access, and no other user or role is changed.
 - **The Support app is in the database admin group only while a support session is open.** RETIRED 2026-11-17 (3.1.42):
   support's database access is now the time-limited database-level access of the support SQL access job (the line
   above); the updater no longer puts the Support app into the database admin group. *Until 3.1.41:* At the Setup level, while Invardia's support session is open with your Setup consent, PIM Manager's updater makes the
@@ -599,6 +605,11 @@ deployment is a supported choice) and no credentials lying around.
   (for example the removals were taken back, or the change was applied), the next run finds nothing to hold and
   clears the hold by itself. Nobody has to acknowledge it. A held policy change set reads the same on every page that
   shows it — Approvals, Guards, Get Started and Overview — and the Guards page says what a guard holds right now.
+- **A row that cannot be applied is a warning, not a failed job.** ✅ 2026-11-17 (3.1.42) — When the only problem in
+  a run is rows written in a way that cannot be applied (for example a workload role name the workload does not have),
+  the job is a warning that names those rows and says what to do — fix the value or remove the row in the grid it
+  names. Everything else in the run was done. A real failure, a removal that did not happen or an unknown error still
+  fails the job. "Auto-fix available" is said only where a fix can really run by itself on that installation.
 
 ## 7. Engine — Providers / Connectors
 - **Map one PIM group to many workloads.** Connectors translate your PIM groups into the
@@ -2091,6 +2102,11 @@ deployment is a supported choice) and no credentials lying around.
   mail goes. Forwarding to the owner's everyday office address is **on by default**, and the address is required
   while it is on. So the Temporary Access Pass reaches the admin the first time, and does not have to be issued
   again. The wizard is the same for internal and external admins.
+- **An admin already gone from Entra ID finishes by itself.** ✅ 2026-11-17 (3.1.42) — When an admin was deleted or
+  removed from PIM and the account no longer exists in Microsoft Entra ID (not even in the deleted items, checked read
+  only), the engine finishes it: the admin shows nowhere any more and its Going-live item is done instead of on hold.
+  Deleting it again says "already gone" calmly. PIM Manager deletes nothing in Entra ID for this, and never touches an
+  existing office account or an admin managed by the managing tenant.
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
   or groups. It looks users up on demand and queries only the PIM-managed groups by name

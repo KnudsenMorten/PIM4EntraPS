@@ -25512,7 +25512,8 @@
     for (const id of ids) {
       try {
         const r = await api('DELETE', '/api/admin-accounts/' + encodeURIComponent(id.upn), { confirm: 'DELETE', justification: String(why).trim() });
-        lines.push(id.upn + ': ' + (r && r.action === 'delete-account-proposed' ? 'PROPOSED -- ' + (r.note || 'waits for approval') : 'deleted once by the next engine run (object id ' + ((r && r.objectId) || '?') + ')'));
+        // ADMIN-GONE-1 (2026-11-17): an account already gone from Entra ID is done -- said calmly, never an error
+        lines.push(id.upn + ': ' + (r && r.action === 'already-gone' ? 'already gone -- ' + (r.note || 'nothing more to delete') : r && r.action === 'delete-account-proposed' ? 'PROPOSED -- ' + (r.note || 'waits for approval') : 'deleted once by the next engine run (object id ' + ((r && r.objectId) || '?') + ')'));
       } catch (e) {
         lines.push(id.upn + ': NOT deleted -- ' + String((e && e.body && (e.body.error || e.body.reason)) || (e && e.message) || e));
       }

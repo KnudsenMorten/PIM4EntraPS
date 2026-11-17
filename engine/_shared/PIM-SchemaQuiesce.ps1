@@ -335,7 +335,7 @@ function Invoke-PimSchemaQuiesce {
 function Get-PimDbInitStepsSettingName { <# PURE. LITERAL. The per-execution setting of the step filter. #> return 'PIM_DBINIT_STEPS' }
 function Get-PimDbInitStepIds {
     <# PURE. LITERAL. Every step of the database job, in the order the job runs them. #>
-    return @('users', 'signin-owner', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed', 'drop-old-users')
+    return @('users', 'signin-owner', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed', 'drop-old-users', 'support-legacy-owner')
 }
 function Get-PimDbInitStepClass {
     <#
@@ -356,6 +356,7 @@ function Get-PimDbInitStepClass {
         'access'               { return 'grants' }
         'access-run2'          { return 'removal' }
         'drop-old-users'       { return 'removal' }   # PIM item 21 (b): the old database users of moved roles
+        'support-legacy-owner' { return 'removal' }   # SECAUDIT-1a 4a (104.8): the Support app's legacy standing db_owner, after both proofs
         'policy-templates'     { return 'data' }
         'mail-templates'       { return 'data' }
         'feature-gates'        { return 'data' }

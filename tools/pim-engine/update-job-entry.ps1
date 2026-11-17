@@ -105,6 +105,7 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-RightsList.ps1')       # WEB-TRIM-1: the approved rights list (the web identity's approved set, step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobLanes.ps1')         # WEB-TRIM-1: Register-PimTrustStaleReport -- ONE fix request per reported item (step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-WebIdentityTrim.ps1')  # WEB-TRIM-1: id-pim-web trimmed to its approved set, removals only (step 2h)
+. (Join-Path $solRoot 'engine\_shared\PIM-SupportLegacyOwner.ps1') # SECAUDIT-1a 4a: the Support app's legacy standing db_owner -- the database job removes it after both proofs (step 2h-bis)
 . (Join-Path $solRoot 'engine\_shared\PIM-ManagerApiApps.ps1')   # SUPPORT-FIX-API-1 (framework 12.30 / 12.31): enrol the tagged support app (role Support) + READ the API app hardening (step 2d-api)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
@@ -794,6 +795,60 @@ function Invoke-PimUpdaterWebTrimStep {
             $script:PimSetupFacts['webIdentityTrimDetail'] = ("$($r.detail)" + $(if (@($r.removed).Count) { '; removed: ' + (@($r.removed | ForEach-Object { $_.text }) -join ' | ') }) + $(if (@($r.reported).Count) { '; reported: ' + (@($r.reported | ForEach-Object { $_.text }) -join ' | ') }))
         }
     } catch { Say "  web identity not trimmed (the update is unaffected): $($_.Exception.Message)" 'Yellow' }
+    # ---- 2h-bis. SECAUDIT-1a 4a (framework, owner-decided; REQUIREMENTS 104.8) -- THE SUPPORT APP'S LEGACY STANDING db_owner ----
+    # Right after the trim found it ('held': db_owner outside any open support session): the DATABASE JOB removes it, as its
+    # own identity (the SQL admin group) -- this updater cannot (pim_updater + db_ddladmin) and sends no security statement.
+    # A removal waits for the run end (framework 8.18): the job is started for a FULL run only on this release, only on an
+    # identity read back as a member of the SQL admin group, and only when no PIM job runs. The job checks both proofs (P1 the
+    # read-only user, P2 one JIT open / close by the job here) and an open session itself, inside the one batch that drops
+    # the membership. Read back here through the signed state procedure; ONE note to Invardia; quiet after it. Every line
+    # is internal (INFO); never a mail, never a failed update. PIM_SUPPORT_LEGACY_OWNER=off on this job switches it off.
+    try {
+        $slCs = ''; try { $slCs = "$(Get-PimSqlConnectionString)" } catch { $slCs = '' }
+        $slOwner = ''; $slApp = ''
+        if ($script:PimWebTrimResult -and $script:PimWebTrimResult.sql) { $slOwner = "$($script:PimWebTrimResult.sql.supportOwner)"; $slApp = "$($script:PimWebTrimResult.sql.supportAppId)" }
+        if (-not $slApp) { try { if ($scRun) { $slApp = "$($scRun.appId)".Trim() } } catch { $slApp = '' } }
+        $slGet = $null; $slSet = $null; $slState = $null; $slFix = $null
+        if ($slCs.Trim()) {
+            $slGet = { param($n) Get-PimSqlSetting -ConnectionString $slCs -Name $n }
+            $slSet = { param($n, $v) Set-PimSqlSetting -ConnectionString $slCs -Name $n -ValueJson (ConvertTo-Json -InputObject $v -Depth 6 -Compress) }
+            # the updater's own read: the SIGNED state procedure it holds EXECUTE on (no security statement)
+            $slState = { ConvertFrom-PimSupportConsentState (Invoke-PimSqlScalar -ConnectionString $slCs -Sql 'EXEC [pimsupport].[usp_SupportState];') }
+            $slFix = { param($part, $code, $since)
+                Register-PimTrustStaleReport -Job (Get-PimSupportLegacyOwnerFixJob) -Part $part -Code $code -SinceUtc "$since" `
+                    -GetSetting { param($n) Get-PimSqlSettingRaw -ConnectionString $slCs -Name $n } `
+                    -SetSetting { param($n, $v) Set-PimSqlSetting -ConnectionString $slCs -Name $n -ValueJson (ConvertTo-Json -InputObject $v -Depth 6 -Compress) } }
+        }
+        $slArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        $slJob = 'ca-pim-dbinit'
+        try { $slRec = $null; if ($slCs.Trim()) { $slRec = Get-PimSqlSetting -ConnectionString $slCs -Name 'InstallNames' }; $slJob = Get-PimDbInitJobName -ManagerApp $managerApp -Record $slRec } catch { $slJob = 'ca-pim-dbinit' }
+        # the gates of every full database job run the updater starts: on THIS release, its identity a member, no PIM job running
+        $slGate = {
+            $base = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs"
+            $j = $null; try { $j = & $slArm 'GET' "$base/$slJob`?api-version=2024-03-01" $null } catch { $j = $null }
+            if (-not $j) { return @{ start = $false; reason = "no database job '$slJob'" } }
+            $me = $null; try { $me = & $slArm 'GET' "$base/$selfJob`?api-version=2024-03-01" $null } catch { $me = $null }
+            $jt = Get-PimAcaImageTag -Resource $j; $mt = Get-PimAcaImageTag -Resource $me
+            if (-not $jt -or $jt -ne $mt) { return @{ start = $false; reason = "the database job runs '$jt', this updater '$mt' -- it must be on this release first" } }
+            $pf = $null; if ($slCs.Trim()) { try { $pf = Get-PimDbInitStoredProof (Get-PimSqlSetting -ConnectionString $slCs -Name (Get-PimDbInitProofSetting)) } catch { $pf = $null } }
+            $slG = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+            $mg = Invoke-PimDbInitMembershipGate -Arm $slArm -Graph $slG -SubscriptionId $sub -ResourceGroup $rg -JobName $slJob -Proof $pf
+            if (-not $mg.start) { return @{ start = $false; reason = "$($mg.reason)" } }
+            if (-not $script:PimSchemaQuiet) {
+                $q = Invoke-PimUpdaterSchemaQuiesce -Cs $slCs -Once
+                if (-not $q.go) { return @{ start = $false; reason = ("$($q.line)" -replace '^schema quiesce: ', '') } }
+            }
+            return @{ start = $true; reason = '' }
+        }
+        $slRun = { param($appId)
+            Invoke-PimSupportLegacyOwnerJobRun -Arm $slArm -SubscriptionId $sub -ResourceGroup $rg -JobName $slJob -AppId $appId `
+                -SetEnv { param($s, $g, $j, $v) Set-PimAcaJobEnvValues -SubscriptionId $s -ResourceGroup $g -JobName $j -Values $v } `
+                -Start { param($s, $g, $j) Start-PimAcaJobExecution -SubscriptionId $s -ResourceGroup $g -Name $j } }
+        $sl = Invoke-PimSupportLegacyOwnerUpdaterStep -SupportOwner $slOwner -SupportAppId $slApp -ReadState $slState -GetSetting $slGet -SetSetting $slSet `
+                  -Gate $slGate -RunJob $slRun -FixRequest $slFix -Mode "$($env:PIM_SUPPORT_LEGACY_OWNER)"
+        foreach ($l in @($sl.lines)) { Say ("converge: " + $l.text) $(if ($l.level -eq 'changed') { 'Cyan' } else { 'DarkGray' }) }
+        if ($script:PimSetupFacts -is [System.Collections.IDictionary]) { $script:PimSetupFacts['supportLegacyOwner'] = "$($sl.state)" }
+    } catch { Say "  support db_owner not checked (the update is unaffected): $($_.Exception.Message)" 'DarkGray' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.

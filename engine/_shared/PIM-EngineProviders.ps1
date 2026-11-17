@@ -675,7 +675,13 @@ function Set-PimAdminsAccountGoneMarks {
     foreach ($d in @($Desired)) {
         if ($null -eq $d) { continue }
         if ($d -is [System.Collections.IDictionary]) { $d['__pimAccountGone'] = $false } else { Add-Member -InputObject $d -NotePropertyName '__pimAccountGone' -NotePropertyValue $false -Force }
-        if ("$(Get-PimRowProp -Row $d -Names @('AccountStatus'))".Trim() -ine 'Deleted') { continue }
+        $__st = "$(Get-PimRowProp -Row $d -Names @('AccountStatus'))".Trim()
+        # ADMIN-GONE-1 (2026-11-17): a REMOVED row (Remove from PIM: disabled and kept) whose account is gone has nothing left
+        # to disable either -- the same mark, for a normal PIM-created admin only (never an existing office account, never a
+        # central row: those keep their own paths). Before, it was a planned create refused every run ("on hold" forever).
+        $__isRemoved = ($__st -ieq 'Removed') -and -not ((Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $d)) -and
+                       -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))
+        if ($__st -ine 'Deleted' -and -not $__isRemoved) { continue }
         $k = "$(& $KeyOf $d)".Trim().ToLowerInvariant()
         if (-not $k -or $liveKeys.ContainsKey($k)) { continue }   # the account is there: it stays in the plan (the pinned delete reaches it)
         if ($d -is [System.Collections.IDictionary]) { $d['__pimAccountGone'] = $true } else { $d.__pimAccountGone = $true }
@@ -689,6 +695,85 @@ function Set-PimAdminsAccountGoneMarks {
     # Unrolled on purpose: every caller collects with @(...). `return , $arr` would make @(...) a ONE-element array holding
     # the string[] (Count always 1, "-join" = "System.String[]") -- the engine then logged a gone row on every pass.
     return $gone.ToArray()
+}
+
+function Test-PimAdminAccountGoneConfirmed {
+    <#
+      ADMIN-GONE-1 (owner 2026-11-17: "trying to delete an account i deleted long ago but it keeps showing ... and is not
+      deleted, why"). READ ONLY. Is an admin account REALLY gone from Microsoft Entra ID -- not only absent from one list read?
+      Every read must answer "not found":
+        1. the user by its object id (when known: the delete pin's / the row's), 2. the user by its user name (UPN),
+        3. the deleted items by the object id, or by the user name (a deleted user's name is '<id without dashes><upn>').
+      Anything found, or any read that fails for another reason = NOT confirmed (fail closed: the row stays, nothing changes).
+      Never writes, never deletes. -Graph seam: { param($Path, $Headers) } -> the answer (default Invoke-PimGraph).
+      Returns @{ gone; reason }.
+    #>
+    param([string]$Upn = '', [string]$ObjectId = '', [scriptblock]$Graph)
+    if (-not $Graph) { $Graph = { param($Path, $Headers) Invoke-PimGraph -Path $Path -Headers $Headers } }
+    $u = "$Upn".Trim(); $oid = "$ObjectId".Trim().ToLowerInvariant()
+    if ($oid -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $oid = '' }
+    if ($u -notmatch '@' -and -not $oid) { return [pscustomobject]@{ gone = $false; reason = 'no user name with a domain and no object id to look the account up by' } }
+    $notFound = { param($m) "$m" -match '(?i)\b404\b|Request_ResourceNotFound|ResourceNotFound|does not exist' }
+    $ask = {
+        param($path, $hdr)
+        try { $a = & $Graph $path $hdr; return @{ ok = $true; answer = $a } }
+        catch { if (& $notFound "$($_.Exception.Message)") { return @{ ok = $true; answer = $null } }; return @{ ok = $false; why = "$($_.Exception.Message)" } }
+    }
+    $hasValue = { param($a) if ($null -eq $a) { return $false }; $v = $a.PSObject.Properties['value']; if ($v) { return [bool]@(@($v.Value) | Where-Object { $_ }).Count }; return [bool]"$($a.id)".Trim() }
+    $q = { param($s) [uri]::EscapeDataString("$s".Replace("'", "''")) }
+    $reads = New-Object System.Collections.Generic.List[object]
+    if ($oid) { $reads.Add(@("/users/$oid`?`$select=id", @{}, 'the account (by its object id)')) }
+    if ($u -match '@') { $reads.Add(@("/users/$([uri]::EscapeDataString($u))`?`$select=id", @{}, 'the account (by its user name)')) }
+    if ($oid) { $reads.Add(@("/directory/deletedItems/$oid`?`$select=id", @{}, 'the deleted items (by its object id)')) }
+    if ($u -match '@') { $reads.Add(@("/directory/deletedItems/microsoft.graph.user?`$filter=endswith(userPrincipalName,'$(& $q $u)')&`$count=true&`$select=id,userPrincipalName", @{ ConsistencyLevel = 'eventual' }, 'the deleted items (by its user name)')) }
+    foreach ($r in $reads) {
+        $x = & $ask $r[0] $r[1]
+        if (-not $x.ok) { return [pscustomobject]@{ gone = $false; reason = "$($r[2]) could not be read ($($x.why)) -- not confirmed" } }
+        if (& $hasValue $x.answer) { return [pscustomobject]@{ gone = $false; reason = "$($r[2]) still exists" } }
+    }
+    return [pscustomobject]@{ gone = $true; reason = 'not found by its object id or user name, and not in the deleted items' }
+}
+
+function Complete-PimAdminGoneRows {
+    <#
+      ADMIN-GONE-1 (owner 2026-11-17). The END of a Deleted / Removed admin whose account is gone: a row marked gone this pass
+      (Set-PimAdminsAccountGoneMarks) of a NORMAL, PIM-created admin -- never an existing office account (AdminType
+      existing / office-user), never a central row, never an on-premises AD account -- whose account the directory CONFIRMS
+      gone (Test-PimAdminAccountGoneConfirmed: read only) is FINISHED the way a done Remove row is: re-read by its store key,
+      deleted from the store only while it still says Deleted / Removed, audited 'row.remove.completed'. It then shows in
+      no view (removed items hidden everywhere), and its Going-live item is done. NOTHING is deleted in Entra ID here.
+      Seams: -Confirm { param($upn, $oid) } -> @{ gone; reason }; -ReadRow { param($key) } -> the stored row or $null;
+      -RemoveRow { param($key) }; -Audit { param($key, $before, $reason) }; -KeyOf { param($row) } -> the store key;
+      -ObjectIdOf { param($row) } -> the object id to read by ('' = none).
+      Returns @( @{ key; upn; row; reason } ) -- the finished rows; a row not confirmed is kept and said once in the log.
+    #>
+    param([object[]]$Rows = @(), [Parameter(Mandatory)][scriptblock]$Confirm, [Parameter(Mandatory)][scriptblock]$ReadRow,
+          [Parameter(Mandatory)][scriptblock]$RemoveRow, [scriptblock]$Audit = { param($key, $before, $reason) }, [Parameter(Mandatory)][scriptblock]$KeyOf,
+          [scriptblock]$ObjectIdOf = { param($row) '' })
+    $done = New-Object System.Collections.Generic.List[object]
+    $terminal = { param($r) ("$(Get-PimRowProp -Row $r -Names @('AccountStatus'))".Trim() -in @('Deleted', 'Removed')) }
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r -or -not (& $terminal $r)) { continue }
+        if ((Get-Command Test-PimAdminIsExistingAccount -ErrorAction SilentlyContinue) -and (Test-PimAdminIsExistingAccount -Row $r)) { continue }
+        if ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $r)) { continue }
+        if ((Get-Command Test-PimAdminIsAdOnly -ErrorAction SilentlyContinue) -and (Test-PimAdminIsAdOnly -Row $r)) { continue }
+        $upn = "$(Get-PimRowProp -Row $r -Names @('UserPrincipalName','userPrincipalName','UPN','upn'))".Trim()
+        $key = "$(& $KeyOf $r)".Trim()
+        if (-not $key) { continue }
+        $c = & $Confirm $upn "$(& $ObjectIdOf $r)"
+        if (-not $c -or -not [bool]$c.gone) {
+            Write-Host ("    [admins] {0}: AccountStatus={1}, not in the live read, but its account is not confirmed gone ({2}) -- the row stays" -f $(if ($upn) { $upn } else { $key }), "$(Get-PimRowProp -Row $r -Names @('AccountStatus'))".Trim(), "$($c.reason)") -ForegroundColor DarkGray
+            continue
+        }
+        $cur = & $ReadRow $key
+        if ($null -eq $cur -or -not (& $terminal $cur)) { continue }   # changed since this run read it (e.g. back to Enabled): kept
+        & $RemoveRow $key
+        $why = "the account is gone from Microsoft Entra ID ($($c.reason)) -- the delete is done"
+        try { & $Audit $key $cur $why } catch { Write-Warning ("  [admins] {0}: finished but NOT audited: {1}" -f $key, $_.Exception.Message) }
+        $done.Add([pscustomobject]@{ key = $key; upn = $upn; row = $r; reason = $why })
+    }
+    if ($done.Count) { Write-Host ("    [admins] {0} Deleted / Removed admin row(s) finished -- the account is gone from Microsoft Entra ID (confirmed, read only): {1}" -f $done.Count, (@($done | ForEach-Object { if ($_.upn) { $_.upn } else { $_.key } }) -join ', ')) -ForegroundColor DarkCyan }
+    return $done.ToArray()
 }
 
 function New-PimAdminsProvider {
@@ -986,9 +1071,35 @@ function New-PimAdminsProvider {
             $__gone = @(Set-PimAdminsAccountGoneMarks -Desired @($ctx['adminsDesiredAll']) -Live $live -KeyOf $__keyOfLive -Pins $__pinsNow)
             $ctx['adminsDeletedGone'] = $__gone
             if ($__gone.Count) {
-                Write-Host ("    [admins] {0} row(s) say AccountStatus=Deleted and their account is not in this read -- done: nothing to create, nothing to delete (rows kept): {1}" -f $__gone.Count, (($__gone | Select-Object -First 8) -join ', ')) -ForegroundColor DarkGray
+                Write-Host ("    [admins] {0} row(s) say AccountStatus=Deleted or Removed and their account is not in this read -- nothing to create, nothing to delete; each is finished once the directory confirms the account is gone: {1}" -f $__gone.Count, (($__gone | Select-Object -First 8) -join ', ')) -ForegroundColor DarkGray
             }
             $live
+        }
+        # ADMIN-GONE-1 (owner 2026-11-17): after the pass (never WhatIf -- the engine calls it only on a real run), a row marked
+        # gone in THIS pass whose account the directory confirms gone (read only) is finished: deleted from the store like a
+        # done Remove row (row.remove.completed). Nothing in Entra ID is deleted here. Returns the finished rows (Going live).
+        AfterApply = {
+            param($ctx)
+            $__gRows = @(@($ctx['adminsDesiredAll']) | Where-Object { $null -ne $_ -and (Test-PimAdminRowAccountGone -Row $_) })
+            if (-not $__gRows.Count) { return @() }
+            if (-not ((Get-Command Get-PimSqlRow -ErrorAction SilentlyContinue) -and (Get-Command Remove-PimSqlRow -ErrorAction SilentlyContinue) -and (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue))) { return @() }
+            $__cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs } elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+                    elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString } else { $null }
+            if (-not $__cs) { return @() }
+            $__pins = $null; if (Get-Command Get-PimAdminDeletePins -ErrorAction SilentlyContinue) { try { $__pins = Get-PimAdminDeletePins } catch { $__pins = $null } }
+            $__ent = 'Account-Definitions-Admins'
+            return @(Complete-PimAdminGoneRows -Rows $__gRows `
+                -KeyOf { param($row) Get-PimStoreRowKey -Base $__ent -Row $row } `
+                -ObjectIdOf { param($row)
+                    $o = "$(Get-PimRowProp -Row $row -Names @('ObjectId','EntraObjectId','objectId'))".Trim()
+                    if (-not $o -and $null -ne $__pins -and (Get-Command Find-PimAdminDeletePin -ErrorAction SilentlyContinue)) {
+                        $__pk = if (Get-Command Get-PimAdminDeletePinKeyOfRow -ErrorAction SilentlyContinue) { Get-PimAdminDeletePinKeyOfRow -Row $row } else { "$(Get-PimRowProp -Row $row -Names @('UserName','Username'))" }
+                        $__pin = Find-PimAdminDeletePin -Pins $__pins -Key "$__pk"; if ($__pin) { $o = "$($__pin.objectId)" } }
+                    $o } `
+                -Confirm { param($upn, $oid) Test-PimAdminAccountGoneConfirmed -Upn $upn -ObjectId $oid } `
+                -ReadRow { param($key) Get-PimSqlRow -ConnectionString $__cs -Entity $__ent -Key $key } `
+                -RemoveRow { param($key) Remove-PimSqlRow -ConnectionString $__cs -Entity $__ent -Key $key } `
+                -Audit { param($key, $before, $reason) if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { [void](Write-PimAuditEvent -Action 'row.remove.completed' -Target "$__ent|$key" -Before $before -After @{ reason = $reason }) } })
         }
         # BUG-13: key on the UPN's LOCAL PART, not the whole UPN. The desired UPN is
         # built as {UserName}@{DefaultDomainUPN} -- ONE default domain -- while a tenant

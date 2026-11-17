@@ -272,7 +272,11 @@ function New-PimStallRunReportRecord {
         # WEB-TRIM-1 (REQUIREMENTS 102): the same register-once channel carries a right of the internet-facing web identity
         # that the updater found outside its approved set and may not remove itself (engine\_shared\PIM-WebIdentityTrim.ps1)
         if ($cls -eq 'web-identity-excess') { $stxt = "the internet-facing web identity holds a right outside its approved set that the updater may not remove: job $job, item $step. Remove it through the Support app; the update run lists it." }
-        if ($cls -eq 'sql-support-owner') { $stxt = "the Support app's database user holds db_owner outside an open support session: job $job, item $step. The updater may not change db_owner membership; remove it through the Support app." }
+        if ($cls -eq 'sql-support-owner') { $stxt = "the Support app's database user holds db_owner outside an open support session: job $job, item $step. The updater may not change db_owner membership; the database job removes it once both proofs hold (SECAUDIT-1a 4a)." }
+        # SECAUDIT-1a 4a (REQUIREMENTS 104.8): the database job's removal of the Support app's legacy standing db_owner
+        if ($cls -eq 'sql-support-owner-removed') { $stxt = "legacy standing db_owner removed (SECAUDIT-1a 4a), read back: job $job, item $step. The Support app's read-only user stays; db_owner comes only inside a support session." }
+        if ($cls -eq 'sql-support-owner-proof') { $stxt = "the Support app's legacy standing db_owner stays until both proofs hold (SECAUDIT-1a 4a): job $job, item $step (p1 = the read-only user in pim_support_read, p2 = one time-limited open and close by the job at this install)." }
+        if ($cls -eq 'sql-support-owner-failed') { $stxt = "the removal of the Support app's legacy standing db_owner did not complete (SECAUDIT-1a 4a): job $job, item $step. Nothing else was changed; the update run lists why." }
         return (New-AitUplinkReport -Kind run @Common -Job $job -Outcome 'warning' -ErrorClass $cls -ErrorText $stxt -FailedStep $step)
     }
     if ($jn -notmatch '^[a-z0-9-]{1,60}$') { $jn = $job }

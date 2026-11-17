@@ -1636,9 +1636,137 @@ function Test-PimEngineFailuresAreAllTransient {
     return $true
 }
 
+function Test-PimFailureAutoFixApiOpen {
+    <#
+      PURE (reads one environment variable). JOB-ROW-WARN-1 (2026-11-17): can a catalogued fix be applied BY ITSELF on this
+      install? Only through the Support fix route (POST /api/app/support/fix, SUPPORT-FIX-API-1), which answers only while the
+      REST application API is deliberately opened (API-DOOR-1: PIM_API_APPS_OPEN = 1 / true / yes / on -- the same literal
+      rule as Open-PimManager.ps1 Test-PimManagerAppApiOpen). Unset = closed = no fix runs by itself.
+    #>
+    return [bool]("$env:PIM_API_APPS_OPEN".Trim() -match '^(?i)(1|true|yes|on)$')
+}
+
+function Test-PimFailureAutoFixRunnable {
+    <#
+      PURE. JOB-ROW-WARN-1 (owner 2026-11-17): may a summary say "auto-fix available" for one failure code? Only when the fix
+      can ACTUALLY run on this install: the API door is open (-ApiOpen, default Test-PimFailureAutoFixApiOpen) AND the failure
+      catalog offers a fix for the code AND the Support fix route applies that fix (Get-PimManagerAppSupportFixCatalog when
+      loaded; else the two row fixes it has always applied: delete-row, make-eligible).
+    #>
+    param([string]$Code, [AllowNull()][object]$ApiOpen = $null)
+    $open = if ($null -eq $ApiOpen) { Test-PimFailureAutoFixApiOpen } else { [bool]$ApiOpen }
+    if (-not $open) { return $false }
+    $offered = @(Get-PimFailureCatalogFixes -Code $Code)
+    if (-not $offered.Count) { return $false }
+    $route = if (Get-Command Get-PimManagerAppSupportFixCatalog -ErrorAction SilentlyContinue) { @(Get-PimManagerAppSupportFixCatalog | ForEach-Object { "$($_.fixId)" }) } else { @('delete-row', 'make-eligible') }
+    return [bool](@($offered | Where-Object { $route -ccontains "$($_.id)" }).Count)
+}
+
+function Get-PimFailureEntityGridLabel {
+    <# PURE. The grid an admin opens for a row of -Entity -- the SAME words as the page (pim-manager.html PIM_ENTITY_LABELS). #>
+    param([string]$Entity)
+    $m = @{
+        'PIM-Assignments-Admins'          = 'Who gets which group'
+        'PIM-Assignments-Groups'          = 'Group-in-group membership'
+        'PIM-Assignments-Roles-Groups'    = 'Entra roles on groups'
+        'PIM-Assignments-Roles-AUs'       = 'Entra roles scoped to an administrative unit'
+        'PIM-Assignments-Azure-Resources' = 'Azure roles on resources'
+        'PIM-Assignments-Workloads'       = 'Workload roles (Intune, Defender, ...)'
+    }
+    $e = "$Entity".Trim()
+    if ($m.ContainsKey($e)) { return $m[$e] }
+    $t = ($e -replace '^(PIM|Account)-(Definitions|Assignments)-', '' -replace '-', ' ').Trim()
+    if ($t) { return $t }
+    return 'the grid'
+}
+
+function Get-PimFailureAdminAction {
+    <#
+      PURE. JOB-ROW-WARN-1: what the ADMIN does about a row-level data finding, in one calm clause -- used where no fix runs
+      by itself. "fix the role name or remove the row in Workload roles (Intune, Defender, ...)".
+    #>
+    param([string]$Code, [string]$Entity)
+    $verb = switch ("$Code".Trim().ToUpperInvariant()) {
+        'WORKLOAD-ROLE-NOT-FOUND'    { 'fix the role name' }
+        'WORKLOAD-GROUP-UNRESOLVED'  { 'fix the group tag' }
+        'WORKLOAD-RESOURCE-MISSING'  { 'fix the resource' }
+        'WORKLOAD-CONNECTOR-UNKNOWN' { 'fix the workload name' }
+        'ARM-ROLE-NOT-FOUND'         { 'fix the role name' }
+        'AZ-SUB-PLACEHOLDER'         { 'fix the subscription' }
+        'AZ-SUB-NOT-FOUND'           { 'fix the scope' }
+        'ENTRA-ROLE-NOT-IN-TENANT'   { 'fix the role name' }
+        'ENTRA-ROLE-UNRESOLVED'      { 'fix the group or role name' }
+        default                      { 'correct it' }
+    }
+    return "$verb or remove the row in $(Get-PimFailureEntityGridLabel -Entity $Entity)"
+}
+
+function Test-PimEngineFailureIsRowData {
+    <#
+      PURE. JOB-ROW-WARN-1 (owner 2026-11-17, Home "2 job(s) FAILED: delta-workloads, full-reconcile" caused only by two
+      binding rows with WORKLOAD-ROLE-NOT-FOUND): $true for a failed item that is a ROW-LEVEL CATALOGUED DATA FINDING -- the
+      row cannot be applied as it is written, and everything else in the job was done:
+        * a catalogued code (never UNCLASSIFIED / an unknown code) whose fix kind is customer-config (Get-PimFailureFixKind:
+          rule severity data / policy / environment) AND whose code-table row says the customer acts (whoActs customer);
+        * the item names a row (its row values or its key);
+        * it is not a Remove: a removal that did not happen leaves access in place and stays FAILED (100.99);
+        * it is not a hold (holds have their own outcome) and not transient-waiting (that has its own path).
+    #>
+    param([AllowNull()][object]$Failure)
+    if ($null -eq $Failure) { return $false }
+    $g = { param($n) if ($Failure -is [System.Collections.IDictionary]) { $Failure[$n] } else { $p = $Failure.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } } }
+    $code = "$(& $g 'code')".Trim().ToUpperInvariant()
+    if (-not $code -or $code -eq 'UNCLASSIFIED') { return $false }
+    if (Test-PimEngineFailureIsApprovalHold $Failure) { return $false }
+    if ("$(& $g 'severity')" -eq 'transient' -and [bool](& $g 'retryable')) { return $false }
+    if ("$(& $g 'op')".Trim() -ieq 'Remove') { return $false }
+    if ((Get-PimFailureFixKind -Code $code) -ne 'customer-config') { return $false }
+    $info = Get-PimFailureCodeInfo -Class $code
+    if (-not $info.known -or "$($info.whoActs)" -ne 'customer') { return $false }
+    $row = & $g 'row'
+    $hasRow = $false
+    if ($row -is [System.Collections.IDictionary]) { $hasRow = [bool]@($row.Values | Where-Object { "$_".Trim() }).Count }
+    elseif ($null -ne $row) { $hasRow = [bool]@($row.PSObject.Properties | Where-Object { "$($_.Value)".Trim() }).Count }
+    if (-not $hasRow -and -not "$(& $g 'key')".Trim()) { return $false }
+    return $true
+}
+
+function Test-PimEngineFailuresAreAllRowData {
+    <# PURE. JOB-ROW-WARN-1: $true when there is at least one failed item and EVERY one is a row-level data finding. #>
+    param([object[]]$Failures)
+    $all = @($Failures | Where-Object { $_ })
+    if (-not $all.Count) { return $false }
+    foreach ($x in $all) { if (-not (Test-PimEngineFailureIsRowData $x)) { return $false } }
+    return $true
+}
+
+function Format-PimRowDataWarning {
+    <#
+      PURE. JOB-ROW-WARN-1: the WARNING text of a run whose only failures are row-level data findings -- it NAMES the rows
+      (Get-PimFailureItemLabel, else the key; the first five, then "and N more") and says what the admin does, per cause.
+      "2 row(s) could not be applied (everything else was done): 2x Workload role name does not exist [WORKLOAD-ROLE-NOT-FOUND]
+       -- group PIM-x -> Defender role 'Y'; ... -- fix the role name or remove the row in Workload roles (...)"
+    #>
+    param([object[]]$Failures, [AllowNull()][object]$AutoFixRunnable = $null)
+    $all = @($Failures | Where-Object { $_ })
+    if (-not $all.Count) { return '' }
+    $groups = @($all | Group-Object code | Sort-Object Count -Descending)
+    $parts = foreach ($gr in $groups) {
+        $names = @($gr.Group | ForEach-Object { $l = "$($_.label)".Trim(); if (-not $l) { $l = "$($_.key)".Trim() }; ($l -replace '\s+', ' ') } | Where-Object { $_ } | Select-Object -Unique)
+        $shown = @($names | Select-Object -First 5 | ForEach-Object { if ($_.Length -gt 160) { $_.Substring(0, 157) + '...' } else { $_ } })
+        $nameTxt = ($shown -join '; '); if ($names.Count -gt 5) { $nameTxt += " and $($names.Count - 5) more" }
+        $fixTxt = if (Test-PimFailureAutoFixRunnable -Code "$($gr.Name)" -ApiOpen $AutoFixRunnable) { 'auto-fix available' } else { Get-PimFailureAdminAction -Code "$($gr.Name)" -Entity "$($gr.Group[0].entity)" }
+        "{0}x {1} [{2}]{3} -- {4}" -f $gr.Count, "$($gr.Group[0].title)", $gr.Name, $(if ($nameTxt) { " -- $nameTxt" } else { '' }), $fixTxt
+    }
+    return ("{0} row(s) could not be applied (everything else was done): {1}. Open Jobs > Engine logs & errors for each row and its fix." -f $all.Count, ($parts -join '; '))
+}
+
 function Format-PimFailureSummary {
     <# "17 item(s) failed: 10x Azure PIM policy rejects the assignment duration [AZ-POLICY-MAX-DURATION]; 4x ..." #>
-    param([object[]]$Failures)
+    # JOB-ROW-WARN-1 (owner 2026-11-17): "auto-fix available" ONLY when the fix can run by itself on this install
+    # (Test-PimFailureAutoFixRunnable; -AutoFixRunnable $true / $false overrides the API-door read); otherwise a row-level
+    # data finding says what the admin does ("fix the role name or remove the row in <grid>").
+    param([object[]]$Failures, [AllowNull()][object]$AutoFixRunnable = $null)
     $all = @($Failures | Where-Object { $_ })
     if (-not $all.Count) { return '' }
     # BUG-233 (77.2, a test tenant 2026-09-21): a breaker HOLD is not a failure. It used to be counted as "1x ... HELD"
@@ -1669,7 +1797,10 @@ function Format-PimFailureSummary {
                 if ($m.Length -gt 220) { $m = $m.Substring(0, 217) + '...' }
                 if ($m) { ": $m" } else { '' }
             } else { '' }
-            "{0}x {1} [{2}]{3}{4}" -f $g.Count, $t, $g.Name, $raw, $(if ($fixable) { ' -- auto-fix available' } else { '' })
+            $fixTxt = ''
+            if ($fixable -and (Test-PimFailureAutoFixRunnable -Code "$($g.Name)" -ApiOpen $AutoFixRunnable)) { $fixTxt = ' -- auto-fix available' }
+            elseif (Test-PimEngineFailuresAreAllRowData -Failures @($g.Group)) { $fixTxt = ' -- ' + (Get-PimFailureAdminAction -Code "$($g.Name)" -Entity "$($g.Group[0].entity)") }
+            "{0}x {1} [{2}]{3}{4}" -f $g.Count, $t, $g.Name, $raw, $fixTxt
         }
         $out += ("{0} item(s) failed: {1}. Open Jobs > Engine logs & errors for each item, its cause and the fix." -f $f.Count, ($parts -join '; '))
     }
