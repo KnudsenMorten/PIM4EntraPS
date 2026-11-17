@@ -1,5 +1,53 @@
 # What's new in PIM Manager
 
+## 3.1.49 · 2026-11-17 · Security
+
+The removal of old support database rights no longer waits for the nightly update.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Old support rights removed sooner** - While the removal of old standing support database rights is pending and no support session is open, the 15-minute update check now runs it, at most once an hour.
+
+## 3.1.48 · 2026-11-17 · Fix-only
+
+The update progress shown to support now also says when a failed image build will be tried again.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Retries visible in update progress** - When an image build fails on a short network problem, the update progress tells support it will be retried, so no alarm is raised for a hiccup.
+
+## 3.1.47 · 2026-11-17 · Fix-only
+
+A short network hiccup while an update builds its image is retried, and only a repeated failure is reported.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Update retries a short network hiccup** - When an update cannot reach a container registry for a moment, it tries again at once and on the next runs. Only a third failure is reported as a failed update.
+
+## 3.1.46 · 2026-11-17 · Fix-only
+
+An installation can run without mail on purpose, and it is then reported as not set up instead of not working.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Mail not set up on purpose** - Choose Not set up (on purpose) under Mail. The mail check then shows a neutral line, Get Started counts the step as done, and no support ticket is raised.
+
 ## 3.1.45 · 2026-11-17 · Security
 
 Old standing database rights of the support app are removed, and PIM proves that time-limited support access still works, or puts the old right back.

@@ -11,7 +11,11 @@
            -> 201 { runId, token, eventsUrl, statusUrl }
     event  POST {eventsUrl}   header X-Invardia-Install-Token: <token>
            {"seq":N,"step":{"id","title"},"state":"started|ok|warning|failed|skipped|waiting|completed","at":"<ISO UTC>",
-            "durationMs":<ms>,"message":"<one plain line>","errorClass":"<class>"(failed only)}
+            "durationMs":<ms>,"message":"<one plain line>","errorClass":"<class>"(failed only),
+            "retry":{transient,willRetry,cause,attempt,priorVersion,priorHealthy}(a failed BUILD stage with a retry statement only)}
+  BUILD-TRANSIENT-1 (2026-11-17): Invardia raises "Update failed" from the stage-failed event, so a build that failed on a
+  passing registry fault carries the SAME TRANSIENT-RETRY-1 object as the run report (New-PimUpdateBuildRetryInfo, passed
+  through Complete-PimUpdateTrack -Retry). No statement -> no field (as before).
   Stage ids (stable, every product): check, download, verify, build, apply, migrate, health, then done (completed) |
   failed (the failed stage is the last event) | rollback (rolled back to the last good image, then done completed
   "rolled back"). PIM changes the schema BEFORE it rolls (additive-only, DESIGN "schema before containers"), so its
@@ -176,7 +180,7 @@ function Add-PimUpdateTrackEvent {
     <# Queue (not opened yet) or post one event. Never throws. 'started' records the time; the stage's next state carries durationMs. #>
     param([Parameter(Mandatory)][object]$Track, [Parameter(Mandatory)][string]$Stage,
           [Parameter(Mandatory)][ValidateSet('started', 'ok', 'warning', 'failed', 'skipped', 'waiting', 'completed')][string]$State,
-          [string]$Message = '', [string]$ErrorClass = '')
+          [string]$Message = '', [string]$ErrorClass = '', [AllowNull()][object]$Retry = $null)
     if (-not $Track -or -not $Track.enabled -or $Track.stopped -or $Track.finished) { return $false }
     if ((Get-PimUpdateTrackStages) -notcontains $Stage) { return $false }
     try {
@@ -187,6 +191,8 @@ function Add-PimUpdateTrackEvent {
         elseif ($Track.started.ContainsKey($Stage)) { $ev['durationMs'] = [int64][math]::Max([double]0, ($now - [datetime]$Track.started[$Stage]).TotalMilliseconds) }
         $m = Protect-PimUpdateTrackText $Message; if ($m) { $ev['message'] = $m }
         if ($State -eq 'failed' -and "$ErrorClass" -match '^[A-Za-z][A-Za-z0-9._-]{0,39}$') { $ev['errorClass'] = "$ErrorClass" }
+        # BUILD-TRANSIENT-1: the retry statement, on a failed BUILD stage only, the object as given (the run report's own)
+        if ($State -eq 'failed' -and $Stage -eq 'build' -and $null -ne $Retry) { $ev['retry'] = $Retry }
         if (-not $Track.opened) { $Track.buffer.Add([pscustomobject]$ev); return $true }
         return (Send-PimUpdateTrackEventNow -Track $Track -Ev ([pscustomobject]$ev))
     } catch { Stop-PimUpdateTrack -Track $Track -Why "$($_.Exception.Message)"; return $false }
@@ -274,7 +280,9 @@ function Complete-PimUpdateTrack {
       that was not opened moved no version: its waiting events are dropped, nothing is sent). Never throws; returns $true when the final event was sent.
     #>
     param([Parameter(Mandatory)][object]$Track, [AllowNull()][string]$Outcome = 'ok', [AllowNull()][string]$ErrorText = '',
-          [AllowNull()][string]$FromVersion = '', [AllowNull()][string]$ToVersion = '', [switch]$RolledBack)
+          [AllowNull()][string]$FromVersion = '', [AllowNull()][string]$ToVersion = '', [switch]$RolledBack,
+          # BUILD-TRANSIENT-1: the run's retry statement (New-PimUpdateBuildRetryInfo) -> 'retry' on a failed BUILD stage
+          [AllowNull()][object]$Retry = $null)
     if (-not $Track -or -not $Track.enabled -or $Track.stopped -or $Track.finished) { return $false }
     # NEVER OPENS A RUN ITSELF (coordinator review 2026-11-06): a run that was not opened moved no version -- nothing to
     # do, ahead, held, or stopped before an update was known to be due -- and reports NOTHING (no noise at Invardia).
@@ -290,7 +298,7 @@ function Complete-PimUpdateTrack {
                 $ok = Add-PimUpdateTrackEvent -Track $Track -Stage 'done' -State completed -Message $(if ("$Outcome" -eq 'ahead') { 'this environment runs a newer version than its ring approves -- nothing to do' } elseif ($msg) { $msg } else { '' })
             }
             'waiting' { $ok = Add-PimUpdateTrackEvent -Track $Track -Stage $stage -State waiting -Message $msg }
-            'failed'  { $ok = Add-PimUpdateTrackEvent -Track $Track -Stage $stage -State failed -Message $msg -ErrorClass (Get-PimUpdateTrackErrorClass -Stage $stage -ErrorText $ErrorText) }
+            'failed'  { $ok = Add-PimUpdateTrackEvent -Track $Track -Stage $stage -State failed -Message $msg -ErrorClass (Get-PimUpdateTrackErrorClass -Stage $stage -ErrorText $ErrorText) -Retry $Retry }
             'rollback' {
                 [void](Add-PimUpdateTrackEvent -Track $Track -Stage $stage -State failed -Message $msg -ErrorClass (Get-PimUpdateTrackErrorClass -Stage $stage -ErrorText $ErrorText))
                 [void](Add-PimUpdateTrackEvent -Track $Track -Stage 'rollback' -State ok -Message 'rolled back to the last good version')

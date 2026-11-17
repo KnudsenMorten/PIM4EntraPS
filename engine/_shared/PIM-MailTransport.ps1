@@ -11,7 +11,9 @@
     allowed). 🔒 The PASSWORD is never in SQL, never in the page and never in a log: it is a secret in the environment's
     own Key Vault (vaultName / secretName), read at send time by the sender's managed identity.
   * none          -- mail is switched off; every send returns "not sent" with that reason (a TAP mail then cannot
-    arrive, and Test-PimTapMailReady says so).
+    arrive, and Test-PimTapMailReady says so). MAIL-OFF-1 (2026-11-17): 'none' (alias 'off') is the DELIBERATE
+    "not set up (on purpose)" state -- the mail check, the Get Started step, the setup control and the heartbeat Mail field
+    report it as NEUTRAL (never a failure, never a fix request); a skipped send is logged once a day at info level.
 
   Everything here is PURE or has a seam: $global:PIM_SmtpClientFactory (param($Config) -> an object with .Send(MailMessage)
   and .Dispose()) replaces the real SmtpClient in tests; $global:PIM_SmtpSecretReader (param($VaultName, $SecretName))
@@ -23,6 +25,21 @@ Set-StrictMode -Off
 . (Join-Path $PSScriptRoot '..\..\tools\setup\_PimScriptDoc.ps1')
 
 function Get-PimMailModeCatalog { @('none', 'sharedMailbox', 'smtp') }
+# MAIL-OFF-1 (2026-11-17): the ONE wording of the deliberate "no mail" state (mail check, Get Started, Settings, the log line)
+function Get-PimMailOffNote { 'not set up (on purpose): mail is switched off, so TAP codes, approvals and alerts are not sent' }
+
+function Write-PimMailOffNotice {
+    <#
+      MAIL-OFF-1 (2026-11-17). A mail PIM would send while mail is switched off on purpose is simply not sent: ONE info line
+      per process per UTC day (never a warning, never an error). Returns $true when it wrote the line. -NowUtc for tests.
+    #>
+    param([string]$Type = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $day = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    if ("$($global:PIM_MailOffLoggedDay)" -eq $day) { return $false }
+    $global:PIM_MailOffLoggedDay = $day
+    Write-Host "  [Mail] mail is not set up (on purpose) -- $(if ($Type) { "'$Type' and " })other mails are not sent today (Settings > Mail & alerting)."
+    return $true
+}
 function Get-PimSmtpRelayDefaultSecretName { 'PIM-SmtpRelayPassword' }
 
 function ConvertTo-PimMailMode {
@@ -228,7 +245,8 @@ function Get-PimMailSetupState {
       PURE: the Get Started / Settings verdict for mail, from the stored values. Returns @{ mode; done; note; sender; smtp }.
         sharedMailbox -- done when a sender mailbox is stored and no later test mail to it FAILED.
         smtp          -- done when the relay record is valid AND a test mail through exactly these settings was SENT.
-        none          -- never done (nothing can be sent; the note says so).
+        none          -- MAIL-OFF-1: done + off (switched off on purpose = "not set up (on purpose)", a neutral choice);
+                         proven stays $null (nothing is sent, nothing to prove).
       -LastTest: @{ ok; fingerprint; at; reason } as the test-mail route stores it (pim.Settings 'MailLastTest').
     #>
     param([string]$Mode, [string]$Sender, [AllowNull()][object]$SmtpRelay, [AllowNull()][object]$LastTest,
@@ -241,7 +259,8 @@ function Get-PimMailSetupState {
     if ($LastTest -and "$($LastTest.fingerprint)" -eq $fp) { $proof = [bool]$LastTest.ok }
     $s = "$Sender".Trim()
     switch ($m) {
-        'none' { return @{ mode = $m; done = $false; note = 'mail is switched off: TAP codes, approvals and alerts are not sent'; sender = $s; proven = $null } }
+        # MAIL-OFF-1 (2026-11-17): switched off ON PURPOSE = a finished choice (done), not a missing step; 'off' says so
+        'none' { return @{ mode = $m; done = $true; off = $true; note = (Get-PimMailOffNote); sender = $s; proven = $null } }
         'smtp' {
             if (-not $smtp.ok) { return @{ mode = $m; done = $false; note = 'SMTP relay: ' + (@($smtp.errors.Values) -join ' '); sender = "$($smtp.config.from)"; proven = $null } }
             if ($proof -eq $true) { return @{ mode = $m; done = $true; note = "SMTP relay $($smtp.config.host):$($smtp.config.port) as $($smtp.config.from) -- test mail sent"; sender = "$($smtp.config.from)"; proven = $true } }
@@ -337,7 +356,12 @@ function Get-PimMailCheck {
     $mode = if ($storedMode) { $storedMode } elseif ($sender) { 'sharedMailbox' } else { '' }
     $guiFix = 'PIM Manager > Get Started > Mail sender (or Settings > Mail & alerting): choose Shared mailbox or SMTP relay'
     if (-not $mode) { & $add 'mail-mode' 'Mail mode chosen' 'missing' 'no mail mode is chosen yet -- TAP codes, approvals and alerts are not sent' $guiFix }
-    elseif ($mode -eq 'none') { & $add 'mail-mode' 'Mail mode chosen' 'missing' 'mail is switched off (mode none) -- TAP codes, approvals and alerts are not sent' $guiFix }
+    elseif ($mode -eq 'none') {
+        # MAIL-OFF-1 (2026-11-17): switched off ON PURPOSE is a NEUTRAL state ('off'): one line, complete, nothing to fix and
+        # nothing else to check (no sender, no send right, no alert mail) -- never amber, never a reminder, never a ticket.
+        & $add 'mail-mode' 'Mail mode chosen' 'off' (Get-PimMailOffNote) ''
+        return [pscustomobject][ordered]@{ mode = 'none'; complete = $true; proven = $false; waiting = 0; off = $true; lines = @($lines.ToArray()); summary = "mail: $(Get-PimMailOffNote)" }
+    }
     else { & $add 'mail-mode' 'Mail mode chosen' 'ok' $(if ($mode -eq 'smtp') { 'SMTP relay' } else { "shared mailbox$(if (-not $storedMode) { ' (the default)' })" }) '' }
 
     if ($mode -eq 'smtp') {
@@ -425,7 +449,7 @@ function Get-PimMailCheck {
     $summary = if (-not $notOk.Count -and -not $waiting.Count) { 'mail: every prerequisite is in place and proven' }
                elseif (-not $notOk.Count) { "mail: every prerequisite is in place -- waiting for the engine's first send to prove its send right (not a problem)" }
                else { "mail: $($notOk.Count) of $($lines.Count) not complete -- $(@($notOk | ForEach-Object { $_.title }) -join ', ')" }
-    return [pscustomobject][ordered]@{ mode = $mode; complete = (-not $notOk.Count); proven = (-not $notOk.Count -and -not $waiting.Count); waiting = $waiting.Count; lines = @($lines.ToArray()); summary = $summary }
+    return [pscustomobject][ordered]@{ mode = $mode; complete = (-not $notOk.Count); proven = (-not $notOk.Count -and -not $waiting.Count); waiting = $waiting.Count; off = $false; lines = @($lines.ToArray()); summary = $summary }
 }
 
 function Get-PimMailSetupCheckVerdict {

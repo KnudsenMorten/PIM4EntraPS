@@ -488,6 +488,11 @@ function New-PimSetupSteps {
         'ok'      { & $set 'mail-sender' 'ok' 'the mail sender is set up' (Get-PimSetupStepField $c 'checkedUtc') }
         'missing' { & $set 'mail-sender' 'missing' 'no mail sender is set up (Get Started > Mail sender; the customer''s Exchange admin)' (Get-PimSetupStepField $c 'checkedUtc') }
         'wrong'   { & $set 'mail-sender' 'missing' 'the last test mail failed: the mail sender does not work' (Get-PimSetupStepField $c 'checkedUtc') }
+        # MAIL-OFF-1 (2026-11-17): mail switched off on purpose (MailMode none) -> n/a, neutral
+        'unknown' {
+            if ("$(Get-PimSetupStepField $c 'reason')" -eq 'not-applicable') { & $set 'mail-sender' 'n/a' 'not set up (on purpose): mail is switched off in Settings > Mail & alerting' (Get-PimSetupStepField $c 'checkedUtc') }
+            else { & $set 'mail-sender' 'unknown' 'not read: the mail settings could not be read' $null }
+        }
         default   { & $set 'mail-sender' 'unknown' 'not read: the mail settings could not be read' $null }
     }
 

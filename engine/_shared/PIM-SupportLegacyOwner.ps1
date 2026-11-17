@@ -151,7 +151,9 @@ function Get-PimSupportLegacyOwnerUpdaterDecision {
     if ($null -eq $State -or -not [bool](Get-PimSupportLegacyOwnerField $State 'read')) { return (& $o 'nothing' 'the support access state could not be read -- nothing is started') }
     if ((Get-PimSupportLegacyOwnerField $State 'jitOpen') -eq $true) { return (& $o 'nothing' 'a support session is open -- the just-in-time path owns the db_owner; nothing is touched') }
     if ((Get-PimSupportLegacyOwnerField $State 'readOnly') -ne $true) { return (& $o 'report-p1' "the Support app's read-only user is not in place (proof 1) -- the standing db_owner stays") }
-    if ($rs -and $rs -ne 'removed') {
+    # LEGACY-FAST-1: only a real 'not yet' waits a day (a precondition missing, a failed proof, a refusal); an answer of
+    # 'open-session' (the session has since ended -- checked above) is tried again at once
+    if ($rs -in @('proof-missing', 'failed', 'refused')) {
         $at = ConvertFrom-PimSupportLegacyOwnerUtc (Get-PimSupportLegacyOwnerField $Record 'atUtc')
         if ($null -ne $at -and ($NowUtc.ToUniversalTime() - $at).TotalHours -lt (Get-PimSupportLegacyOwnerRetryHours)) {
             return (& $o 'wait' "the database job answered '$rs' at $($at.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)) -- asked again after $(Get-PimSupportLegacyOwnerRetryHours) h")
@@ -173,6 +175,58 @@ function Get-PimSupportLegacyOwnerReportParts {
         'refused' { $out.Add(@{ part = 'sql-support-owner.failed'; code = 'sql-support-owner-failed' }) }
     }
     return @($out.ToArray())
+}
+
+function Get-PimSupportLegacyOwnerAttemptSettingName { <# PURE. LITERAL. When the updater last tried to start the step (pim.Settings). #> return 'SupportLegacyOwnerAttempt' }
+function Get-PimSupportLegacyOwnerFastRetryMinutes { <# PURE. LITERAL. The 15-minute gate tries a pending removal again at most this often. #> return 60 }
+
+function Get-PimSupportLegacyOwnerQuickDecision {
+    <#
+      PURE. LEGACY-FAST-1 (3.1.49, live finding: the step ran only in FULL update runs, and at the installs every full run
+      happened while a support session was open): should THIS 15-minute (quick) run take the full path, so that step 2h-bis
+      runs now? Reads only what is RECORDED (no call, nothing written): the last trim's record (pim.Settings WebIdentityTrim:
+      a reported 'sql-support-owner|' item = the Support user held db_owner outside a session), the job's last answer
+      (pim.Settings SupportLegacyOwner), this run's support consent read (-JitOpen: $true / $false / $null), the last attempt.
+        -TrimRecord / -Record / -Attempt  the stored values (object, hashtable or JSON text; $null = none)
+        -JitOpen        a support session is open now ($true), none ($false), not read ($null)
+        -Expedite / -Hold / -OtherRunning  the same guards as the other 15-minute retries; -Mode the step's switch
+      Returns @{ retry; reason; line }:
+        reason legacy-owner-pending (retry) | nothing | off | expedite | hold | session-open | session-unknown | proof-wait
+               | recent-attempt | busy | unreadable-runs
+      line '' for 'nothing' (an install with nothing pending says nothing extra and costs nothing).
+    #>
+    param([AllowNull()]$TrimRecord = $null, [AllowNull()]$Record = $null, [AllowNull()]$Attempt = $null, [AllowNull()][object]$JitOpen = $null,
+          [bool]$Expedite = $false, [bool]$Hold = $false, [AllowNull()][object]$OtherRunning = $false, [AllowEmptyString()][string]$Mode = 'on',
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    $o = { param($r, $why, $l = '') [pscustomobject]@{ retry = ($r -eq 'legacy-owner-pending'); reason = $r; line = $(if ($l) { "update retry: the Support app's legacy db_owner -- $l" } else { '' }) } }
+    $js = { param($v) if ($v -is [string]) { if ("$v".Trim().StartsWith('{')) { try { $v | ConvertFrom-Json } catch { $null } } else { $null } } else { $v } }
+    $now = $NowUtc.ToUniversalTime()
+    # what is pending -- read from the records only
+    $tr = & $js $TrimRecord; $held = $false
+    $rep = Get-PimSupportLegacyOwnerField $tr 'reported'
+    if ($rep) { $names = if ($rep -is [System.Collections.IDictionary]) { @($rep.Keys) } else { @($rep.PSObject.Properties | ForEach-Object { $_.Name }) }; $held = [bool](@($names | Where-Object { "$_" -like 'sql-support-owner|*' }).Count) }
+    $rec = ConvertTo-PimSupportLegacyOwnerRecord $Record
+    $rs = "$(Get-PimSupportLegacyOwnerField $rec 'state')".Trim()
+    $pending = $false; $waitDay = $false
+    if ($rs -eq 'restore-pending') { $pending = $true }
+    elseif ($held -and ($rs -in @('', 'open-session', 'no-answer', 'not-started'))) { $pending = $true }
+    elseif ($held -and $rs -in @('proof-missing', 'failed', 'refused')) { $pending = $true; $waitDay = $true }
+    if (-not $pending) { return (& $o 'nothing' '') }   # removed / clean / nothing held: no line, no cost
+    $m = "$Mode".Trim().ToLowerInvariant()
+    if ($m -in @('off', '0', 'false', 'no')) { return (& $o 'off' '' 'pending, but the step is switched off (PIM_SUPPORT_LEGACY_OWNER=off)') }
+    if ($Expedite) { return (& $o 'expedite' '' 'pending; an update-now signal takes its own path') }
+    if ($waitDay) {
+        $at = ConvertFrom-PimSupportLegacyOwnerUtc (Get-PimSupportLegacyOwnerField $rec 'atUtc')
+        if ($null -ne $at -and ($now - $at).TotalHours -lt (Get-PimSupportLegacyOwnerRetryHours)) { return (& $o 'proof-wait' '' "the database job answered '$rs' at $($at.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)) -- asked again after $(Get-PimSupportLegacyOwnerRetryHours) h (not from this 15-minute run)") }
+    }
+    if ($JitOpen -eq $true) { return (& $o 'session-open' '' 'pending, but a support session is open now -- the just-in-time path owns it; tried again on a later 15-minute run') }
+    if ($null -eq $JitOpen) { return (& $o 'session-unknown' '' 'pending, but whether a support session is open could not be read this run -- not tried now') }
+    $att = ConvertFrom-PimSupportLegacyOwnerUtc (Get-PimSupportLegacyOwnerField (& $js $Attempt) 'atUtc')
+    if ($null -ne $att -and ($now - $att).TotalMinutes -lt (Get-PimSupportLegacyOwnerFastRetryMinutes)) { return (& $o 'recent-attempt' '' "pending; the last attempt was at $($att.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)) -- tried again after $(Get-PimSupportLegacyOwnerFastRetryMinutes) min") }
+    if ($Hold) { return (& $o 'hold' '' 'pending, but this environment is HELD (PIM_UPDATE_HOLD=1); not tried') }
+    if ($OtherRunning -is [bool] -and $OtherRunning) { return (& $o 'busy' '' 'pending, but another updater execution is running; not tried now (never two at once)') }
+    if (-not ($OtherRunning -is [bool])) { return (& $o 'unreadable-runs' '' 'pending, but the updater''s executions could not be read; not tried now (never two at once)') }
+    return (& $o 'legacy-owner-pending' '' "$(if ($rs -eq 'restore-pending') { 'a restore is pending' } elseif ($rs) { "the last answer was '$rs'" } else { 'never tried yet' }) and no support session is open now -- this 15-minute run takes the full path once (no roll unless one is due anyway)")
 }
 
 function Invoke-PimSupportLegacyOwnerJobRun {
@@ -270,6 +324,8 @@ function Invoke-PimSupportLegacyOwnerUpdaterStep {
             }
             'start' {
                 if (-not (Test-PimSupportLegacyOwnerAppId $SupportAppId)) { $res.state = 'n/a'; & $say 'info' 'the Support app id is not known this run -- nothing started'; break }
+                # LEGACY-FAST-1: the attempt is recorded (started or not), so the 15-minute gate tries again at most once an hour
+                if ($SetSetting) { try { [void](& $SetSetting (Get-PimSupportLegacyOwnerAttemptSettingName) ([ordered]@{ atUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) })) } catch { } }
                 $g = $null; if ($Gate) { try { $g = & $Gate } catch { $g = @{ start = $false; reason = (& $short $_) } } } else { $g = @{ start = $false; reason = 'no database job gate in this process' } }
                 if (-not $g.start) { $res.state = 'not-started'; & $say 'info' "the database job is not started this run: $($g.reason) -- the standing db_owner stays; the next update asks again"; break }
                 if (-not $RunJob) { $res.state = 'not-started'; & $say 'info' 'no job starter in this process -- nothing started'; break }

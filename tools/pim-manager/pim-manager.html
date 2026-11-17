@@ -16885,6 +16885,8 @@
         // break-glass ("Skip for now" = GetStartedConfirmations 'mail-later'; Admins are reminded until it is complete).
         const later = c.confirm && c.confirm['mail-later'];
         const k = c.mail && c.mail.checks;
+        // MAIL-OFF-1 (2026-11-17): switched off on purpose (MailMode none) = a finished choice -- done, grey note, no reminder
+        if ((k && k.off) || (c.mail && c.mail.mode === 'none')) return { done: true, note: 'not set up (on purpose) -- PIM sends no mail; choose a sender here or in Settings > Mail & alerting to start' };
         if (k && typeof k.complete === 'boolean') {
           // MAIL-STEP-PROOF (owner 2026-10-09): 'waiting' = the engine job has not sent yet -- information, never open.
           const open = (k.lines || []).filter(l => l && l.state !== 'ok' && l.state !== 'waiting');
@@ -17205,8 +17207,10 @@
     if (!k || !Array.isArray(k.lines)) return '';
     // MAIL-STEP-PROOF (owner 2026-10-09): 'waiting' = the engine job's first send has not happened yet -- an INFO line (blue),
     // counted as complete, with no "If it fails" command. Only a recorded engine send FAILURE ('failed') is a finding.
-    const mark = { ok: ['&#10003;', '#1a7f37', 'ok'], missing: ['&#9675;', '#9a6700', 'missing'], failed: ['&#10007;', '#9a6700', 'FAILS'], unproven: ['?', '#9a6700', 'not proven yet'], waiting: ['&#9432;', '#0969da', 'info -- waiting for its first send'], unknown: ['?', '#57606a', 'not checked'] };
+    const mark = { ok: ['&#10003;', '#1a7f37', 'ok'], missing: ['&#9675;', '#9a6700', 'missing'], failed: ['&#10007;', '#9a6700', 'FAILS'], unproven: ['?', '#9a6700', 'not proven yet'], waiting: ['&#9432;', '#0969da', 'info -- waiting for its first send'], unknown: ['?', '#57606a', 'not checked'], off: ['&#8212;', '#57606a', 'not set up (on purpose)'] };
     const waitingN = (k.lines || []).filter(l => l && l.state === 'waiting').length;
+    // MAIL-OFF-1 (2026-11-17): mail switched off on purpose -- one neutral grey line, never amber
+    if (k.off) return '<div class="mailCheck" data-mail-off="1" style="margin-top:8px;"><div style="font-weight:600;color:#57606a;">' + (compact ? 'Mail (optional): ' : 'Mail: ') + escapeHtml(String(k.summary || '').replace(/^mail:\s*/, '')) + '</div></div>';
     let h = '<div class="mailCheck" style="margin-top:8px;">' +
       '<div style="font-weight:600;' + (k.complete ? 'color:#1a7f37;' : 'color:#7d4e00;') + '">' + (compact ? 'Mail (optional): ' : 'What mail needs: ') +
       escapeHtml(k.complete ? (waitingN ? "every prerequisite is in place -- the engine job's send right is proven at its first send" : 'every prerequisite is in place and proven') : String(k.summary || '').replace(/^mail:\s*/, '')) + '</div>';
@@ -17263,7 +17267,9 @@
       '<div class="gs-l">How PIM Manager sends mail' + settingInfoBtn('Mail.Mode') + '</div>' +
       radio('sharedMailbox', '<b>Shared mailbox</b> (Exchange Online) -- PIM sends as its own identity, scoped to that one mailbox. No password.') +
       radio('smtp', '<b>SMTP relay</b> -- a mail server you already use (host, port, user name and password).') +
-      (mode === 'none' ? radio('none', '<b>None</b> -- mail is switched off.') : '') + gsErr('mode') +
+      // MAIL-OFF-1 (2026-11-17): a deliberate "no mail" choice, always offered -- a neutral state, never shown as a problem
+      radio('none', '<b>Not set up (on purpose)</b> -- PIM sends no mail. TAP codes, approvals and alerts are not sent; you can choose a sender at any time.') + gsErr('mode') +
+      '<div class="mailSec" data-mail-sec="none"' + (mode === 'none' ? '' : ' style="display:none;"') + '><div class="gs-hint">Mail stays off until you choose a shared mailbox or an SMTP relay here. Nothing is reported as a problem while it is off.</div></div>' +
       '<div class="mailSec" data-mail-sec="sharedMailbox"' + (mode === 'sharedMailbox' ? '' : ' style="display:none;"') + '>' +
         mailboxStepsHtml(m, p, settingInfoBtn('Mail.SharedMailbox')) +
       '</div>' +
@@ -17472,7 +17478,7 @@
     try {
       const r = await api('PUT', '/api/settings/mail', body);
       const pwEl = root.querySelector('[name="smtpPassword"]'); if (pwEl) pwEl.value = '';
-      let note = body.mode === 'smtp' ? 'SMTP relay saved.' : (body.mode === 'none' ? 'Mail switched off.' : 'Shared mailbox saved.');
+      let note = body.mode === 'smtp' ? 'SMTP relay saved.' : (body.mode === 'none' ? 'Saved: mail is not set up (on purpose).' : 'Shared mailbox saved.');
       if (r && r.password && r.password.stored === false) note += ' The password was NOT stored: ' + r.password.reason + ' -- run the Key Vault command shown here.';
       else if (r && r.password && r.password.stored) note += ' Password stored in Key Vault.';
       return { wrote: true, note: note, state: r, passwordRefused: !!(r && r.password && r.password.stored === false) };

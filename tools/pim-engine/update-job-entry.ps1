@@ -918,6 +918,42 @@ function Get-PimUpdTrackFromVersion {
     $v = "$($script:PimRunningVersion)".Trim(); if (-not $v) { $v = "$($env:PIM_UPDATE_LAST_BUILT)".Trim() }
     return $v
 }
+# ---- BUILD-TRANSIENT-1 (2026-11-17) -- A BUILD THAT FAILED ON A PASSING REGISTRY FAULT SAYS SO, AND IS RETRIED ----------------
+# A build that failed on a passing registry fault (push or not: $Build.transientCause, Invoke-PimAcrRestBuildWithRetry) says
+# so to Invardia (TRANSIENT-RETRY-1: New-PimUpdateBuildRetryInfo, recorded in UpdateState 'retry', sent on the run report),
+# and the next 15-minute update run retries it (Get-PimUpdateRetryDecision); the 3rd failing attempt says it will not retry.
+# Nothing rolls: the running version stays. Any other build failure gets no statement ($null) -- reported exactly as before.
+# Returns @{ info = <statement | $null>; suffix = <text for the error line | ''> }. Never throws.
+function Get-PimUpdaterBuildRetryStatement {
+    param([object]$Build, [string]$TargetVersion)
+    $out = @{ info = $null; suffix = '' }
+    try {
+        if (-not "$($Build.transientCause)".Trim()) { return $out }
+        $btPrev = $null; try { $btCs = Get-PimUpdaterStoreCsHealed; if ("$btCs".Trim()) { $btPrev = Read-PimUpdateState -ConnectionString $btCs } } catch { $btPrev = $null }
+        $btHealthy = $null
+        try {
+            # the running Manager: healthy = an active revision the platform does not report as Failed / Degraded (read only)
+            $btRev = Get-PimAcaActiveRevision -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp
+            if ($btRev) { $btHealthy = [bool]("$($btRev.properties.runningState)" -notmatch '(?i)^(Failed|Degraded)$') } else { $btHealthy = $false }
+        } catch { $btHealthy = $null }
+        $btQuick = [bool]($unNightly -and $unEnabled)
+        $btInfo = New-PimUpdateBuildRetryInfo -Previous $btPrev -Cause "$($Build.transientCause)" -TargetVersion $TargetVersion `
+                      -PriorVersion "$($script:PimRunningVersion)" -PriorHealthy $btHealthy -QuickRuns $btQuick
+        $out.info = $btInfo
+        $btMax = Get-PimUpdateBuildRetryMaxAttempts
+        if ($btInfo.willRetry) {
+            Say "  a passing registry fault ($($btInfo.cause)), attempt $($btInfo.attempt) of $btMax -- the next update run builds again; $($script:PimRunningVersion) keeps running" 'Yellow'
+            if (-not "$($Build.pushFault)".Trim()) { $out.suffix = " -- the next update run builds again (attempt $($btInfo.attempt) of $btMax)" }
+        } elseif (-not $btQuick) {
+            Say "  a passing registry fault ($($btInfo.cause)) -- this install has no 15-minute update runs, so it is reported as a failed update (the nightly run builds again)" 'Red'
+        } else {
+            Say "  a passing registry fault ($($btInfo.cause)), attempt $($btInfo.attempt) of $btMax -- no more quick retries; reported as a failed update (the nightly run tries again)" 'Red'
+            $out.suffix = " (attempt $($btInfo.attempt) of $btMax, no more quick retries)"
+        }
+    } catch { Say "  the retry statement could not be built ($((("$($_.Exception.Message)") -split "`n")[0])) -- reported as a failed build" 'DarkGray' }
+    return $out
+}
+
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -930,7 +966,10 @@ function Send-PimUpdateOutcome {
         # 100.69: the vendor-telemetry outcome when it must differ from the default mapping (the no-key warning is
         # 'attention' in the Manager but never a FAILED record at Invardia: it is not a product failure).
         [ValidateSet('','ok','failed','skipped')][string]$TelemetryOutcome = '',
-        [AllowEmptyString()][string]$WaitingSinceUtc = ''
+        [AllowEmptyString()][string]$WaitingSinceUtc = '',
+        # BUILD-TRANSIENT-1: Invardia's TRANSIENT-RETRY-1 statement of a build that failed on a passing registry fault
+        # (New-PimUpdateBuildRetryInfo) -- recorded in UpdateState as 'retry', which the uplink sends on the run report.
+        [AllowNull()][object]$Retry = $null
     )
     # SCHEMA-QUIESCE-818: every exit path records its outcome HERE, so the hold on the scheduled jobs is lifted here too.
     Clear-PimUpdaterSchemaHold
@@ -941,8 +980,10 @@ function Send-PimUpdateOutcome {
     if ($script:PimUpdTrack) {
         try {
             $utTo = "$ToVersion".Trim(); if (-not $utTo) { $utTo = "$($script:PimRingApproved)".Trim() }
-            [void](Complete-PimUpdateTrack -Track $script:PimUpdTrack -Outcome $Outcome -ErrorText $ErrorText -FromVersion (Get-PimUpdTrackFromVersion) -ToVersion $utTo -RolledBack:([bool]$script:PimUpdTrackRolledBack))
+            [void](Complete-PimUpdateTrack -Track $script:PimUpdTrack -Outcome $Outcome -ErrorText $ErrorText -FromVersion (Get-PimUpdTrackFromVersion) -ToVersion $utTo -RolledBack:([bool]$script:PimUpdTrackRolledBack) -Retry $Retry)
         } catch { }
+        # BUILD-TRANSIENT-1: -Retry is the SAME object recorded in UpdateState below (the run report's Retry) -- it was built
+        # before this function was called (Get-PimUpdaterBuildRetryStatement), so the stage-failed event and the report agree.
     }
     # The vendor telemetry keeps its closed vocabulary: ahead = a good run with nothing to do ('ok'); attention is still
     # something an operator has to act on, so Invardia sees it ('failed', with the actionable text).
@@ -998,7 +1039,7 @@ function Send-PimUpdateOutcome {
                         -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
                         -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
                         -Source "$($env:PIM_UPDATE_SOURCE)" -WaitingSinceUtc $WaitingSinceUtc -SqlAccess $script:PimSqlAccessVerdict -SignIn $script:PimSignInLayer -EnginePermissions $script:PimEnginePermissionCheck -SetupFacts $script:PimSetupFacts `
-                        -BuildPool $script:PimBuildPoolState -NoBuildPool:([bool]$script:PimBuildPoolNone) `
+                        -BuildPool $script:PimBuildPoolState -NoBuildPool:([bool]$script:PimBuildPoolNone) -Retry $Retry `
                         -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
@@ -1459,6 +1500,8 @@ if ($unKind.kind -eq 'quick') {
         # 15-minute run, when the ring's head is ahead of the running version -- the same path as the nightly (no exit below),
         # the same quiesce rule with a shorter wait (Invoke-PimUpdaterSchemaQuiesce reads $script:PimUpdateRollRetry), never
         # a major jump, never while another updater execution runs. An expedite keeps its own path (the line above).
+        # BUILD-TRANSIENT-1: a build that failed on a passing registry fault (UpdateState 'built' / 'failed' with a retry that
+        # says willRetry) is retried by the same decision (reason 'build-retry'); the 3rd failing attempt stops the retries.
         $unRt = $null
         if ("$unCs".Trim()) {
             try {
@@ -1487,6 +1530,32 @@ if ($unKind.kind -eq 'quick') {
                     }
                 }
             } catch { $unRt = $null }
+        }
+        # LEGACY-FAST-1 (3.1.49, live finding): the Support app's legacy db_owner step (2h-bis, after the web trim) runs only in
+        # a FULL run, and at the installs every full run fell inside an open support session. When it is PENDING (the last trim
+        # held SQL-SUPPORT-OWNER and the job's answer is none / open-session, or a restore is pending; a 'not yet' answer waits
+        # a day) and NO support session is open now (this run's consent read, $scRun), this 15-minute run takes the full path
+        # ONCE -- the same path and guards as ROLL-RETRY-1 (never while another updater execution runs, never held, an expedite
+        # keeps its own path), at most once an hour (SupportLegacyOwnerAttempt). Reads only the recorded state; no roll unless
+        # one is due anyway. Nothing pending = no line, nothing else read.
+        $unLo = $null
+        if (-not ($unRt -and $unRt.retry) -and "$unCs".Trim()) {
+            try {
+                $unLoTrim = Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimWebTrimSettingName)
+                $unLoRec = Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimSupportLegacyOwnerSettingName)
+                $unLoAtt = $null
+                $unLoJit = $null; try { if ($scRun -and $scRun.record) { $unLoJit = $scRun.record.jitOpen } } catch { $unLoJit = $null }
+                $unLoArgs = @{ TrimRecord = $unLoTrim; Record = $unLoRec; JitOpen = $unLoJit; Expedite = [bool]($null -ne $unQ.signal -and $unQ.signal.updateNow)
+                               Hold = ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1'); OtherRunning = (Get-PimUpdateNowOtherRunning -Executions $unExecs -OwnExecution $unOwnExec); Mode = "$($env:PIM_SUPPORT_LEGACY_OWNER)" }
+                $unLo = Get-PimSupportLegacyOwnerQuickDecision @unLoArgs
+                if ($unLo.retry) {
+                    # pending: the last attempt is read only now (an install with nothing pending never reads it)
+                    $unLoAtt = Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimSupportLegacyOwnerAttemptSettingName)
+                    $unLo = Get-PimSupportLegacyOwnerQuickDecision @unLoArgs -Attempt $unLoAtt
+                }
+                if ($unLo.retry) { $unRt = [pscustomobject]@{ retry = $true; reason = 'legacy-owner-pending'; line = "$($unLo.line)"; heldUtc = $null; headVersion = ''; waitMinutes = (Get-PimUpdateRetryQuiesceWaitMinutes); attempt = 0 } }
+                elseif ("$($unLo.line)") { Say $unLo.line 'DarkGray' }
+            } catch { $unLo = $null }
         }
         if ($unRt -and $unRt.retry) {
             Say $unRt.line 'Cyan'
@@ -1868,7 +1937,7 @@ if ($plan.action -eq 'build') {
         $b = Invoke-PimAcrRestBuildWithRetry -SubscriptionId $sub -ResourceGroup $rg -RegistryName $reg.registryName `
                 -ContextPath $ctx -ImageNames @("$imageRepo`:$($plan.version)") -AgentPoolName $pool `
                 -OnPoll { param($s) Say "  build $s" 'DarkGray' } `
-                -OnRetry { param($r, $why) Say "  build $($r.status) after $($r.seconds)s (run $($r.runId)): the push to the registry failed ($why) -- a registry-side fault; building once more in 60 s" 'Yellow' }
+                -OnRetry { param($r, $why, $kind) if ("$kind" -eq 'build') { Say "  build $($r.status) after $($r.seconds)s$(if ("$($r.runId)") { " (run $($r.runId))" }): $why -- a passing registry fault; building once more in 60 s" 'Yellow' } else { Say "  build $($r.status) after $($r.seconds)s (run $($r.runId)): the push to the registry failed ($why) -- a registry-side fault; building once more in 60 s" 'Yellow' } }
         if (-not $b.ok) {
             Say "  BUILD $($b.status) after $($b.seconds)s (run $($b.runId))" 'Red'
             if ("$($b.detail)".Trim()) { Say "  $("$($b.detail)".Trim())" 'Red' }
@@ -1879,11 +1948,14 @@ if ($plan.action -eq 'build') {
             # transient, never UNCLASSIFIED; any other build failure carries the run's error line for whoever reads it.
             $bErr = "build $($b.status) after $($b.seconds)s"
             if ("$($b.pushFault)".Trim()) { $bErr += ": the push to the registry failed ($($b.pushFault)) on both tries -- the next update run builds again" }
-            elseif ("$($b.detail)".Trim()) { $d = "$($b.detail)".Trim() -replace '\s+', ' '; if ($d.Length -gt 300) { $d = $d.Substring(0, 300) }; $bErr += ": $d" }
-            Send-PimUpdateOutcome -Action 'built' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText $bErr
+            elseif ("$($b.buildFault)".Trim()) { $bErr += ": a passing registry fault ($($b.buildFault)) on both tries" }
+            if (-not "$($b.pushFault)".Trim() -and "$($b.detail)".Trim()) { $d = "$($b.detail)".Trim() -replace '\s+', ' '; if ($d.Length -gt 300) { $d = $d.Substring(0, 300) }; $bErr += ": $d" }
+            # BUILD-TRANSIENT-1: a passing registry fault -> the retry statement ($null for any other failure, as before)
+            $bt = Get-PimUpdaterBuildRetryStatement -Build $b -TargetVersion "$($plan.version)"; $btInfo = $bt.info; $bErr += $bt.suffix
+            Send-PimUpdateOutcome -Action 'built' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText $bErr -Retry $btInfo
             exit 1
         }
-        if ([int]$b.attempts -gt 1) { Say "  the second build went through (the first, run $($b.firstRunId), failed on the push)" 'Green' }
+        if ([int]$b.attempts -gt 1) { Say "  the second build went through (the first, run $($b.firstRunId), failed on the push or a passing registry fault)" 'Green' }
         Say "  built in $($b.seconds)s (run $($b.runId))" 'Green'
         # Remember it, so tomorrow night is a roll and not another build. Takes effect on the NEXT
         # run by the same rule the self-stamp does -- this run already knows what it built.

@@ -133,6 +133,10 @@ function New-PimUpdateStateRecord {
         # -NoBuildPool = this install has no pool (a public install): the key is never written, nothing is carried.
         [AllowNull()][object]$BuildPool = $null,
         [switch]$NoBuildPool,
+        # BUILD-TRANSIENT-1 (2026-11-17): Invardia's TRANSIENT-RETRY-1 statement of a build that failed on a passing registry
+        # fault (New-PimUpdateBuildRetryInfo). Written on a FAILED run only and NEVER carried forward: the next record has none,
+        # so a success (or any other outcome) clears it.
+        [AllowNull()][object]$Retry = $null,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -208,6 +212,7 @@ function New-PimUpdateStateRecord {
     if ($null -ne $engPerm) { $rec['enginePermissions'] = $engPerm }
     if ($null -ne $setupF) { $rec['setupFacts'] = $setupF }
     if ($null -ne $bPool) { $rec['buildPool'] = $bPool }
+    if ($null -ne $Retry -and $Outcome -eq 'failed') { $rec['retry'] = $Retry }
     # SEC-LANE-1 / IMAGE-PRUNE point 5: written AFTER the outcome by the run that read them (read-modify-write of this record),
     # so every later record carries them on -- a 15-minute "nothing to do" run must not wipe what the heartbeat reports
     # (Update.runningImages / Update.imagePrune). Each says its own read time.

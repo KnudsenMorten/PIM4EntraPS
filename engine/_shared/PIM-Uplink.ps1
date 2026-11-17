@@ -220,8 +220,11 @@ function Get-PimUplinkRunPlan {
         # StepsOk names it). Absent on runs recorded before 2.4.646 and on non-engine jobs: nothing is sent then.
         $sok = @(); if ($src.PSObject.Properties['stepsOk']) { $sok = @(@($src.stepsOk) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() }) }
         $fst = ''; if ($outcome -eq 'failed' -and $src.PSObject.Properties['failedSteps']) { $fst = "$(@(@($src.failedSteps) | Where-Object { "$_".Trim() })[0])".Trim() }
-        [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count
-                              kind = $kind; noteText = $note; warningKind = $wkind; updateAction = $ua; stepsOk = $sok; failedStep = $fst })
+        $rpt = @{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count
+                  kind = $kind; noteText = $note; warningKind = $wkind; updateAction = $ua; stepsOk = $sok; failedStep = $fst }
+        # BUILD-TRANSIENT-1: the failing run's TRANSIENT-RETRY-1 statement (the updater's run only), with the failure it explains
+        if ($outcome -eq 'failed' -and $src.PSObject.Properties['retry'] -and $null -ne $src.retry) { $rpt['retry'] = $src.retry }
+        [void]$reports.Add($rpt)
     }
     $wm = $null; if ($newest) { $wm = ([datetime]$newest).ToString('o') }
     $arr = $reports.ToArray()
@@ -937,9 +940,40 @@ function ConvertTo-PimUplinkUpdateRun {
         else { return $null }
         $detail = $err
         if (-not $detail -and $status -eq 'completed') { $detail = $(if ($act -eq 'none' -or -not $act) { 'update: nothing to do' } else { "update: $act" }) }
-        return [pscustomobject]@{ name = 'update'; type = 'update'; status = $status; ok = $ok; held = $false; warning = $warn
+        $o = [pscustomobject]@{ name = 'update'; type = 'update'; status = $status; ok = $ok; held = $false; warning = $warn
             warningKind = $(if ($warn) { 'customer-update' } else { '' }); warningSummary = $(if ($warn) { $err } else { '' })
             detail = $detail; durationMs = ([int64]$dur * 1000); finishedUtc = $ts.ToString('o'); updateAction = $act }
+        # BUILD-TRANSIENT-1: a FAILED run that recorded Invardia's TRANSIENT-RETRY-1 statement carries it (the report's Retry).
+        if ($status -eq 'failed') {
+            $ri = ConvertTo-PimUplinkRetryInfo -Value (Get-PimUplinkField $UpdateState 'retry')
+            if ($null -ne $ri) { $o | Add-Member -NotePropertyName 'retry' -NotePropertyValue $ri -Force }
+        }
+        return $o
+    } catch { return $null }
+}
+
+function ConvertTo-PimUplinkRetryInfo {
+    <#
+      PURE. BUILD-TRANSIENT-1 / Invardia TRANSIENT-RETRY-1 (packages/core uplink.ts RetryInfo): a recorded retry statement as
+      the exact object the run report carries, or $null (no statement, or no boolean transient -- Invardia then has no retry
+      info either):
+        [ordered]@{ transient = <bool>; willRetry = <bool|null>; cause = <RETRY_CAUSES|null>; attempt = <int >= 1|null>;
+                    priorVersion = <string|null>; priorHealthy = <bool|null> }
+    #>
+    param([AllowNull()][object]$Value)
+    try {
+        $v = $Value
+        if ($v -is [string]) { if (-not "$v".Trim()) { return $null }; $v = $v | ConvertFrom-Json -ErrorAction Stop }
+        if ($null -eq $v) { return $null }
+        $tr = Get-PimUplinkField $v 'transient'
+        if (-not ($tr -is [bool])) { return $null }
+        $wr = Get-PimUplinkField $v 'willRetry'; if (-not ($wr -is [bool])) { $wr = $null }
+        $ca = "$(Get-PimUplinkField $v 'cause')".Trim().ToLowerInvariant()
+        if ($ca -notin @('arm-409', 'image-pull-timeout', 'queue-start-timeout', 'request-timeout', 'throttled', 'server-error', 'other')) { $ca = $null }
+        $at = 0; $atv = $null; if ([int]::TryParse("$(Get-PimUplinkField $v 'attempt')", [ref]$at) -and $at -ge 1) { $atv = [int]$at }
+        $pv = "$(Get-PimUplinkField $v 'priorVersion')".Trim(); if ($pv -notmatch '^[0-9A-Za-z.+-]{1,50}$') { $pv = $null }
+        $ph = Get-PimUplinkField $v 'priorHealthy'; if (-not ($ph -is [bool])) { $ph = $null }
+        return [pscustomobject][ordered]@{ transient = [bool]$tr; willRetry = $wr; cause = $ca; attempt = $atv; priorVersion = $pv; priorHealthy = $ph }
     } catch { return $null }
 }
 
@@ -2686,8 +2720,14 @@ function New-PimUplinkMailField {
       PURE. Mail { mode; engine; manager } from pim.Settings 'MailMode' and 'MailSendProof' (each identity's last REAL send:
       { ok; at; reason; mode; sender }). Only ok + the time leave -- never the sender address, the reason text or a host.
       An identity with no proof = null.
+      MAIL-OFF-1 (2026-11-17): mode 'none' = mail switched off ON PURPOSE ("not set up (on purpose)") -> engine and manager are
+      ALWAYS null: { mode = 'none'; engine = null; manager = null }. A proof stored before mail was switched off (e.g. an
+      ok=false from a send attempt while no sender existed) never leaves, so a deliberate "no mail" is never "Mail does not work".
     #>
     param([AllowNull()][object]$MailMode, [AllowNull()][object]$Proof)
+    $mm = $MailMode; if ($mm -is [string] -and "$mm".Trim().StartsWith('"')) { try { $mm = $mm | ConvertFrom-Json } catch { } }
+    $mode = ConvertTo-PimUplinkMailMode $mm
+    if ($mode -eq 'none') { return [pscustomobject][ordered]@{ mode = 'none'; engine = $null; manager = $null } }
     $pr = ConvertFrom-PimUplinkStoredValue $Proof
     $one = {
         param($role)
@@ -2697,8 +2737,7 @@ function New-PimUplinkMailField {
         if ($null -eq $ok) { return $null }
         [pscustomobject][ordered]@{ ok = [bool]("$ok" -match '^(?i)(true|1)$'); atUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $x 'at')) }
     }
-    $mm = $MailMode; if ($mm -is [string] -and "$mm".Trim().StartsWith('"')) { try { $mm = $mm | ConvertFrom-Json } catch { } }
-    return [pscustomobject][ordered]@{ mode = (ConvertTo-PimUplinkMailMode $mm); engine = (& $one 'engine'); manager = (& $one 'manager') }
+    return [pscustomobject][ordered]@{ mode = $mode; engine = (& $one 'engine'); manager = (& $one 'manager') }
 }
 
 function New-PimUplinkUpdatePendingField {
@@ -4153,6 +4192,12 @@ function Invoke-PimUplinkCycle {
                     if ($solCode) { $rec | Add-Member -NotePropertyName 'ErrorClass' -NotePropertyValue $solCode.ToLowerInvariant() -Force; $addNames += 'ErrorClass' }
                 }
                 if ($isId) {
+                    # BUILD-TRANSIENT-1 / Invardia TRANSIENT-RETRY-1 (identified Kind 'run' only): the updater's own statement that
+                    # this failure is a passing infra fault it retries -- Invardia holds the alert while transient, willRetry is
+                    # not false and attempt < 3. Additive: a refusal of it strips it like every other additive field.
+                    if ("$($p.outcome)" -eq 'failed' -and $p.ContainsKey('retry') -and $null -ne $p.retry) {
+                        $rec | Add-Member -NotePropertyName 'Retry' -NotePropertyValue $p.retry -Force; $addNames += 'Retry'
+                    }
                     if (-not $rec.PSObject.Properties['ErrorText'] -and "$($p.noteText)".Trim()) {
                         $nt = & $redact "$($p.noteText)" 8000
                         if ($nt) { $rec | Add-Member -NotePropertyName 'ErrorText' -NotePropertyValue $nt -Force; $addNames += 'ErrorText' }

@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.49 -- 2026-11-17
+
+- Security: while the removal of the Support app's old standing database right is pending and no support session is open, the 15-minute update check runs the full update path to do it (at most once an hour); a full run no longer waits a day after it found a session open. A missing proof still waits a day.
+
+## 3.1.48 -- 2026-11-17
+
+- The update progress event of a failed image build carries the same retry statement as the run report (temporary, will retry, attempt), so support holds its update-failed alert while a short registry or network problem is retried.
+
+## 3.1.47 -- 2026-11-17
+
+- An update whose image build fails on a short registry or network problem (an image pull timeout, a dropped connection, throttling, a registry server error) tries again once at once and on the next two 15-minute runs, and tells support it will retry; only a third failure is reported as a failed update. Other build failures are reported as before.
+
+## 3.1.46 -- 2026-11-17
+
+- Mail can be switched off on purpose (Settings > Mail: "Not set up (on purpose)"). The mail check then shows a neutral line instead of "not working", Get Started counts the step as done, and no support ticket is raised. Mail that is switched on and fails is reported as before.
+
 ## 3.1.45 -- 2026-11-17
 
 - Security (SECAUDIT-1a 4a, option B): the database job removes the Support app's legacy standing db_owner, then proves one JIT add + take-back through the signed procedures (PreExisting = 0), and restores exactly that membership if any proof step fails; never while a session is open; consent must be setup for the signed grant (else reported, nothing removed); read back, audited, reported to Invardia.

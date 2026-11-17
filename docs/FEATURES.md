@@ -277,6 +277,12 @@ deployment is a supported choice) and no credentials lying around.
   app's current ready version directly in one request, instead of listing the app's whole version history. A long history
   could make Azure's listing time out, and the check then treated a healthy update as failed and undid it. Proven on the
   vendor's own environment, which rolled two updates cleanly after the change.
+- **A short network fault during an update's build is retried, not reported as a failure.** 🟡 2026-11-17 (built, not
+  released) — When the build of a new version fails because a container registry did not answer in time, dropped the
+  connection, answered with a server error or asked to slow down, the update builds once more a minute later. If that
+  fails too, PIM Manager keeps running its current version, the next update run (normally within 15 minutes) builds again, and
+  Invardia is told that the update is retrying, so no failure alert goes out. Only when the third run in a row fails the
+  same way is it reported as a failed update. Any other build failure is reported at once, as before.
 - **Support sees what the guards hold right now.** ✅ 2026-10-12 — With an install key, the regular status report to
   Invardia lists the guards that hold something at that moment, and reports a guard as cleared once it holds nothing.
   So the status support sees follows your installation, also after you released or approved something. The list
@@ -1931,6 +1937,7 @@ deployment is a supported choice) and no credentials lying around.
   proves the sign-in and one test answer.
 
 ## 12. Notifications / Email
+- **Run PIM Manager without mail, on purpose.** ✅ 2026-11-17 (built, not released) — Settings > Mail & alerting (and Get Started > Mail sender) offers **Not set up (on purpose)**. PIM Manager then sends no mail (TAP codes, approvals and alerts are not sent) and says so once a day in its log. The Mail sender step counts as done, and nothing reports mail as a problem: no reminder, no warning, no support case. Choose a shared mailbox or an SMTP relay at any time to start sending.
 - **Every mail names the installation that sent it.** ✅ 2026-11-12 — The subject and the first line of every mail name the installation (for example "[PROD] example-prod: Warning: ..."), and the body names your tenant, so you always know which environment a mail is about.
 - **One reminder when something waits on you.** ✅ 2026-10-10 — PIM Manager mails your SuperAdmins a single reminder
   listing everything waiting on them: open Get Started steps, policy change sets held by the circuit breaker, approval and

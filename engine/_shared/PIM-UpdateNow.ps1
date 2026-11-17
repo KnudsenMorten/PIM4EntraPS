@@ -596,6 +596,62 @@ function Invoke-PimUpdateNowQuickCheck {
 function Get-PimUpdateRetryQuiesceWaitMinutes { <# PURE. LITERAL. The quiesce bound of a RETRY run (the nightly's is 20 min). #> return 5 }
 function Get-PimUpdateRetryMaxAgeHours        { <# PURE. LITERAL. A hold recorded longer ago than this is not retried (the nightly run takes it). #> return 26 }
 
+# ---- BUILD-TRANSIENT-1 (2026-11-17): a build that failed on a passing registry fault is retried by the next update run -----
+# The build of the new image failed on a fault that goes away by itself (a base-image pull timeout, a reset, a registry 5xx, a
+# 429, an ARM 409 -- Get-PimAcrBuildTransientCause) and failed again on the in-run retry. The run records it in UpdateState
+# with Invardia's TRANSIENT-RETRY-1 statement (retry = { transient, willRetry, cause, attempt, priorVersion, priorHealthy });
+# the uplink sends it on the updater's run report (Retry), and Invardia holds its alert while transient, willRetry is not
+# false and attempt < 3. The next 15-minute run retries the build by the same path as a held roll (Get-PimUpdateRetryDecision:
+# never two updater executions at once, never a major jump, the ring's approval stays the authority). Attempts 1 and 2 say
+# willRetry true; the 3rd failing attempt says willRetry false -- a real failure, alerted as before. A success clears it (a
+# record without retry). The running install is never touched by a failed build.
+function Get-PimUpdateBuildRetryMaxAttempts { <# PURE. LITERAL. Invardia's TRANSIENT_REPEAT_RUNS: the attempt that says willRetry false. #> return 3 }
+
+function Get-PimUpdateBuildRetryState {
+    <#
+      PURE. The TRANSIENT-RETRY-1 statement of a recorded build failure, or $null: the record is a run record with action
+      'built', outcome 'failed' and a retry whose transient is $true. Returns @{ attempt; willRetry; cause; targetVersion; tsUtc }.
+    #>
+    param([AllowNull()][object]$State)
+    $st = ConvertFrom-PimUpdateNowStored $State
+    if ($null -eq $st) { return $null }
+    $kind = "$(Get-PimUpdateNowField $st 'kind')".Trim()
+    if ($kind -and $kind -ne 'run') { return $null }
+    if ("$(Get-PimUpdateNowField $st 'action')".Trim() -ne 'built' -or "$(Get-PimUpdateNowField $st 'outcome')".Trim() -ne 'failed') { return $null }
+    $rt = Get-PimUpdateNowField $st 'retry'
+    if ($null -eq $rt -or $rt -is [string]) { return $null }
+    $tf = Get-PimUpdateNowField $rt 'transient'
+    if (-not ($tf -is [bool]) -or -not $tf) { return $null }
+    $at = 0; [void][int]::TryParse("$(Get-PimUpdateNowField $rt 'attempt')", [ref]$at); if ($at -lt 1) { $at = 1 }
+    $wr = Get-PimUpdateNowField $rt 'willRetry'
+    return @{ attempt = $at; willRetry = [bool]($wr -is [bool] -and $wr); cause = "$(Get-PimUpdateNowField $rt 'cause')".Trim()
+              targetVersion = "$(Get-PimUpdateNowField $st 'targetVersion')".Trim(); tsUtc = (ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $st 'tsUtc')) }
+}
+
+function New-PimUpdateBuildRetryInfo {
+    <#
+      PURE. THIS run's TRANSIENT-RETRY-1 statement for a build that failed on a passing fault (Invardia uplink.ts RetryInfo):
+        [ordered]@{ transient = $true; willRetry; cause; attempt; priorVersion; priorHealthy }
+      attempt = 1, or the previous record's attempt + 1 when that record is a transient build failure of the SAME target
+      version recorded less than Get-PimUpdateRetryMaxAgeHours ago. willRetry = attempt < Get-PimUpdateBuildRetryMaxAttempts.
+      A cause outside Invardia's list -> 'other'. priorHealthy: $true / $false, or $null when the running Manager was not read.
+      -QuickRuns $false = this install has no 15-minute update runs (the updater runs only nightly): nothing retries it soon,
+      so willRetry is false at once -- an alert is never held for days.
+    #>
+    param([AllowNull()][object]$Previous, [AllowEmptyString()][string]$Cause = '', [AllowEmptyString()][string]$TargetVersion = '',
+          [AllowEmptyString()][string]$PriorVersion = '', [AllowNull()][object]$PriorHealthy = $null, [bool]$QuickRuns = $true,
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    $known = @('arm-409', 'image-pull-timeout', 'queue-start-timeout', 'request-timeout', 'throttled', 'server-error', 'other')
+    $c = "$Cause".Trim().ToLowerInvariant(); if ($known -notcontains $c) { $c = 'other' }
+    $attempt = 1
+    $pv = Get-PimUpdateBuildRetryState -State $Previous
+    if ($pv -and $pv.targetVersion -and $pv.targetVersion -eq "$TargetVersion".Trim() -and $null -ne $pv.tsUtc -and
+        ($NowUtc.ToUniversalTime() - $pv.tsUtc).TotalHours -lt (Get-PimUpdateRetryMaxAgeHours)) { $attempt = [int]$pv.attempt + 1 }
+    $ph = $null; if ($PriorHealthy -is [bool]) { $ph = [bool]$PriorHealthy }
+    return [ordered]@{ transient = $true; willRetry = [bool]($QuickRuns -and $attempt -lt (Get-PimUpdateBuildRetryMaxAttempts)); cause = $c; attempt = [int]$attempt
+                       priorVersion = "$PriorVersion".Trim(); priorHealthy = $ph }
+}
+
 function Get-PimUpdateRetryDecision {
     <#
       PURE. Should THIS 15-minute (quick) run retry a roll the schema quiesce held?
@@ -607,16 +663,47 @@ function Get-PimUpdateRetryDecision {
         -OtherRunning   another updater execution is running: $true / $false / $null (not readable)
       Returns @{ retry; reason; line; heldUtc; headVersion; waitMinutes }:
         reason  expedite | not-held | stale | no-head | unreadable | not-ahead | major | hold | busy | unreadable-runs | retry
+                BUILD-TRANSIENT-1, for a recorded transient build failure: retry-spent | build-retry (and the guards above)
         line    '' when the recorded state is NOT a quiesce hold (the caller says its usual line); else the one line to say.
+        attempt BUILD-TRANSIENT-1: the attempt a build retry makes (the recorded attempt + 1); 0 otherwise.
     #>
     param([AllowNull()][object]$State, [AllowEmptyString()][string]$RunningVersion = '', [AllowEmptyString()][string]$HeadVersion = '',
           [bool]$Expedite = $false, [bool]$Hold = $false, [AllowNull()][object]$OtherRunning = $false, [datetime]$NowUtc = [datetime]::UtcNow)
-    $res = @{ retry = $false; reason = 'not-held'; line = ''; heldUtc = $null; headVersion = "$HeadVersion".Trim(); waitMinutes = (Get-PimUpdateRetryQuiesceWaitMinutes) }
+    $res = @{ retry = $false; reason = 'not-held'; line = ''; heldUtc = $null; headVersion = "$HeadVersion".Trim(); waitMinutes = (Get-PimUpdateRetryQuiesceWaitMinutes); attempt = 0 }
     if ($Expedite) { $res.reason = 'expedite'; return $res }
     $st = ConvertFrom-PimUpdateNowStored $State
     if ($null -eq $st) { return $res }
     $kind = "$(Get-PimUpdateNowField $st 'kind')".Trim()
     if ($kind -and $kind -ne 'run') { return $res }
+    # BUILD-TRANSIENT-1: a build that failed on a passing registry fault (and said it will be retried) is retried here, by the
+    # same rules as a held roll: the ring's head ahead of the running version, never a major jump, never held, never two at once.
+    $bt = Get-PimUpdateBuildRetryState -State $st
+    if ($bt) {
+        $now = $NowUtc.ToUniversalTime()
+        $res.heldUtc = $bt.tsUtc
+        $at = $(if ($null -ne $bt.tsUtc) { $bt.tsUtc.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'an unknown time' })
+        $max = Get-PimUpdateBuildRetryMaxAttempts
+        $pre = "update retry: the build that failed at $at on a passing registry fault ($($bt.cause); attempt $($bt.attempt) of $max)"
+        if (-not $bt.willRetry) { $res.reason = 'retry-spent'; $res.line = "$pre was the last retry -- not retried here (the nightly run takes it)"; return $res }
+        if ($null -eq $bt.tsUtc -or ($now - $bt.tsUtc).TotalHours -ge (Get-PimUpdateRetryMaxAgeHours)) {
+            $res.reason = 'stale'; $res.line = "$pre is older than $(Get-PimUpdateRetryMaxAgeHours) h -- not retried here (the nightly run takes it)"; return $res
+        }
+        $hv = "$HeadVersion".Trim()
+        if (-not $hv) { $res.reason = 'no-head'; $res.line = "$pre -- the ring's head is not known this run, so it is not retried now (the next 15-minute run asks again)"; return $res }
+        $cmp = Compare-PimUpdateNowVersion -A $hv -B $RunningVersion
+        if ($null -eq $cmp) { $res.reason = 'unreadable'; $res.line = "$pre -- the head ('$hv') or the running version ('$RunningVersion') cannot be read; not retried"; return $res }
+        if ($cmp -le 0) { $res.reason = 'not-ahead'; $res.line = "$pre -- the ring's head $hv is not ahead of the running $RunningVersion; nothing to do"; return $res }
+        $rm = -1; $tm = -1
+        if ("$RunningVersion".Trim().TrimStart('v', 'V') -match '^(\d+)\.') { $rm = [int]$Matches[1] }
+        if ($hv.TrimStart('v', 'V') -match '^(\d+)\.') { $tm = [int]$Matches[1] }
+        if ($rm -ge 0 -and $tm -gt $rm) { $res.reason = 'major'; $res.line = "$pre -- $RunningVersion -> $hv is a MAJOR jump; a retry never takes one (the nightly run decides)"; return $res }
+        if ($Hold) { $res.reason = 'hold'; $res.line = "$pre -- this environment is HELD (PIM_UPDATE_HOLD=1); not retried"; return $res }
+        if ($OtherRunning -is [bool] -and $OtherRunning) { $res.reason = 'busy'; $res.line = "$pre -- another updater execution is running; not retried now (never two at once)"; return $res }
+        if (-not ($OtherRunning -is [bool])) { $res.reason = 'unreadable-runs'; $res.line = "$pre -- the updater's executions could not be read; not retried now (never two at once)"; return $res }
+        $res.retry = $true; $res.reason = 'build-retry'; $res.attempt = [int]$bt.attempt + 1
+        $res.line = "update retry: building again -- the build failed at $at on a passing registry fault ($($bt.cause)); this is attempt $($res.attempt) of $max (ring head $hv, running $RunningVersion; the running version stays as it is until a build succeeds)"
+        return $res
+    }
     if ("$(Get-PimUpdateNowField $st 'outcome')".Trim() -ne 'waiting' -or "$(Get-PimUpdateNowField $st 'action')".Trim() -ne 'schema') { return $res }
     $held = ConvertTo-PimUpdateNowUtc (Get-PimUpdateNowField $st 'tsUtc')
     $res.heldUtc = $held

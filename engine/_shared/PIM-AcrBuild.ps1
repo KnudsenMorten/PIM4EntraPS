@@ -679,6 +679,56 @@ function Test-PimAcrPushTransient {
     return @{ transient = $false; reason = '' }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# BUILD-TRANSIENT-1 (2026-11-17): a build that failed on a passing registry / network fault -- most often the base-image PULL
+# timing out ("Get https://mcr.microsoft.com/v2/: net/http: request canceled while waiting for connection (Client.Timeout
+# exceeded while awaiting headers)") -- was a plain build failure: no retry until the nightly run, and a "failed" update
+# for a hiccup a retry fixes. Such a fault is now named (the cause words of Invardia's TRANSIENT-RETRY-1), retried once in
+# the run, and -- when it still fails -- reported as transient so the next update run retries it.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimAcrTransientCauses {
+    <# PURE. LITERAL. The cause words of Invardia's TRANSIENT-RETRY-1 (packages/core uplink.ts RETRY_CAUSES). #>
+    return @('arm-409', 'image-pull-timeout', 'queue-start-timeout', 'request-timeout', 'throttled', 'server-error', 'other')
+}
+
+function Get-PimAcrBuildTransientCause {
+    <#
+      PURE. Did a failed build fail on a registry / network fault that goes away by itself? @{ transient; cause; reason }.
+        throttled           429 / too many requests / TOOMANYREQUESTS / throttling
+        arm-409             an ARM 409 Conflict (a run or a registry write that collided with another)
+        image-pull-timeout  a pull / connection timeout: Client.Timeout exceeded, request canceled while waiting for
+                            connection, awaiting headers, i/o timeout, TLS handshake timeout, context deadline exceeded
+        server-error        connection reset, EOF, a registry 5xx
+      NOT transient: an empty text; anything about access (unauthorized / denied / forbidden / not allowed access /
+      authentication required -- a firewall or a role, which a retry never fixes); "manifest unknown" (the image or tag is
+      not there); every other failure (a Dockerfile step, a compile error).
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $no = @{ transient = $false; cause = ''; reason = '' }
+    $t = "$Text"
+    if (-not $t.Trim()) { return $no }
+    if ($t -match '(?i)\bunauthori[sz]ed\b|\bdenied\b|\bforbidden\b|is not allowed access|authentication required|manifest unknown') { return $no }
+    $rules = @(
+        @{ cause = 'throttled';          reason = 'the registry asked to slow down (429)'; rx = '(?i)\b429\b|too many requests|TOOMANYREQUESTS|\bthrottl' }
+        @{ cause = 'arm-409';            reason = 'Azure answered 409 Conflict';           rx = '(?i)\bHTTP 409\b|\b409\b[^\r\n]{0,40}\bConflict\b|\bConflict\b[^\r\n]{0,40}\b409\b' }
+        @{ cause = 'image-pull-timeout'; reason = 'a registry connection timed out';      rx = '(?i)Client\.Timeout exceeded|request canceled while waiting for connection|awaiting headers|i/o timeout|TLS handshake timeout|context deadline exceeded' }
+        @{ cause = 'server-error';       reason = 'the registry dropped the connection or answered 5xx'
+           rx = '(?i)connection reset|unexpected EOF|:\s*EOF\b|(HTTP|status|code)[^\r\n]{0,12}\b50[0234]\b|Service Unavailable|Bad Gateway|Gateway Time-?out|Internal Server Error' }
+    )
+    foreach ($r in $rules) { if ($t -match $r.rx) { return @{ transient = $true; cause = $r.cause; reason = $r.reason } } }
+    return $no
+}
+
+function Get-PimAcrPushFaultCause {
+    <# PURE. A transient PUSH fault (Test-PimAcrPushTransient .reason) in TRANSIENT-RETRY-1's cause words. #>
+    param([AllowEmptyString()][AllowNull()][string]$Reason)
+    $r = "$Reason".Trim()
+    if (-not $r) { return '' }
+    if ($r -match '429') { return 'throttled' }
+    if ($r -eq 'timeout') { return 'request-timeout' }
+    return 'server-error'
+}
+
 function Invoke-PimAcrRestBuildWithRetry {
     <#
       Invoke-PimAcrRestBuild, and ONCE more after -RetryDelaySeconds when the first run failed on a transient push fault
@@ -686,6 +736,11 @@ function Invoke-PimAcrRestBuildWithRetry {
       layer cache makes it cheap, and the failed run's image never reached the registry.
       Returns Invoke-PimAcrRestBuild's result plus: attempts; pushFault ('' | the fault, e.g. 'connection refused'); firstRunId;
       detail (the error line, else the last log line that names the fault -- for the report).
+      BUILD-TRANSIENT-1: a run that FAILED (status Failed / Error, never a whole-run Timeout or a Canceled run) on a passing
+      registry / network fault that is not about the push (Get-PimAcrBuildTransientCause: a base-image pull timeout, a reset,
+      a registry 5xx, a 429, an ARM 409) is retried once the same way; so is a build call that THREW on such a fault (any
+      other exception is thrown on, as before). Also returned: transientCause ('' | TRANSIENT-RETRY-1's cause word, set for a
+      push fault too) and buildFault ('' | the non-push fault in words). -OnRetry gets ($result, $reason, 'push' | 'build').
     #>
     param(
         [Parameter(Mandatory)][string]$SubscriptionId,
@@ -716,15 +771,25 @@ function Invoke-PimAcrRestBuildWithRetry {
              ImageNames = $ImageNames; DockerFilePath = $DockerFilePath; TimeoutSeconds = $TimeoutSeconds; Arguments = $Arguments
              OnPoll = $OnPoll; AgentPoolName = $AgentPoolName; PoolScaled = [bool]$__wrPool }
     $first = $null
-    $fault = ''; $detail = ''
+    $fault = ''; $detail = ''; $tCause = ''; $bFault = ''
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $b = Invoke-PimAcrRestBuild @bp
+        $threw = $false
+        try { $b = Invoke-PimAcrRestBuild @bp }
+        catch {
+            # BUILD-TRANSIENT-1: a build call that threw on a passing fault (e.g. ARM 409 / 429 / 5xx on scheduling the run)
+            # is a failed try like any other; every other exception goes on as before.
+            $exMsg = "$($_.Exception.Message)"
+            if (-not (Get-PimAcrBuildTransientCause -Text $exMsg).transient) { throw }
+            $threw = $true
+            $b = @{ ok = $false; status = 'Error'; runId = ''; seconds = 0; bytes = 0; images = @($ImageNames); error = $exMsg }
+        }
         if (-not $first) { $first = $b }
         if ($b.ok) { break }
         # Why did it fail? The error line first; the log only when the line does not say (it is a second ARM call + a download).
         $why = "$($b.error)"
         $tr = Test-PimAcrPushTransient -Text $why
-        if (-not $tr.transient) {
+        $log = ''
+        if (-not $tr.transient -and -not $threw -and "$($b.runId)".Trim()) {
             $log = Get-PimAcrRunLogTail -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName -RunId "$($b.runId)"
             if ($log) { $tr = Test-PimAcrPushTransient -Text ($why + "`n" + $log) }
             if ($tr.transient -and -not $why.Trim()) {
@@ -733,15 +798,33 @@ function Invoke-PimAcrRestBuildWithRetry {
             }
         }
         $fault = if ($tr.transient) { "$($tr.reason)" } else { '' }
+        # BUILD-TRANSIENT-1: not a push fault -> a passing registry / network fault anywhere in the build (a run that FAILED;
+        # a whole-run Timeout or a Canceled run is not one).
+        $gt = @{ transient = $false; cause = ''; reason = '' }
+        if (-not $tr.transient -and "$($b.status)" -in @('Failed', 'Error')) {
+            $gt = Get-PimAcrBuildTransientCause -Text ($why + "`n" + $log)
+            if ($gt.transient -and -not $why.Trim()) {
+                $hit = @("$log" -split "`r?`n" | Where-Object { "$_".Trim() -and (Get-PimAcrBuildTransientCause -Text $_).transient } | Select-Object -Last 1)
+                if ($hit.Count) { $why = "$($hit[0])".Trim() }
+            }
+        }
+        $tCause = $(if ($tr.transient) { Get-PimAcrPushFaultCause -Reason $tr.reason } elseif ($gt.transient) { "$($gt.cause)" } else { '' })
+        $bFault = $(if ($gt.transient) { "$($gt.reason)" } else { '' })
         $detail = $why
-        if (-not $tr.transient -or $attempt -ge 2) { break }
-        if ($OnRetry) { try { & $OnRetry $b $tr.reason } catch { } }
+        if (-not ($tr.transient -or $gt.transient) -or $attempt -ge 2) { break }
+        if ($OnRetry) {
+            $rWhy = $(if ($tr.transient) { "$($tr.reason)" } else { "$($gt.reason)" })
+            $rKind = $(if ($tr.transient) { 'push' } else { 'build' })
+            try { & $OnRetry $b $rWhy $rKind } catch { }
+        }
         if ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds $RetryDelaySeconds }
     }
     $b['attempts']   = $attempt
     $b['pushFault']  = $(if ($b.ok) { '' } else { $fault })
     $b['firstRunId'] = "$($first.runId)"
     $b['detail']     = $(if ($b.ok) { '' } else { $detail })
+    $b['transientCause'] = $(if ($b.ok) { '' } else { $tCause })
+    $b['buildFault']     = $(if ($b.ok) { '' } else { $bFault })
     $b
 }
 

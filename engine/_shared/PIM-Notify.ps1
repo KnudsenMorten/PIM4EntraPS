@@ -730,7 +730,12 @@ function Send-PimNotifyMail {
     # 'none' is checked BEFORE -WhatIf on purpose: Test-PimTapMailReady probes with -WhatIf, and a switched-off environment
     # must answer "not sent" there too (the trap that function's docstring describes for a missing sender).
     $mailMode = if (Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) { Get-PimMailMode } else { 'sharedMailbox' }
-    if ($mailMode -eq 'none') { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'mail is switched off (Settings > Mail & alerting: mail mode none)' } }
+    if ($mailMode -eq 'none') {
+        # MAIL-OFF-1 (2026-11-17): switched off on purpose -- not sent, ONE info line a day, no proof written (a stale
+        # 'failed' proof must never make a deliberate "no mail" look broken); off = $true tells a caller it is deliberate.
+        if (-not ($WhatIf -or $global:WhatIfMode) -and (Get-Command Write-PimMailOffNotice -ErrorAction SilentlyContinue)) { try { [void](Write-PimMailOffNotice -Type $Type) } catch { } }
+        return @{ sent = $false; off = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'mail is switched off on purpose (Settings > Mail & alerting: not set up)' }
+    }
     if ($WhatIf -or $global:WhatIfMode) { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'whatif' } }
     if ($mailMode -eq 'smtp') {
         $relay = Get-PimSmtpRelayConfig

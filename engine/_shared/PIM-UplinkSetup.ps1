@@ -405,6 +405,9 @@ function Get-PimSetupControlStates {
     # mail-sender: the Get Started verdict (Get-PimMailSetupState) -- done = ok, a failed test mail = wrong, none = missing.
     $ms = $Facts.Mail
     if ($null -eq $ms) { & $add 'mail-sender' 'unknown' $null 'not-readable' }
+    # MAIL-OFF-1 (2026-11-17): mail switched off ON PURPOSE (MailMode none) -> 'unknown' + reason 'not-applicable' (the
+    # contract's own neutral pair; never missing / wrong, so no red control, no fix request, no ticket).
+    elseif ([bool](Get-PimSetupField $ms 'off') -or "$(Get-PimSetupField $ms 'mode')" -eq 'none') { & $add 'mail-sender' 'unknown' $null 'not-applicable' }
     elseif ((Get-PimSetupField $ms 'proven') -eq $false) { & $add 'mail-sender' 'wrong' $null }
     elseif ([bool](Get-PimSetupField $ms 'done')) { & $add 'mail-sender' 'ok' $null }
     else { & $add 'mail-sender' 'missing' $null }
@@ -470,7 +473,7 @@ function Get-PimSetupStepStates {
     #>
     param([AllowNull()][object]$Status, [object[]]$Controls = @())
     $known = @{}; foreach ($s in $script:PimSetupSteps) { $known[$s.id] = $s }
-    $ctl = @{}; foreach ($c in @($Controls)) { if ($c) { $ctl["$($c.id)"] = "$($c.state)" } }
+    $ctl = @{}; $ctlWhy = @{}; foreach ($c in @($Controls)) { if ($c) { $ctl["$($c.id)"] = "$($c.state)"; $ctlWhy["$($c.id)"] = "$(Get-PimSetupField $c 'reason')" } }
     $failOn = @{ mail = 'mail-sender'; licence = 'licence-valid'; firstrun = 'last-run-24h'; permissions = 'identity-permissions' }
     $steps = @()
     if (Get-Command ConvertTo-PimGetStartedStatus -ErrorAction SilentlyContinue) { $steps = @((ConvertTo-PimGetStartedStatus $Status).steps) }
@@ -483,7 +486,10 @@ function Get-PimSetupStepStates {
         $done = ("$($s.done)".Trim().ToLowerInvariant() -in @('true', '1'))
         $def = ("$($s.deferred)".Trim().ToLowerInvariant() -in @('true', '1'))
         $state = 'open'; $rc = $null
-        if ($done) { $state = 'done' }
+        # MAIL-OFF-1 (2026-11-17): mail switched off on purpose (control mail-sender unknown / not-applicable) -> the Mail
+        # sender step is 'skipped' with reasonClass 'mail-off-on-purpose' -- never open, never failing
+        if ($id -eq 'mail' -and $ctl['mail-sender'] -eq 'unknown' -and $ctlWhy['mail-sender'] -eq 'not-applicable') { $state = 'skipped'; $rc = 'mail-off-on-purpose' }
+        elseif ($done) { $state = 'done' }
         elseif ($def) { $state = 'skipped'; $rc = 'skipped-for-now' }
         elseif ($failOn.ContainsKey($id) -and $ctl[$failOn[$id]] -eq 'wrong') { $state = 'failing'; $rc = "control-$($failOn[$id])" }
         $o = [ordered]@{ step = $id; required = $req; state = $state }
@@ -550,7 +556,8 @@ function New-PimSetupReport {
     }
     $steps = @(); $findings = @()
     if ($Extended) {
-        $steps = @(Get-PimSetupStepStates -Status $Facts.GetStarted -Controls @($controls.ToArray()))
+        # the EVALUATED controls (with their unknown-reason -- MAIL-OFF-1 reads 'not-applicable'); the record keeps id/state/value
+        $steps = @(Get-PimSetupStepStates -Status $Facts.GetStarted -Controls @($got.Values))
         $fdef = @{}; foreach ($f in $script:PimSetupFindings) { $fdef[$f.id] = $true }
         $findings = @(Get-PimSetupFindingStates -Facts $Facts | Where-Object { $fdef.ContainsKey("$($_.id)") })
     }

@@ -6582,7 +6582,8 @@ function Get-PimManagerMailChecks {
         }
     } catch { Write-Verbose "  [mail check] facts incomplete: $($_.Exception.Message)" }
     $chk = Get-PimMailCheck -Facts $facts
-    $out = [ordered]@{ mode = $chk.mode; complete = [bool]$chk.complete; proven = [bool]$chk.proven; waiting = [int]$chk.waiting; summary = "$($chk.summary)"; lines = @($chk.lines); checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    # MAIL-OFF-1 (2026-11-17): off = mail switched off on purpose (the page shows one neutral line)
+    $out = [ordered]@{ mode = $chk.mode; complete = [bool]$chk.complete; proven = [bool]$chk.proven; waiting = [int]$chk.waiting; off = [bool]$chk.off; summary = "$($chk.summary)"; lines = @($chk.lines); checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
                        # 100.25 item 4: the directory's own 'mail' (primary SMTP) of the sender UPN -- the fallback when no address record is stored
                        senderMail = $(if ($facts['senderLookup'] -and $facts['senderLookup'].found -eq $true) { "$($facts['senderLookup'].mail)".Trim() } else { '' }); senderOf = "$($facts['sender'])" }
     $script:PimMailCheckCache = @{ at = (Get-Date); value = $out }
@@ -6673,7 +6674,7 @@ function Get-PimManagerMailState {
         senderAddress = $(if ($mode -eq 'sharedMailbox') { "$($shown.address)" } else { $sender }); senderShown = $(if ($mode -eq 'sharedMailbox') { "$($shown.text)" } else { $sender })
         mailbox = $mailbox; domains = @($doms)
         smtp = $(if ($relayRaw) { $relay.config } else { $null }); smtpErrors = $(if ($relayRaw) { $relay.errors } else { @{} })
-        done = [bool]$state.done; note = "$($state.note)"; proven = $state.proven
+        done = [bool]$state.done; off = [bool]$state.off; note = "$($state.note)"; proven = $state.proven
         lastTest = $last
         canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
         setup = [ordered]@{
