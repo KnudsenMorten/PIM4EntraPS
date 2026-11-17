@@ -611,11 +611,12 @@ try {
     }
     # ---- SUPPORT-LEGACY-OWNER (framework SECAUDIT-1a 4a, REQUIREMENTS 104.8) -- THE SWITCH'S LAST STEP -------------------
     # The Invardia Support app's LEGACY standing db_owner (one no support grant marker added, so the JIT revoke never takes it)
-    # is removed DELIBERATELY, as this job's identity (the SQL admin group), ONLY when both proofs hold at THIS install: (P1)
-    # its read-only user is in pim_support_read, (P2) a time-limited open / close worked here (a db_owner marker of its SID,
-    # PreExisting = 0, revoked by the job) -- and never while a support session is open. The user is found BY SID from the
-    # app id the updater asked for (checked against the recorded consent). Every rule is checked again inside the one batch
-    # that drops the membership; it is read back, audited, and the answer recorded for the updater (pim.Settings
+    # is removed DELIBERATELY, as this job's identity (the SQL admin group). 3.1.45 (Invardia ruling, option B "remove, then
+    # prove, else restore"): preconditions P1 (its read-only user in pim_support_read), no open support session, the signed
+    # procedures there and the recorded consent setup; then the membership is dropped, ONE add + take-back is proved through
+    # the SAME signed procedures the support SQL access job uses, and on any failure exactly what was removed is put back.
+    # The user is found BY SID from the app id the updater asked for (checked against the recorded consent). Every
+    # precondition is checked again inside the one batch that drops the membership; it is read back, audited, and the answer recorded for the updater (pim.Settings
     # SupportLegacyOwner), which tells Invardia. A REMOVAL step: never in a grants-only run. Its problem is a yellow line,
     # never a failed job (the other steps did their work). LAST: after every other step of this run.
     if (-not $failed -and ($slAsk.asked -or -not $slAsk.ok) -and (& $runStep (Get-PimSupportLegacyOwnerStepId))) {
@@ -627,8 +628,10 @@ try {
                 $slExec = { param($sqlText) $c7 = $conn.CreateCommand(); $c7.CommandText = $sqlText; $c7.CommandTimeout = 120; [void]$c7.ExecuteNonQuery() }
                 $slAudit = { param($rec) Write-PimSqlAuditEvent -ConnectionString $cs -Actor 'job:dbinit' -ActorSource 'job' -Action "$($rec.action)" -Target "$($rec.target)" -After $rec -Result "$($rec.result)" }
                 $slRecord = { param($val) Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimSupportLegacyOwnerSettingName) -ValueJson (ConvertTo-Json -InputObject $val -Depth 6 -Compress) }
-                $sl = Invoke-PimSupportLegacyOwnerStep -Scalar $slScalar -Exec $slExec -AppId $slAsk.appId -Audit $slAudit -Record $slRecord
-                foreach ($l in @($sl.lines)) { Say $l $(switch ($sl.state) { 'removed' { 'Green' } 'failed' { 'Yellow' } 'refused' { 'Yellow' } default { 'DarkGray' } }) }
+                # 3.1.45 (option B): a restore an earlier run could not finish is finished first
+                $slPrev = $null; try { $slPrev = ConvertTo-PimSupportLegacyOwnerRecord (Get-PimSqlSetting -ConnectionString $cs -Name (Get-PimSupportLegacyOwnerSettingName)) } catch { $slPrev = $null }
+                $sl = Invoke-PimSupportLegacyOwnerStep -Scalar $slScalar -Exec $slExec -AppId $slAsk.appId -Audit $slAudit -Record $slRecord -PreviousRecord $slPrev
+                foreach ($l in @($sl.lines)) { Say $l $(switch ($sl.state) { 'removed' { 'Green' } 'failed' { 'Yellow' } 'refused' { 'Yellow' } 'restore-pending' { 'Yellow' } default { 'DarkGray' } }) }
             } catch { Say "support-legacy-owner: not done ($($_.Exception.Message)) -- the standing db_owner stays; the updater asks again" 'Yellow' }
         }
     }

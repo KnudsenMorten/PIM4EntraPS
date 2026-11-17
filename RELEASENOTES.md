@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.45 -- 2026-11-17
+
+- Security (SECAUDIT-1a 4a, option B): the database job removes the Support app's legacy standing db_owner, then proves one JIT add + take-back through the signed procedures (PreExisting = 0), and restores exactly that membership if any proof step fails; never while a session is open; consent must be setup for the signed grant (else reported, nothing removed); read back, audited, reported to Invardia.
+
 ## 3.1.44 -- 2026-11-17
 
 - Security (SECAUDIT-1a 4a): the database job removes the Support app's LEGACY standing db_owner (no open session marker) only after both proofs at that install -- its read-only user in pim_support_read, and one real JIT open/close recorded by the job -- in one transaction that re-checks every rule; read back, audited, reported to Invardia; never while a session is open, never another principal or role.

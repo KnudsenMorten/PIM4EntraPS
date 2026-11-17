@@ -1,0 +1,2 @@
+{"version":"3.1.45","date":"2026-11-17","type":"security","summary":"Old standing database rights of the support app are removed, and PIM proves that time-limited support access still works, or puts the old right back.","new":[],"fixes":[{"title":"Old support rights removed with a live proof","text":"PIM removes the old standing right, then grants and takes back time-limited support access once to prove it works. If any step fails, the old right is put back and support is told."}]}
+

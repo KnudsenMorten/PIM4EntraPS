@@ -1,5 +1,17 @@
 # What's new in PIM Manager
 
+## 3.1.45 · 2026-11-17 · Security
+
+Old standing database rights of the support app are removed, and PIM proves that time-limited support access still works, or puts the old right back.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Old support rights removed with a live proof** - PIM removes the old standing right, then grants and takes back time-limited support access once to prove it works. If any step fails, the old right is put back and support is told.
+
 ## 3.1.44 · 2026-11-17 · Security
 
 Old standing database rights of the support app are removed safely, after PIM proves the time-limited support access works.

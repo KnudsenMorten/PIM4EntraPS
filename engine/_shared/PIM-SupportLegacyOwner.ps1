@@ -11,14 +11,16 @@
     THE RULE (framework SECAUDIT-1a, rule 4a NEVER-LOSE-SQL-ACCESS + 4c): the Support app's database user holds db_owner ONLY
     inside an open support session (the signed procedures of the support SQL access job, [pimsupport].[GrantMarker]). The JIT
     revoke / sweep never removes a db_owner no marker added -- so an install that still holds the OLD standing db_owner keeps
-    it until THIS step removes it, once:
-      P1  the Support app's read-only user exists and is in pim_support_read (read back, by SID)
-      P2  one JIT open / close worked at THIS install with a real SQL sign-in: a [pimsupport].[GrantMarker] row for the
-          Support app's SID, role db_owner, PreExisting = 0 (the grant ADDED it), RevokedUtc set, RevokedBy = 'job' (the
-          support SQL access job took it back). The marker is the only record of the JIT path in the database; the Support
-          app's own sign-ins are not recorded in it (sessions are transient), so the marker is the proof.
-    Never while a support session is open (an unrevoked marker of the Support app's SID: the JIT owns it); never with a proof
-    missing (what is missing is reported ONCE); never any other principal or role. The user is found BY SID from the app id.
+    it until THIS step removes it. 3.1.45 (Invardia ruling 2026-11-17, option B "remove, then prove, else restore"): at such an
+    install every JIT grant records PreExisting = 1 and is never taken back, so a proof recorded BEFORE the removal can never
+    exist (the 3.1.44 P2 deadlock). The database job therefore, in one step (engine\_shared\PIM-SupportLegacyOwnerSql.ps1):
+      preconditions  P1 the read-only user is a direct member of pim_support_read; no unrevoked marker of its SID (no open
+                     session); the signed procedures are there; the recorded consent is setup (the signed grant gives
+                     db_owner only then -- never widened, never gone around)
+      remove         the direct db_owner membership (one guarded statement)
+      prove          ONE grant + take-back through the SAME signed procedures the support SQL access job uses, read back
+      else restore   exactly what was removed is put back, read back, reported (sql-support-owner-failed)
+    Never while a support session is open; never any other principal or role. The user is found BY SID from the app id.
 
     WHO: the database job (caj-pim-dbinit / ca-pim-dbinit, its identity in the SQL admin group). The updater (pim_updater +
     db_ddladmin) cannot change db_owner membership. A role REMOVAL waits for the run end (framework 8.18 SCHEMA-QUIESCE-818:
@@ -34,7 +36,9 @@
            the job's answer read, the state READ BACK through the signed state procedure
       'removed' + read back (inOwner false, readOnly true) -> ONE note to Invardia (fix-request channel, code
         sql-support-owner-removed), then quiet: the trim no longer reports SQL-SUPPORT-OWNER (the user holds no db_owner)
-      a proof missing -> ONE fix request per missing proof (sql-support-owner-proof); a failure -> one (sql-support-owner-failed)
+      a precondition missing -> ONE fix request per item (sql-support-owner-proof: p1 / module / consent); a failed proof
+        (restored) -> one (sql-support-owner-failed); restore-pending (the restore could not finish) -> the job is started
+        again on the next run until the membership is back
     Every line is an INFO line (internal support hygiene, TRIM-INTERNAL-1): never a customer mail, never a failed update.
     PIM_SUPPORT_LEGACY_OWNER on the updater job: on (default) | off.
 
@@ -48,7 +52,7 @@ function Get-PimSupportLegacyOwnerEnvName { <# PURE. LITERAL. The database job's
 function Get-PimSupportLegacyOwnerStepId { <# PURE. LITERAL. The database job's step id (class removal). #> return 'support-legacy-owner' }
 function Get-PimSupportLegacyOwnerRetryHours { <# PURE. LITERAL. A 'not yet' answer of the job is asked again after this. #> return 24 }
 function Get-PimSupportLegacyOwnerFixJob { <# PURE. LITERAL. The uplink job the notes are filed under (the updater's run). #> return 'pim-update' }
-function Get-PimSupportLegacyOwnerNoteText { <# PURE. LITERAL. The note to Invardia after the read-back. #> return 'legacy standing db_owner removed (SECAUDIT-1a 4a), read back' }
+function Get-PimSupportLegacyOwnerNoteText { <# PURE. LITERAL. The note to Invardia after the read-back. #> return 'legacy standing db_owner removed and a JIT add + take-back proved (SECAUDIT-1a 4a), read back' }
 
 function Test-PimSupportLegacyOwnerAppId {
     <# PURE. Is this an application (client) id (a non-empty GUID)? #>
@@ -133,6 +137,8 @@ function Get-PimSupportLegacyOwnerUpdaterDecision {
     $noteKey = "removed|$(Get-PimSupportLegacyOwnerRecordAt $Record)"
     $told = $false
     if ($Notes) { $told = [bool]($null -ne (Get-PimSupportLegacyOwnerField $Notes $noteKey)) }
+    # a restore the job could not finish comes first: the job is started again whatever the trim says (it waits for an open grant itself)
+    if ($rs -eq 'restore-pending' -and "$SupportOwner".Trim().ToLowerInvariant() -in @('held', 'clean')) { return (& $o 'start' 'the database job could not finish putting the db_owner membership back -- it is started again to finish it') }
     switch ("$SupportOwner".Trim().ToLowerInvariant()) {
         'clean' {
             if ($rs -eq 'removed' -and -not $told) { return (& $o 'note' 'the legacy standing db_owner was removed by the database job and the Support user holds no db_owner now -- Invardia is told once') }
@@ -151,7 +157,7 @@ function Get-PimSupportLegacyOwnerUpdaterDecision {
             return (& $o 'wait' "the database job answered '$rs' at $($at.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)) -- asked again after $(Get-PimSupportLegacyOwnerRetryHours) h")
         }
     }
-    return (& $o 'start' 'both proofs are checked by the database job at this install; the standing db_owner goes only when both hold')
+    return (& $o 'start' 'the database job removes the standing db_owner, proves one add + take-back through the signed procedures, else puts it back')
 }
 
 function Get-PimSupportLegacyOwnerReportParts {
@@ -161,8 +167,9 @@ function Get-PimSupportLegacyOwnerReportParts {
     $out = New-Object System.Collections.Generic.List[object]
     switch ($rs) {
         'removed' { $out.Add(@{ part = 'sql-support-owner.removed'; code = 'sql-support-owner-removed' }) }
-        'proof-missing' { foreach ($p in @(Get-PimSupportLegacyOwnerField $Record 'missing')) { if ("$p" -in @('p1', 'p2')) { $out.Add(@{ part = "sql-support-owner.$p"; code = 'sql-support-owner-proof' }) } } }
+        'proof-missing' { foreach ($p in @(Get-PimSupportLegacyOwnerField $Record 'missing')) { if ("$p" -in @('p1', 'module', 'consent')) { $out.Add(@{ part = "sql-support-owner.$p"; code = 'sql-support-owner-proof' }) } } }
         'failed' { $out.Add(@{ part = 'sql-support-owner.failed'; code = 'sql-support-owner-failed' }) }
+        'restore-pending' { $out.Add(@{ part = 'sql-support-owner.failed'; code = 'sql-support-owner-failed' }) }
         'refused' { $out.Add(@{ part = 'sql-support-owner.failed'; code = 'sql-support-owner-failed' }) }
     }
     return @($out.ToArray())

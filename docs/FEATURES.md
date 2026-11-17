@@ -222,8 +222,11 @@ deployment is a supported choice) and no credentials lying around.
   SQL Server and on the internal environment (PIM Manager 3.0.17).
 - **An older, permanent support admin right is taken back by itself.** 🟡 2026-11-17 (built, not released) — Where an
   earlier version left the Invardia Support app as a permanent database owner, PIM Manager's own database job takes that
-  right back after an update. It does so only when the Support app's read-only user is in place and one time-limited
-  support session has opened and closed on this installation, and never while a support session is open. It checks the
+  right back after an update. It does so only when the Support app's read-only user is in place, time-limited support
+  access is set up with your Setup consent, and no support session is open. Right after taking it back, the job opens and
+  closes one short time-limited support access the normal way to prove that support can still get in. If that check
+  fails, the old right is put back at once, so support never loses access (*changed 2026-11-17, 3.1.45: before, it
+  waited for an earlier support session, which could never be recorded while the old right was there*). It checks the
   result, records it in the audit log and tells Invardia. The Support app keeps its read-only user and the time-limited
   access, and no other user or role is changed.
 - **The Support app is in the database admin group only while a support session is open.** RETIRED 2026-11-17 (3.1.42):
