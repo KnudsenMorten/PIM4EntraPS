@@ -316,3 +316,47 @@ function New-PimKvRoleAssignmentRequest {
         body = @{ properties = @{ roleDefinitionId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/$RoleId"; principalId = $PrincipalId; principalType = $PrincipalType } }
     }
 }
+
+# ---- SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the web app's identity is never a sender (PURE; both mail scripts use it) --------
+# PIM 3.1.26: only the ENGINE job's identity sends mail and reads the SMTP relay password. The web app (PIM Manager,
+# its container app) holds NO Exchange send right and NO Key Vault right, so neither mail script may grant one to it.
+function Get-PimAppManagedIdentityObjectIds {
+    <# PURE. Every managed identity object id an ARM resource carries (a container app / job GET): its system-assigned
+       identity and each user-assigned one. Lower case, no duplicates; none -> @(). #>
+    param([object]$App)
+    $out = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $App -or $null -eq $App.identity) { return @() }
+    $sys = "$($App.identity.principalId)".Trim().ToLowerInvariant()
+    if ($sys) { $out.Add($sys) }
+    $ua = $App.identity.userAssignedIdentities
+    if ($ua) {
+        $props = if ($ua -is [System.Collections.IDictionary]) { @($ua.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Value = $_.Value } }) } else { @($ua.PSObject.Properties) }
+        foreach ($p in $props) { $id = "$($p.Value.principalId)".Trim().ToLowerInvariant(); if ($id -and -not $out.Contains($id)) { $out.Add($id) } }
+    }
+    return @($out.ToArray())
+}
+
+function Select-PimMailNonWebIdentityIds {
+    <#
+      PURE. Refuses the WEB app's identities from the ids a mail script is about to grant (a send right or the relay
+      password's read right). -ObjectIds = the ids the run would grant; -WebObjectIds = the identities the web app carries
+      (Get-PimAppManagedIdentityObjectIds of the Manager app); -EngineObjectIds = the engine job's own identity when the
+      run resolved it (an id that IS the engine's is kept -- the engine must keep sending -- and that is said).
+      Returns @{ ids = the ids to grant; refused = the web ids taken out; lines = one plain line per decision }.
+    #>
+    param([string[]]$ObjectIds = @(), [string[]]$WebObjectIds = @(), [string[]]$EngineObjectIds = @())
+    $web = @(@($WebObjectIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $eng = @(@($EngineObjectIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $keep = New-Object System.Collections.Generic.List[string]; $refused = New-Object System.Collections.Generic.List[string]; $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @(@($ObjectIds) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
+        $lc = $id.ToLowerInvariant()
+        if ($web -contains $lc -and $eng -notcontains $lc) {
+            $refused.Add($id)
+            $lines.Add("refused $id -- it is PIM Manager's web app identity. The web app sends no mail and reads no Key Vault secret, so it gets no right here; only the engine job's identity does.")
+        } elseif ($web -contains $lc) {
+            $keep.Add($id)
+            $lines.Add("kept $id -- it is the engine job's identity (the web app carries it too; the engine needs it to send).")
+        } else { $keep.Add($id) }
+    }
+    return @{ ids = @($keep.ToArray()); refused = @($refused.ToArray()); lines = @($lines.ToArray()) }
+}

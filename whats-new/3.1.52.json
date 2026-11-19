@@ -1,0 +1,4 @@
+{"version":"3.1.52","date":"2026-11-19","type":"security",
+ "summary":"A security update: only PIM Manager's engine is set up to send mail.",
+ "new":[],
+ "fixes":[{"title":"Mail rights for the engine only","text":"The mail setup steps and the commands PIM Manager shows you now give the send right and the mail relay password to the engine only. The web app sends no mail and gets neither."}]}

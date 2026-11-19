@@ -54,13 +54,13 @@ $script:PimApiProNote = 'API applications need a PIM Manager Pro licence -- with
 
 function Get-PimManagerApiAuthPlan {
     <#
-      PURE. From the Manager's application (Graph: appId, identifierUris, appRoles), its sign-in (Easy Auth config or the
-      sign-in front's env) and the Manager container's env -> @{ steps; patch; audiences; envValue; frontBearerPaths; roleId;
+      PURE. From the Manager's application (Graph: appId, identifierUris, appRoles), its sign-in (Easy Auth config) and
+      the Manager container's env -> @{ steps; patch; audiences; envValue; roleId;
       ok; reason }. -NewRoleId is the id a NEW role gets (passed in so the plan stays pure). Everything MERGES.
-      -FrontEnv: the sign-in front container's env (@{ name = value }) or $null when there is no front.
+      (2026-11-19: the retired sign-in front's bearer-path step is gone -- the Manager runs only behind Easy Auth.)
     #>
     param([Parameter(Mandatory)][object]$App, [AllowNull()][object]$Auth, [Parameter(Mandatory)][string]$NewRoleId,
-          [object[]]$EnvVars = @(), [AllowNull()][hashtable]$FrontEnv = $null)
+          [object[]]$EnvVars = @())
     $appId = "$($App.appId)"; $uri = "api://$appId"
     $steps = New-Object System.Collections.Generic.List[string]
     $uris = @(@($App.identifierUris) | Where-Object { "$_".Trim() })
@@ -81,23 +81,14 @@ function Get-PimManagerApiAuthPlan {
     $have = @(if ($aad -and $aad.validation -and $aad.validation.allowedAudiences) { @($aad.validation.allowedAudiences) })
     $aud = @(@($have) + @($uri, $appId) | Where-Object { "$_".Trim() } | Select-Object -Unique)
     if ($eaOn -and @($uri, $appId | Where-Object { $have -notcontains $_ }).Count) { $steps.Add('audiences') | Out-Null }
-    $bp = ''
-    if ($null -ne $FrontEnv) {
-        $cur = @("$($FrontEnv['SIGNIN_BEARER_PATHS'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if (-not $cur.Count) { $cur = @('/mcp', '/.well-known') }
-        $bp = (@($cur) + '/api/app' | Select-Object -Unique) -join ','
-        if ($cur -notcontains '/api/app') { $steps.Add('front-bearer-path') | Out-Null }
-    }
     $envValue = "$uri,$appId"
     $envHave = "$((@($EnvVars) | Where-Object { "$($_.name)" -eq 'PIM_API_APP_AUDIENCE' } | Select-Object -First 1).value)"
     if ($envHave -ne $envValue) { $steps.Add('audience-env') | Out-Null }
     $boundId = if ($aad -and $aad.registration) { "$($aad.registration.clientId)" } else { '' }
-    $frontId = if ($null -ne $FrontEnv) { "$($FrontEnv['SIGNIN_CLIENT_ID'])".Trim() } else { '' }
     $ok = $true; $why = ''
     if ($eaOn -and $boundId -and $boundId -ne $appId) { $ok = $false; $why = "the Manager's sign-in is bound to $boundId, not $appId -- refusing" }
-    elseif ($frontId -and $frontId -ne $appId) { $ok = $false; $why = "the sign-in front is bound to $frontId, not $appId -- refusing" }
     elseif ($steps.Count) { $why = "to do: $($steps -join ', ')" } else { $why = 'nothing to do -- the Manager is ready for application sign-in' }
-    return [pscustomobject]@{ steps = @($steps); ok = $ok; reason = $why; roleId = $roleId; audiences = $aud; envValue = $envValue; frontBearerPaths = $bp
+    return [pscustomobject]@{ steps = @($steps); ok = $ok; reason = $why; roleId = $roleId; audiences = $aud; envValue = $envValue
         licence = $script:PimApiProNote
         patch = [ordered]@{ identifierUris = @($uris); appRoles = @($roles) } }
 }
@@ -159,13 +150,6 @@ function Get-PimManagerApiTokenExample {
     return ($lines -join [Environment]::NewLine)
 }
 
-function Get-PimManagerApiFrontEnv($CaApp) {
-    # the sign-in front container's env as @{ name = value }, or $null when this Manager has no front
-    $f = @(@($CaApp.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' })[0]
-    if (-not $f) { return $null }
-    $h = @{}; foreach ($e in @($f.env)) { if ($e -and "$($e.name)") { $h["$($e.name)"] = "$($e.value)" } }
-    return $h
-}
 function Get-PimManagerApiManagerContainer($CaApp) {
     $cs = @(@($CaApp.properties.template.containers) | Where-Object { $_ })
     $c = @($cs | Where-Object { "$($_.name)" -eq $ManagerApp })[0]
@@ -188,14 +172,12 @@ $authRes = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGrou
 $auth = if ($authRes -and $authRes.properties) { $authRes.properties } else { $null }
 $ca = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
 if (-not $ca) { throw "container app $ManagerApp not found in $ResourceGroup" }
-$front = Get-PimManagerApiFrontEnv $ca
 $appId = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
-if (-not $appId -and $front) { $appId = "$($front['SIGNIN_CLIENT_ID'])".Trim() }
 if (-not $appId) { throw "$ManagerApp has no sign-in application -- set up the Manager's sign-in first" }
 $app = Get-PimGraphApplication -Id $appId
 if (-not $app) { throw "the Manager's application $appId was not found in tenant $TenantId" }
 $mc = Get-PimManagerApiManagerContainer $ca
-$plan = Get-PimManagerApiAuthPlan -App $app -Auth $auth -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @($mc.env) -FrontEnv $front
+$plan = Get-PimManagerApiAuthPlan -App $app -Auth $auth -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @($mc.env)
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
 Write-Host "    PRO: $($plan.licence)" -ForegroundColor Yellow
 if (-not $plan.ok) { throw $plan.reason }
@@ -233,9 +215,6 @@ if ($plan.steps -contains 'audiences') {
         $ip.validation | Add-Member -NotePropertyName allowedAudiences -NotePropertyValue @($plan.audiences) -Force
     })
 }
-if ($plan.steps -contains 'front-bearer-path') {
-    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ SIGNIN_BEARER_PATHS = "$($plan.frontBearerPaths)" } -ContainerName 'signin-front')
-}
 if ($plan.steps -contains 'audience-env') {
     [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_API_APP_AUDIENCE = "$($plan.envValue)" } -ContainerName "$($mc.name)")
 }
@@ -254,7 +233,7 @@ if ($needGrant) {
 $app2 = Get-PimGraphApplication -Id $appId
 $a2 = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
 $ca2 = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
-$after = Get-PimManagerApiAuthPlan -App $app2 -Auth $(if ($a2) { $a2.properties } else { $null }) -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @((Get-PimManagerApiManagerContainer $ca2).env) -FrontEnv (Get-PimManagerApiFrontEnv $ca2)
+$after = Get-PimManagerApiAuthPlan -App $app2 -Auth $(if ($a2) { $a2.properties } else { $null }) -NewRoleId ([guid]::NewGuid().ToString()) -EnvVars @((Get-PimManagerApiManagerContainer $ca2).env)
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
 $hard2 = Get-PimManagerApiHardeningPlan -App $app2 -ServicePrincipal (Get-PimGraphServicePrincipal -Id $appId)
 if (@($hard2.steps).Count) { throw "read-back: hardening still to do: $(@($hard2.steps) -join ', ')" }

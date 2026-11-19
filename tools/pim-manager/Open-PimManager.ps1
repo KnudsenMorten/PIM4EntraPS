@@ -693,10 +693,8 @@ $script:PimHosted = [bool]$Hosted -or ("$env:PIM_HOSTED" -in @('1','true','yes')
 # refuse the filesystem fallback for AUTHORIZATION data. Set from the SAME expression above, not
 # re-derived, so the Manager and the libs can never disagree about whether this is hosted.
 $global:PIM_Hosted = $script:PimHosted
-# 🟡 CR7 (§12.11g): behind the shared sign-in front? ONLY on the explicit PIM_HOSTED_AUTH_LAYER=signin-front -- unset, every
-# Manager keeps today's Easy Auth path. Decides the loopback bind and where the /api page token is read.
-$script:PimSigninFront = $false
-if ($script:PimHosted -and (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue)) { $script:PimSigninFront = ((Get-PimHostedAuthLayer) -eq 'signin-front') }
+# The shared sign-in front is RETIRED (framework SECURE-WEB-1 ONE STANDARD (a), 2026-11-19): the Manager has no front layer
+# any more -- a leftover PIM_HOSTED_AUTH_LAYER=signin-front resolves to 'none' (every identity refused, fail closed).
 $script:CurrentRequestPrincipal = $null
 $script:CurrentRequestOid = ''   # SEC-90: the verified Entra object id of THIS request ('' = none / local console)
 $script:CurrentRequestApp = $null      # PIM 93.4: the verified APPLICATION of THIS request (/api/app/* only), else $null
@@ -887,10 +885,7 @@ function Get-PimEasyAuthPrincipal {
     # the caller's own words and every identity is refused -- see Get-PimHostedAuthLayer.
     $authLayer = 'easyauth'
     if (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) { $authLayer = Get-PimHostedAuthLayer }
-    # 🟡 CR7 (§12.11g, OFF unless PIM_HOSTED_AUTH_LAYER=signin-front): the shared sign-in front forwards the
-    # user's signed ID token; X-MS-* headers are never read and the audience is the SAME app registration.
-    $front = ($authLayer -eq 'signin-front')
-    $strict = $front -or ($authLayer -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired)
+    $strict = ($authLayer -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired)
     $jwks = $null
     if ($strict) { $jwks = Get-PimEntraJwks }
     $issuers = @("$env:PIM_HOSTED_AUTH_ISSUERS" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -901,19 +896,6 @@ function Get-PimEasyAuthPrincipal {
         $issuers = @(Get-PimHostedDefaultIssuers -TenantId $tidPin)
     }
     $auds    = @("$env:PIM_HOSTED_EASYAUTH_AUD" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    if ($front) {
-        # The front's BEARER paths carry the caller's own access token (or none): /mcp verifies it itself, /.well-known is
-        # public metadata -- no page principal here, and no red "REJECTED" line for every MCP call.
-        if (Test-PimManagerFrontBearerPath -Path "$($Request.Url.AbsolutePath)") { return '' }
-        $frontAud = @("$env:PIM_SIGNIN_FRONT_CLIENT_ID" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if ($frontAud.Count -gt 0) { $auds = $frontAud }
-        $d = Resolve-PimHostedPrincipal -SignedToken (Get-PimAuthorizationBearer -Authorization "$($Request.Headers['Authorization'])") `
-                -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds -AuthLayer $authLayer `
-                -RequireFrontAccessToken ("$env:PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN".Trim() -match '^(1|true|yes|on)$')
-        if ($d.trusted) { $script:CurrentRequestOid = "$($d.oid)"; return "$($d.identity)" }
-        Write-PimAuthRejected -Request $Request -Layer "$($d.layer)" -Reason "$($d.reason)"
-        return ''
-    }
     # AUTH-MODERN-1 / SIGNIN-TOKEN-LIFETIME-1 (framework decision c5704c10): the platform's sign-in is layer 1; layer 2 is the
     # Manager validating the token itself with Microsoft.IdentityModel -- the ACCESS token (a script's / MCP client's own
     # Authorization bearer, else the sign-in's X-MS-TOKEN-AAD-ACCESS-TOKEN: scp user_impersonation, aud = this app, this
@@ -1213,8 +1195,6 @@ function Get-PimEasyAuthPrincipalExtras {
     #>
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
     $out = @{ names = @(); groups = @() }
-    # CR7: behind the sign-in front no X-MS-* header is ever read (the front strips them; only it reaches us).
-    if ((Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) -and (Get-PimHostedAuthLayer) -eq 'signin-front') { return $out }
     $raw = "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])".Trim()
     if (-not $raw -or -not (Get-Command ConvertFrom-PimBase64Url -ErrorAction SilentlyContinue)) { return $out }
     $bytes = ConvertFrom-PimBase64Url -Text $raw
@@ -6385,8 +6365,10 @@ function Get-PimAdminTapState {
 # MAIL-1 (framework DOCS/REQUIREMENTS.md 12.3, owner 2026-10-08): "2 options: shared mailbox or smtp relay" / "we dont use
 # certificates here, either interactive login or secret". The Manager's half: what Get Started > Mail sender and
 # Settings > Mail & alerting show (the mode, the sender, the relay, the commands with this environment's values), the save
-# (pim.Settings MailMode / MailSender / SmtpRelay -- never a password), the relay password into the environment's Key
-# Vault (as the Manager's own managed identity, when it may), and the test mail that proves a mode.
+# (pim.Settings MailMode / MailSender / SmtpRelay -- never a password), the published command that puts the relay password
+# into the environment's Key Vault (the web app writes and reads no secret), and the test mail that proves a mode.
+# 🔒 SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: every setup command the page prints names the ENGINE job's identity only -- the web
+# app's own identity is never passed to a mail script (it sends no mail and holds no Key Vault right).
 # ===================================================================================================================
 function Resolve-PimManagerJobSignInObjectId {
     <# PURE. The object id of the identity a job SIGNS IN AS: a container's PIM_ManagedIdentityClientId -> the attached
@@ -6423,8 +6405,9 @@ function Resolve-PimManagerJobSignInName {
 
 function Get-PimManagerMailIdentities {
     <#
-      The managed identities that SEND (the Manager's own and the engine job's), plus the subscription / resource group
-      they live in, for the setup commands the page prints. Read once and kept 10 minutes; never throws (a part that cannot
+      The engine job's managed identity (the ONLY sender -- SECURE-WEB-1) and the web app's own (named ONLY by the mail
+      check's tenant-wide Mail.Send finding, never put in a setup command), plus the subscription / resource group they
+      live in, for the setup commands the page prints. Read once and kept 10 minutes; never throws (a part that cannot
       be read stays '' and the page prints a placeholder for it).
     #>
     if ($script:PimMailIdCache -and ((Get-Date) - $script:PimMailIdCache.at).TotalMinutes -lt 10) { return $script:PimMailIdCache.value }
@@ -6532,15 +6515,16 @@ function Get-PimManagerMailChecks {
         try { $facts['lastTest'] = Get-PimManagerSetting -Name 'MailLastTest' } catch { }
         # MAIL-STEP-PROOF: the queued engine test send words the engine row while it waits for its first send
         try { $et = Get-PimManagerSetting -Name 'MailEngineTest'; if ($et -is [string]) { try { $et = $et | ConvertFrom-Json } catch { $et = $null } }; $facts['engineTest'] = $et } catch { }
-        # ...and the mail-sender script's read-back (Initialize-PimMailSender step [4]): scoped Mail.Send confirmed for BOTH
-        # identities in one scope -- with the Manager's own successful test mail the engine row is granted at once
+        # ...and the mail-sender script's read-back (Initialize-PimMailSender step [4]): scoped Mail.Send confirmed for the
+        # ENGINE identity in one scope -- with a successful test mail the engine row is granted at once
         try { $sck = Get-PimManagerSetting -Name 'MailSenderSetupCheck'; if ($sck -is [string]) { try { $sck = $sck | ConvertFrom-Json } catch { $sck = $null } }; $facts['setupCheck'] = $sck } catch { }
         # 100.25 item 4: the primary SMTP address the mail-sender setup stored beside the UPN (Get-PimMailSenderShown)
         try { $facts['senderAddress'] = Get-PimManagerSetting -Name 'MailSenderAddress' } catch { }
         try { $facts['alertRecipients'] = @((Get-PimAlertingConfig).recipients) } catch { $facts['alertRecipients'] = @() }
         $ids = Get-PimManagerMailIdentities
         $tid = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() }
-        $facts['setup'] = @{ tenantId = $tid; managerObjectId = "$($ids.managerObjectId)"; tickObjectId = "$($ids.tickObjectId)"; subscriptionId = "$($ids.subscriptionId)"
+        # MAIL-WEB-RIGHTS-1: the fix commands carry the ENGINE identity only (no managerObjectId in 'setup')
+        $facts['setup'] = @{ tenantId = $tid; tickObjectId = "$($ids.tickObjectId)"; subscriptionId = "$($ids.subscriptionId)"
                              sqlServer = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() }); vaultHint = "$($global:PIM_EmergencyVault)".Trim() }
         $mode = if ($facts['mode']) { $facts['mode'] } elseif ($sender) { 'sharedMailbox' } else { '' }
         if ($mode -eq 'sharedMailbox' -and $sender) {
@@ -6678,7 +6662,9 @@ function Get-PimManagerMailState {
         lastTest = $last
         canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
         setup = [ordered]@{
-            tenantId = $tid; managerObjectId = "$($ids.managerObjectId)"; tickObjectId = "$($ids.tickObjectId)"
+            # MAIL-WEB-RIGHTS-1 (SECURE-WEB-1): the page builds the setup commands from these -- the ENGINE identity only;
+            # the web app's own identity is never handed to a mail script
+            tenantId = $tid; tickObjectId = "$($ids.tickObjectId)"
             subscriptionId = "$($ids.subscriptionId)"; resourceGroup = "$($ids.resourceGroup)"; tickJobName = "$($ids.tickJobName)"
             sqlServer = $sqlSrv; sqlDatabase = $sqlDb; vaultHint = "$($global:PIM_EmergencyVault)".Trim(); reason = "$($ids.reason)"
             mailboxScript = (Get-PimSupportScriptUrl -Script 'Initialize-PimMailSender')
@@ -11797,85 +11783,8 @@ function Get-PimManagerSecurityHeaders {
     }
 }
 
-function Test-PimManagerScriptsServedExternally {
-    <#
-      PURE. CR7 (framework 12.11g; the shared sign-in front sends CSP script-src 'self'): does the Manager serve its page's
-      inline scripts as same-origin files? ONLY a HOSTED Manager BEHIND THE FRONT (auth layer 'signin-front') -- the switch is
-      the auth layer itself. Every other Manager (Easy Auth, local break-glass) serves today's inline page, byte for byte:
-      no render cache, no /app/pim-manager.js route (it answers the ordinary 404).
-    #>
-    param([bool]$Hosted = $false, [string]$AuthLayer = '')
-    return ($Hosted -and "$AuthLayer".Trim().ToLowerInvariant() -eq 'signin-front')
-}
-
-function ConvertTo-PimManagerScriptFreePage {
-    <#
-      PURE. CR7: the RENDERED page with every inline <script>BODY</script> replaced by <script src="<Route>?r=<RenderId>&p=<n>">
-      -- same position, same order, parser-blocking like the inline block, so the page runs the SAME code in the SAME order.
-      The source page (tools/pim-manager/pim-manager.html) is untouched: every test that reads or runs it still does.
-      Returns @{ ok; html; parts; reason }. Not ok (the caller then serves the inline page, as before) when there is no
-      script block, when any <script> without src would remain, or when an inline on*= handler is left in the HTML.
-    #>
-    param([Parameter(Mandatory)][string]$Html, [Parameter(Mandatory)][string]$RenderId, [string]$Route = '/app/pim-manager.js')
-    $ms = [regex]::Matches($Html, '(?s)<script>(.*?)</script>')
-    if ($ms.Count -eq 0) { return @{ ok = $false; html = $Html; parts = @(); reason = 'no inline script block in the page' } }
-    $sb = New-Object System.Text.StringBuilder
-    $parts = New-Object System.Collections.Generic.List[string]
-    $at = 0
-    foreach ($m in $ms) {
-        [void]$sb.Append($Html.Substring($at, $m.Index - $at))
-        [void]$sb.Append('<script src="' + $Route + '?r=' + $RenderId + '&amp;p=' + $parts.Count + '"></script>')
-        $parts.Add($m.Groups[1].Value)
-        $at = $m.Index + $m.Length
-    }
-    [void]$sb.Append($Html.Substring($at))
-    $out = $sb.ToString()
-    if ([regex]::IsMatch($out, '<script(?![^>]*\ssrc=)[^>]*>')) { return @{ ok = $false; html = $Html; parts = @(); reason = 'a <script> without src would remain' } }
-    if ([regex]::IsMatch($out, '<[a-zA-Z][^>]*\son[a-z]{3,}\s*=\s*["'']')) { return @{ ok = $false; html = $Html; parts = @(); reason = 'an inline on*= handler is left in the HTML' } }
-    return @{ ok = $true; html = $out; parts = @($parts.ToArray()); reason = "$($parts.Count) script block(s) served as files" }
-}
-
-function Get-PimManagerPageScriptAnswer {
-    <#
-      PURE given the store. GET /app/pim-manager.js?r=<render id>&p=<n>: the n-th script block of THAT render of the page.
-      A render's scripts carry its boot data (role, data scoped to the person), so they are bound to the principal the page
-      was rendered for (hosted) and live 10 minutes. @{ status (200 / 403 / 404); body; reason }.
-    #>
-    param([hashtable]$Store = @{}, [string]$RenderId = '', [string]$Part = '', [string]$Principal = '', [bool]$Hosted = $false,
-          [datetime]$NowUtc = ([datetime]::UtcNow))
-    $rid = "$RenderId".Trim()
-    if (-not $rid -or $rid -notmatch '^[0-9a-f]{64}$' -or -not $Store.ContainsKey($rid)) { return @{ status = 404; body = ''; reason = 'unknown or expired page render -- reload the page' } }
-    $e = $Store[$rid]
-    if ($NowUtc -gt [datetime]$e.exp) { return @{ status = 404; body = ''; reason = 'expired page render -- reload the page' } }
-    if ($Hosted -and ("$($e.who)".Trim().ToLowerInvariant() -ne "$Principal".Trim().ToLowerInvariant() -or -not "$Principal".Trim())) { return @{ status = 403; body = ''; reason = 'this page render belongs to another sign-in' } }
-    $n = 0
-    if ("$Part" -notmatch '^\d{1,2}$' -or -not [int]::TryParse("$Part", [ref]$n) -or $n -ge @($e.parts).Count) { return @{ status = 404; body = ''; reason = 'no such script part' } }
-    return @{ status = 200; body = "$(@($e.parts)[$n])"; reason = 'ok' }
-}
-
-function Invoke-PimManagerExternalizeScripts {
-    <#
-      CR7: the page as it goes out. Behind the sign-in front ONLY (Test-PimManagerScriptsServedExternally): the inline
-      scripts become same-origin files bound to this render + this principal (ConvertTo-PimManagerScriptFreePage, kept in
-      $script:PimPageScripts for 10 minutes, at most 64 renders); anything unexpected -> the inline page, with a warning.
-      Every other Manager: the page is returned untouched and nothing is cached.
-    #>
-    param([Parameter(Mandatory)][string]$Html)
-    $layer = ''; if ($script:PimSigninFront) { $layer = 'signin-front' }
-    if (-not (Test-PimManagerScriptsServedExternally -Hosted ([bool]$script:PimHosted) -AuthLayer $layer)) { return $Html }
-    if ($null -eq $script:PimPageScripts) { $script:PimPageScripts = @{} }
-    $now = [datetime]::UtcNow
-    foreach ($k in @($script:PimPageScripts.Keys)) { if ($now -gt [datetime]$script:PimPageScripts[$k].exp) { $script:PimPageScripts.Remove($k) } }
-    while ($script:PimPageScripts.Count -ge 64) {
-        $oldest = @($script:PimPageScripts.Keys | Sort-Object { [datetime]$script:PimPageScripts[$_].exp })[0]
-        $script:PimPageScripts.Remove($oldest)
-    }
-    $rid = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
-    $c = ConvertTo-PimManagerScriptFreePage -Html $Html -RenderId $rid
-    if (-not $c.ok) { Write-Warning "[page] inline scripts kept: $($c.reason)"; return $Html }
-    $script:PimPageScripts[$rid] = @{ who = "$script:CurrentRequestPrincipal"; parts = @($c.parts); exp = $now.AddMinutes(10) }
-    return $c.html
-}
+# (2026-11-19) The page-script externalizing for the retired sign-in front (CSP script-src 'self', /app/pim-manager.js) is
+# removed with the front (framework SECURE-WEB-1 ONE STANDARD (a)): every Manager serves its page inline, as Easy Auth always did.
 
 function Write-JsonResponse {
     param(
@@ -14407,20 +14316,10 @@ function Invoke-Server {
         # container port (App Service sets WEBSITES_PORT/PORT). Easy Auth + private
         # inbound sit in front; the token is still required on /api.
         $port = if ("$env:WEBSITES_PORT" -match '^\d+$') { [int]$env:WEBSITES_PORT } elseif ("$env:PORT" -match '^\d+$') { [int]$env:PORT } elseif ($DesiredPort -gt 0) { $DesiredPort } else { 8080 }
-        # 🟡 CR7 (§12.11g item 2): behind the shared sign-in front the server binds 127.0.0.1 ONLY -- the front,
-        # in the same revision, is the only thing that reaches it. Any other layer: http://+:<port>/, unchanged.
-        $hostLayer = ''
-        if (Get-Command Get-PimHostedAuthLayer -ErrorAction SilentlyContinue) { $hostLayer = Get-PimHostedAuthLayer }
-        $hostPrefix = "http://+:$port/"
-        if (Get-Command Get-PimHostedListenerPrefix -ErrorAction SilentlyContinue) { $hostPrefix = Get-PimHostedListenerPrefix -AuthLayer $hostLayer -Port $port }
         $l = New-Object System.Net.HttpListener
-        $l.Prefixes.Add($hostPrefix)
+        $l.Prefixes.Add("http://+:$port/")
         $l.Start(); $listener = $l
-        if ($hostLayer -eq 'signin-front') {
-            Write-Host ("  [HOSTED] 24/7 business edition listening on {0} (sign-in front identity; token required on /api)" -f $hostPrefix) -ForegroundColor Green
-        } else {
-            Write-Host ("  [HOSTED] 24/7 business edition listening on http://+:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
-        }
+        Write-Host ("  [HOSTED] 24/7 business edition listening on http://+:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
     } else {
         # LOCAL (loopback) edition -- the sanctioned BREAK-GLASS / EMERGENCY path:
         # run on the box (SuperAdmin) when the hosted app / Easy Auth / network is
@@ -16089,34 +15988,11 @@ function Handle-Request {
             '__PIM_SCRIPT_DOCS__'   = (ConvertTo-PimScriptSafeJson $scriptDocsJson)
         }
         $html = Expand-PimBootTemplate -Html $html -Values $bootValues
-        # CR7: hosted, the inline scripts go out as same-origin files (/app/pim-manager.js) -- CSP script-src 'self'.
-        $html = Invoke-PimManagerExternalizeScripts -Html $html
         Write-HtmlResponse -Response $resp -Html $html
         # Record a login the first time this identity opens the Manager (Audit tab
         # "Logins" category). Deduped per identity per session; best-effort.
         Write-PimManagerLoginAudit
         $script:lastHeartbeat = Get-Date
-        return 200
-    }
-
-    # CR7: the page's script blocks, one render at a time (Invoke-PimManagerExternalizeScripts). Same gate as GET /.
-    # Behind the sign-in front ONLY -- every other Manager never enters here and answers the ordinary 404 below.
-    if ($path -eq '/app/pim-manager.js' -and ($method -eq 'GET' -or $method -eq 'HEAD') -and $script:PimSigninFront) {
-        if ($script:PimHosted -and -not "$script:CurrentRequestPrincipal".Trim()) {
-            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'no authenticated principal -- this app must be reached through its authentication edge' }
-            return 401
-        }
-        $sa = Get-PimManagerPageScriptAnswer -Store $script:PimPageScripts -RenderId "$($req.QueryString['r'])" -Part "$($req.QueryString['p'])" `
-                -Principal "$script:CurrentRequestPrincipal" -Hosted ([bool]$script:PimHosted)
-        if ($sa.status -ne 200) { Write-JsonResponse -Response $resp -Status ([int]$sa.status) -Body @{ error = "$($sa.reason)" }; return [int]$sa.status }
-        try {
-            $resp.StatusCode = 200
-            $resp.ContentType = 'application/javascript; charset=utf-8'
-            $resp.Headers['Cache-Control'] = 'no-store'
-            $jsBytes = [System.Text.Encoding]::UTF8.GetBytes("$($sa.body)")
-            if ($method -eq 'GET') { $resp.ContentLength64 = $jsBytes.LongLength; $resp.OutputStream.Write($jsBytes, 0, $jsBytes.Length) }
-            $resp.OutputStream.Close()
-        } catch { Write-Host ("  [net] client gone before the page script was written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
         return 200
     }
 

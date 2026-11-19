@@ -105,14 +105,16 @@
 .EXAMPLE
   # A person (Exchange or Global Administrator), browser sign-in -- what PIM Manager's Get Started prints:
   .\Initialize-PimMailSender.ps1 -TenantId <tid> -MailboxName pim-notify -MailDomain contoso.com -DisplayName 'PIM notifications' `
-       -ManagedIdentityObjectId <managerMiObjectId>,<tickMiObjectId> -SqlServerFqdn <server>.database.windows.net
+       -ManagedIdentityObjectId <engineJobMiObjectId> -SqlServerFqdn <server>.database.windows.net
+  # Only the ENGINE job's identity sends mail. PIM Manager's web app sends none, so its identity is never passed here.
 
 .EXAMPLE
   # From another process (a deploy step, a scheduled task): `pwsh -File` passes every argument as a
   # STRING, so a PowerShell array literal ('a','b') arrives as ONE value. Pass several managed
   # identities comma-separated with no quotes or spaces -- the script splits and validates them.
+  # Or let it read the engine job's identity: -SubscriptionId <sub> -ResourceGroup <rg> -TickJobName <engine job>.
   pwsh -NoProfile -File tools\setup\Initialize-PimMailSender.ps1 -TenantId <tid> -AdminAppId <supportAppId> `
-       -AdminSecret <secret> -ManagedIdentityObjectId <tickMiObjectId>,<managerMiObjectId> `
+       -AdminSecret <secret> -ManagedIdentityObjectId <engineJobMiObjectId> `
        -SqlServerFqdn <server>.database.windows.net
 
 .NOTES
@@ -177,9 +179,9 @@ param(
     # not supplied and no managed identity is given.
     [string]$EngineAppId,
     # 🔒 THE HOSTED SENDER (REQUIREMENTS 65.11, operator decision 2026-09-13): the container sends as
-    # its MANAGED IDENTITY, so the scoped assignment must name that identity -- the tick job's, and
-    # the Manager's when it sends alerts. Service-principal OBJECT ids (the resource's
-    # identity.principalId). A non-managed-identity object is refused.
+    # its MANAGED IDENTITY, so the scoped assignment must name that identity -- the ENGINE (tick) job's
+    # only: PIM Manager's web app sends no mail (SECURE-WEB-1, 3.1.26) and is never named here.
+    # Service-principal OBJECT ids (the resource's identity.principalId). A non-managed-identity object is refused.
     [string[]]$ManagedIdentityObjectId = @(),
     # Or resolve the tick job's managed identity by ARM REST (read only), by the same rule the
     # engine's token call uses (PIM_ManagedIdentityClientId -> that user-assigned identity, else
@@ -187,7 +189,8 @@ param(
     [string]$SubscriptionId,
     [string]$ResourceGroup,
     [string]$TickJobName,
-    # MAIL-1: and the Manager container app's (it sends the alert notices) -- same ARM read, same rule.
+    # Accepted for older printed commands only. The web app sends NO mail (SECURE-WEB-1 / MAIL-WEB-RIGHTS-1): its identity
+    # is never added as a sender; with -SubscriptionId/-ResourceGroup it is read only to REFUSE it if it was passed above.
     [string]$ManagerAppName,
     # EXPLICIT, off by default: also remove the older scoped assignment that names the engine SPN.
     # Left in place by default -- it is scoped to the same single mailbox, so it widens nothing,
@@ -585,8 +588,9 @@ Note "sender: $sender" 'Green'
 # --- resolve the SENDING identity (hosted: the tick job's managed identity) -------------
 Step 'resolve the sending identity (managed identity when hosted)'
 $miOids = @($ManagedIdentityObjectId | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
-# MAIL-1 (2026-10-08): ADDED to the identities passed, not only used when none are -- PIM Manager's Get Started passes
-# its own managed identity by object id and names the tick job, whose identity it may not be able to read itself.
+$tickOid = ''
+# MAIL-1 (2026-10-08): ADDED to the identities passed, not only used when none are -- the tick job's identity may not be
+# readable by whoever printed the command. (SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the ENGINE job's identity is the only sender.)
 if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
     try {
         $armTok = Get-PimMailAdminToken -Resource 'arm'
@@ -596,18 +600,31 @@ if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Tr
     $pick = Get-PimJobManagedIdentityPrincipalId -Job $job
     if ($pick.reason) { Fail "tick job '$TickJobName': $($pick.reason)" }
     if ($miOids -notcontains "$($pick.principalId)") { $miOids += "$($pick.principalId)" }
+    $tickOid = "$($pick.principalId)"
     Note "tick job '$TickJobName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
 }
-if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$ManagerAppName".Trim()) {
-    try {
-        $armTok = Get-PimMailAdminToken -Resource 'arm'
-        $app = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
-            -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$ManagerAppName`?api-version=2024-03-01"
-    } catch { Fail "could not read the Manager app '$ManagerAppName' to resolve its managed identity: $($_.Exception.Message)" }
-    $pick = Get-PimJobManagedIdentityPrincipalId -Job $app
-    if ($pick.reason) { Fail "Manager app '$ManagerAppName': $($pick.reason)" }
-    if ($miOids -notcontains "$($pick.principalId)") { $miOids += "$($pick.principalId)" }
-    Note "Manager app '$ManagerAppName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
+# 🔒 SECURE-WEB-1 (PIM 3.1.26) / MAIL-WEB-RIGHTS-1: PIM Manager's web app sends NO mail -- its identity is never a sender
+# and is never given the scoped send right. -ManagerAppName is still accepted (older printed commands carry it) but it
+# never ADDS that identity; when the app can be read it is used only to REFUSE the web app's identity if it was passed in
+# -ManagedIdentityObjectId (an older Get Started command passed it by object id).
+if ("$ManagerAppName".Trim()) {
+    Note "-ManagerAppName '$ManagerAppName' is ignored for sending: PIM Manager's web app sends no mail, so its identity gets no send right." 'DarkYellow'
+    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim()) {
+        $webApp = $null
+        try {
+            $armTok = Get-PimMailAdminToken -Resource 'arm'
+            $webApp = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
+                -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$ManagerAppName`?api-version=2024-03-01"
+        } catch { Note "the Manager app '$ManagerAppName' could not be read, so the identities given are not checked against it: $(($_.Exception.Message -split "`n")[0])" 'DarkYellow' }
+        if ($webApp) {
+            $webSel = Select-PimMailNonWebIdentityIds -ObjectIds $miOids -WebObjectIds (Get-PimAppManagedIdentityObjectIds -App $webApp) -EngineObjectIds @($tickOid)
+            foreach ($l in @($webSel.lines)) { Note $l 'Yellow' }
+            $miOids = @($webSel.ids)
+            if (@($webSel.refused).Count -and -not $miOids.Count) {
+                Fail "the only identity given is PIM Manager's web app identity, which never sends mail -- pass the ENGINE job's identity (-ManagedIdentityObjectId <engine job identity object id>, or -SubscriptionId -ResourceGroup -TickJobName)"
+            }
+        }
+    }
 }
 $miSps = @()
 foreach ($oid in $miOids) {
@@ -1310,8 +1327,8 @@ if (-not "$SqlServerFqdn".Trim()) {
         }
         # MAIL-STEP-PROOF (owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test mail"): store
         # what step [3]'s read-back CONFIRMED -- the scoped Application Mail.Send assignment for every sending identity, in
-        # ONE scope on THIS mailbox -- so PIM Manager can show the engine job's send right as granted (with the Manager's
-        # own test mail) without waiting for an engine send. Only a confirmed read-back is stored; never a guess. Written
+        # ONE scope on THIS mailbox -- so PIM Manager can show the engine job's send right as granted (with a
+        # successful test mail) without waiting for an engine send. Only a confirmed read-back is stored; never a guess. Written
         # here, inside the write, so a temporary firewall rule (-AllowThisIpTemporarily) covers it too.
         $chk = New-PimMailSenderSetupCheck -Confirmed ([bool]$script:PimScopedSendConfirmed) -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -By "$($global:PIM_SetupActor)" -InScopeResource "$scopeSmtp"
         if ($chk) {

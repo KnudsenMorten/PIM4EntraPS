@@ -2,21 +2,22 @@
 
 <#
 .SYNOPSIS
-  Put the SMTP relay password of a PIM Manager environment into its Key Vault, and let the environment's managed
-  identities read that one secret. -WhatIf shows every change first and asks for no password.
+  Put the SMTP relay password of a PIM Manager environment into its Key Vault, and let the environment's ENGINE job
+  identity read that one secret. -WhatIf shows every change first and asks for no password.
 
 .DESCRIPTION
   Owner 2026-10-08: "remember i need to have 2 options: shared mailbox or smtp relay solution" / "we dont use certificates
-  here, either interactive login or secret". In SMTP relay mode PIM Manager sends through System.Net.Mail with a user name
+  here, either interactive login or secret". In SMTP relay mode the ENGINE job sends through the relay with a user name
   and a password. 🔒 The password is NEVER in SQL, in the page or in a log: it is a secret in the environment's own Key
-  Vault, read at send time by the environment's managed identities. PIM Manager's Settings > Mail & alerting writes it
-  itself when its identity may; otherwise this script does, as a person who may (or as the Invardia Support app):
+  Vault, read at send time by the engine job's managed identity ONLY. 🔒 SECURE-WEB-1 (PIM 3.1.26) / MAIL-WEB-RIGHTS-1:
+  PIM Manager's web app sends no mail and holds no Key Vault right -- it never writes or reads this secret, and this
+  script never grants its identity anything. A person who may (or the Invardia Support app) runs this script:
 
     1. finds the vault in -SubscriptionId (or, with -CreateVault + -ResourceGroup, creates it: Azure RBAC authorisation);
     2. writes the secret (-SecretName, default PIM-SmtpRelayPassword) -- when Key Vault refuses the writer, it grants the
        writer 'Key Vault Secrets Officer' on THAT VAULT once and retries (the RBAC change can take a few minutes);
-    3. grants every -ManagedIdentityObjectId (the Manager's and the engine job's) 'Key Vault Secrets User' on THAT SECRET
-       only -- never the whole vault;
+    3. grants -ManagedIdentityObjectId (the ENGINE job's identity) 'Key Vault Secrets User' on THAT SECRET only -- never
+       the whole vault. With -ManagerAppName (+ -ResourceGroup) the web app's identities are read and REFUSED if given;
     4. reads the secret back and compares it (the value is never printed).
 
   Sign-in: in the BROWSER by default (Edge, auth code + PKCE, no device code, no module), or the Invardia Support app
@@ -27,8 +28,9 @@
 
 .EXAMPLE
   .\Set-PimSmtpRelayPassword.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -VaultName <vault> `
-      -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id> -WhatIf
-  Preview; then the same command without -WhatIf (it asks for the password twice).
+      -ManagedIdentityObjectId <engine job identity object id> -WhatIf
+  Preview; then the same command without -WhatIf (it asks for the password twice). Only the engine job's identity:
+  PIM Manager's web app never reads the password.
 
 .NOTES
   Requirements:
@@ -51,6 +53,9 @@ param(
     # Create the vault when it does not exist (Azure RBAC authorisation, standard SKU, the resource group's region).
     [switch]$CreateVault,
     [string]$ResourceGroup,
+    # Optional guard (MAIL-WEB-RIGHTS-1): PIM Manager's web container app (e.g. ca-pim-manager) in -ResourceGroup. Its
+    # identities are read (Reader) and refused from -ManagedIdentityObjectId -- the web app never reads this secret.
+    [string]$ManagerAppName,
     [string]$AdminAppId,
     [string]$AdminSecret,
     [string]$OutFile
@@ -143,6 +148,22 @@ if (-not $vault) {
 } else { Note "found: $($vault.id)" 'DarkGray' }
 if ($vault.properties -and -not $vault.properties.enableRbacAuthorization) { Note 'this vault uses ACCESS POLICIES, not Azure RBAC: the read grants below do not apply -- give the managed identities "Get" on secrets in its access policies.' 'Yellow' }
 
+# --- SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the web app's identity never reads the relay password ---------------------------
+if ("$ManagerAppName".Trim()) {
+    if (-not "$ResourceGroup".Trim()) { Note "-ManagerAppName needs -ResourceGroup (where the web app runs) -- the identities given are not checked against it." 'DarkYellow' }
+    else {
+        $webApp = $null
+        try { $webApp = Arm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$ManagerAppName`?api-version=2024-03-01" }
+        catch { Note "the Manager app '$ManagerAppName' could not be read, so the identities given are not checked against it: $(ErrText $_)" 'DarkYellow' }
+        if ($webApp) {
+            $webSel = Select-PimMailNonWebIdentityIds -ObjectIds $miIds -WebObjectIds (Get-PimAppManagedIdentityObjectIds -App $webApp)
+            foreach ($l in @($webSel.lines)) { Note $l 'Yellow' }
+            $miIds = @($webSel.ids)
+            if (@($webSel.refused).Count -and -not $miIds.Count) { Fail "the only identity given is PIM Manager's web app identity, which never reads the relay password -- pass the ENGINE job's identity (-ManagedIdentityObjectId <engine job identity object id>)" }
+        }
+    }
+}
+
 if ($WhatIfPreference) {
     # PowerShell's own "What if:" line for every change the run would make (ShouldProcess answers $false under -WhatIf).
     [void]$PSCmdlet.ShouldProcess("Key Vault $VaultName, secret $SecretName", 'write the SMTP relay password (Key Vault data plane; the value is never printed)')
@@ -194,8 +215,8 @@ try {
 }
 
 # --- 3. who may read it --------------------------------------------------------------------------------------------------
-Step "[3] 'Key Vault Secrets User' on $SecretName (the secret only) for the sending identities"
-if (-not $miIds.Count) { Note 'no -ManagedIdentityObjectId given: nobody was granted read access -- PIM Manager cannot send until its identities may read the secret.' 'Yellow' }
+Step "[3] 'Key Vault Secrets User' on $SecretName (the secret only) for the engine job's identity"
+if (-not $miIds.Count) { Note "no -ManagedIdentityObjectId given: nobody was granted read access -- the engine cannot send until its identity may read the secret." 'Yellow' }
 $scope = Get-PimKvSecretScope -VaultId "$($vault.id)" -SecretName $SecretName
 foreach ($oid in $miIds) {
     $req = New-PimKvRoleAssignmentRequest -Scope $scope -SubscriptionId $SubscriptionId -RoleId (Get-PimKvRoleId -Role SecretsUser) -PrincipalId $oid

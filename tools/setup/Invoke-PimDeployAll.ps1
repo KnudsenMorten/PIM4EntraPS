@@ -2420,15 +2420,18 @@ function Invoke-DefaultStepRunner {
                 if ($engineForMail) { $mailArgs['EngineAppId'] = $engineForMail }
                 # 🔒 REQUIREMENTS 65.11 (operator decision 2026-09-13): the HOSTED engine sends as its
                 # MANAGED IDENTITY, so the scoped Exchange assignment must name that identity -- the tick
-                # job's (engine mail: TAP delivery, reminders, alerts) and the Manager's (its alert
-                # notices). Picked by the same rule the token call uses (PIM_ManagedIdentityClientId ->
-                # that user-assigned identity, else system-assigned), in _PimMailSenderPlan.ps1.
+                # job's (engine mail: TAP delivery, reminders, alerts, and every notice the web app queues).
+                # Picked by the same rule the token call uses (PIM_ManagedIdentityClientId -> that
+                # user-assigned identity, else system-assigned), in _PimMailSenderPlan.ps1.
+                # 🔒 SECURE-WEB-1 (3.1.26) / MAIL-WEB-RIGHTS-1: the web app (the Manager) sends NO mail, so in the
+                # on-demand shape (cron: the engine is the tick job) its identity is never named as a sender.
+                # (The legacy always-on shape has no tick job here and keeps its old sender list.)
                 $mailMiOids = @()
                 if ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
                     . (Join-Path $here '_PimMailSenderPlan.ps1')
                     $senderResources = @()
                     if ($WorkerMode -eq 'cron') { $senderResources += @{ what = "tick job '$TickJobName'"; obj = (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull) } }
-                    $senderResources += @{ what = "Manager '$ManagerApp'"; obj = (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) }
+                    else { $senderResources += @{ what = "Manager '$ManagerApp'"; obj = (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) } }
                     foreach ($res in $senderResources) {
                         if ($null -eq $res.obj) { continue }
                         $pick = $null

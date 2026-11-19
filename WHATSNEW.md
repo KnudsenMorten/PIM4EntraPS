@@ -1,5 +1,29 @@
 # What's new in PIM Manager
 
+## 3.1.52 · 2026-11-19 · Security
+
+A security update: only PIM Manager's engine is set up to send mail.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Mail rights for the engine only** - The mail setup steps and the commands PIM Manager shows you now give the send right and the mail relay password to the engine only. The web app sends no mail and gets neither.
+
+## 3.1.51 · 2026-11-19 · Security
+
+A security clean-up: PIM Manager signs people in through Microsoft's built-in sign-in only.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **One sign-in path only** - The sign-in code of an older design is removed from PIM Manager. A setting left over from that design now refuses every sign-in. Nothing changes in how you sign in or work.
+
 ## 3.1.50 · 2026-11-19 · Security
 
 A security clean-up: PIM Manager removes what is left of an older sign-in design it no longer uses.

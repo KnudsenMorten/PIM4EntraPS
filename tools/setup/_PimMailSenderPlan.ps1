@@ -7,8 +7,8 @@
   Operator decision 2026-09-13: the HOSTED engine sends as its MANAGED IDENTITY. The scoped
   Exchange 'Application Mail.Send' assignment (Exchange RBAC for Applications, pinned to the
   sender mailbox by a management scope) must therefore name the identity that actually sends --
-  the tick job's managed identity, plus the Manager's when it sends alerts -- not only the
-  engine SPN. Until now the assignment named the SPN while the container sent as its managed
+  the tick job's managed identity -- not only the engine SPN. (SECURE-WEB-1, 3.1.26 / MAIL-WEB-RIGHTS-1: the web app,
+  PIM Manager, sends NO mail; its identity is never a sending identity and never gets this assignment.) Until now the assignment named the SPN while the container sent as its managed
   identity: two different principals.
 
   Shared by tools/setup/Initialize-PimMailSender.ps1 (which EXECUTES the plan),
@@ -762,11 +762,11 @@ function New-PimMailSenderCommand {
     if ("$DisplayName".Trim()) { $run += ' -DisplayName ' + (& $q $DisplayName) }
     $mi = @(@($ManagedIdentityObjectId) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
     if ($mi.Count) { $run += ' -ManagedIdentityObjectId ' + ($mi -join ',') }
-    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and ("$TickJobName".Trim() -or "$ManagerAppName".Trim())) {
-        $run += " -SubscriptionId $("$SubscriptionId".Trim()) -ResourceGroup $("$ResourceGroup".Trim())"
-        if ("$TickJobName".Trim()) { $run += " -TickJobName $("$TickJobName".Trim())" }
-        if ("$ManagerAppName".Trim()) { $run += " -ManagerAppName $("$ManagerAppName".Trim())" }
-    } elseif (-not $mi.Count) { $run += ' -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>' }
+    # 🔒 SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the command names the ENGINE job only. -ManagerAppName is still accepted from
+    # old callers but never printed -- the web app sends no mail, so its identity is never given a send right.
+    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
+        $run += " -SubscriptionId $("$SubscriptionId".Trim()) -ResourceGroup $("$ResourceGroup".Trim()) -TickJobName $("$TickJobName".Trim())"
+    } elseif (-not $mi.Count) { $run += ' -ManagedIdentityObjectId <engine job identity object id>' }
     $run += ' -SqlServerFqdn ' + (& $v $SqlServerFqdn '<server>.database.windows.net')
     return @(Get-PimSupportScriptCommand -Script 'Initialize-PimMailSender' -Run @($run))
 }

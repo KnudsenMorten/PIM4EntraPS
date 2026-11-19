@@ -293,14 +293,16 @@ function Get-PimMailSetupCommand {
     <#
       PURE. The published, browser-sign-in command lines for one fix, with this environment's values filled in (a
       <placeholder> for an unknown one). -Kind mailbox = Initialize-PimMailSender.ps1 (an Exchange or Global Administrator:
-      creates / scopes the shared mailbox, gives BOTH sending identities their scoped send right, revokes a tenant-wide
+      creates / scopes the shared mailbox, gives the ENGINE job's identity its scoped send right, revokes a tenant-wide
       Mail.Send); smtpPassword = Set-PimSmtpRelayPassword.ps1. Never a certificate, never a secret.
+      🔒 SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: both commands name the ENGINE job's identity ONLY (-Setup tickObjectId). The web
+      app (PIM Manager) sends no mail and reads no Key Vault secret, so its identity is never put in a fix command -- a
+      -Setup managerObjectId is ignored here.
     #>
     param([ValidateSet('mailbox', 'smtpPassword')][string]$Kind, [object]$Setup, [object]$Smtp)
     $g = { param($o, $n) if ($null -eq $o) { '' } elseif ($o -is [System.Collections.IDictionary]) { "$($o[$n])".Trim() } elseif ($o.PSObject.Properties[$n]) { "$($o.$n)".Trim() } else { '' } }
     $v = { param($x, $ph) if ("$x".Trim()) { "$x".Trim() } else { $ph } }
-    $mi = @((& $g $Setup 'managerObjectId'), (& $g $Setup 'tickObjectId') | Where-Object { $_ })
-    $miArg = if ($mi.Count) { $mi -join ',' } else { '<manager identity object id>,<engine job identity object id>' }
+    $miArg = & $v (& $g $Setup 'tickObjectId') '<engine job identity object id>'
     if ($Kind -eq 'mailbox') {
         $run = '.\Initialize-PimMailSender.ps1 -TenantId ' + (& $v (& $g $Setup 'tenantId') '<tenant id>') + ' -ManagedIdentityObjectId ' + $miArg +
                ' -SqlServerFqdn ' + (& $v (& $g $Setup 'sqlServer') '<server>.database.windows.net')
@@ -336,8 +338,9 @@ function Get-PimMailCheck {
         mode (stored MailMode or ''), sender, alertRecipients[], lastTest (MailLastTest), smtp (the SmtpRelay record),
         senderLookup  @{ found = $true|$false|$null; upn; error }       -- Graph /users/<sender> as the Manager reads it
         identities    @(@{ role = engine|manager; label; proof; tenantWideMailSend = $true|$false|$null })
-        smtpPassword  @{ readable = $true|$false|$null; reason }        -- the Manager reading the secret (never its value)
-        setup         the values the fix commands carry (tenantId, managerObjectId, tickObjectId, subscriptionId, sqlServer, vaultHint)
+        smtpPassword  @{ readable = $true|$false|$null; reason }        -- the ENGINE's own check of the secret (never its value)
+        setup         the values the fix commands carry (tenantId, tickObjectId = the ENGINE job's identity, subscriptionId,
+                      sqlServer, vaultHint); the web app's identity is never one of them (SECURE-WEB-1)
         engineTest    the engine test request (pim.Settings 'MailEngineTest') -- only words the engine row while it waits
         setupCheck    the mail-sender script's read-back (pim.Settings 'MailSenderSetupCheck'): with the Manager's successful
                       test mail it grants the engine row at once (Get-PimMailSetupCheckVerdict)
@@ -415,8 +418,8 @@ function Get-PimMailCheck {
                     $sc = if ($role -eq 'engine') { Get-PimMailSetupCheckVerdict -SetupCheck (& $f 'setupCheck') -Sender $sender -Setup $setup -ManagerProof (& $gv (@($ids | Where-Object { "$(& $gv $_ 'role')" -eq 'manager' }) | Select-Object -First 1) 'proof') } else { $null }
                     if ($sc -and $sc.ok) {
                         # MAIL-STEP-PROOF (owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test
-                        # mail"): the setup script's read-back confirmed the scoped Mail.Send for BOTH identities in ONE scope
-                        # on this mailbox, and the Manager's own test mail through it succeeded -> granted, at once.
+                        # mail"): the setup script's read-back confirmed the scoped Mail.Send for the ENGINE identity in ONE
+                        # scope on this mailbox, and a test mail through it succeeded -> granted, at once.
                         & $add "mail-send-$role" $title 'ok' "$(if ($lbl) { "$lbl -- " })$($sc.detail)" ''
                     } elseif ($role -eq 'engine') {
                         # MAIL-STEP-PROOF (owner 2026-10-09: "i have run 3 cmdlet, and test mail works - but it still shows
@@ -432,7 +435,16 @@ function Get-PimMailCheck {
         }
         $tw = @($ids | Where-Object { (& $gv $_ 'tenantWideMailSend') -eq $true } | ForEach-Object { "$(& $gv $_ 'label')" })
         $twUnknown = @($ids | Where-Object { $null -eq (& $gv $_ 'tenantWideMailSend') }).Count -gt 0 -or -not $ids.Count
-        if ($tw.Count) { & $add 'mail-no-tenantwide' 'No tenant-wide Graph Mail.Send' 'failed' "tenant-wide Microsoft Graph Mail.Send on $($tw -join ', ') -- it could send as ANY mailbox and defeats the per-mailbox scope" "$mbFix`n(the script revokes the tenant-wide permission)" }
+        if ($tw.Count) {
+            # MAIL-WEB-RIGHTS-1 (SECURE-WEB-1): the leftover finding on the WEB app's identity stays visible, but the mail-sender
+            # script no longer touches that identity (it names the engine only) -- so its fix does not claim the script revokes it.
+            $twEng = @($ids | Where-Object { (& $gv $_ 'tenantWideMailSend') -eq $true -and "$(& $gv $_ 'role')" -ne 'manager' })
+            $twWeb = @($ids | Where-Object { (& $gv $_ 'tenantWideMailSend') -eq $true -and "$(& $gv $_ 'role')" -eq 'manager' } | ForEach-Object { "$(& $gv $_ 'label')" })
+            $twFix = @()
+            if ($twEng.Count) { $twFix += "$mbFix`n(the script revokes the tenant-wide permission on the engine job's identity)" }
+            if ($twWeb.Count) { $twFix += "$($twWeb -join ', '): PIM Manager's web app sends no mail, so its identity must hold no Mail.Send. Remove the Microsoft Graph application permission Mail.Send from it (Microsoft Entra admin center > Enterprise applications > that managed identity > Permissions); the mail-sender script does not change the web app's identity." }
+            & $add 'mail-no-tenantwide' 'No tenant-wide Graph Mail.Send' 'failed' "tenant-wide Microsoft Graph Mail.Send on $($tw -join ', ') -- it could send as ANY mailbox and defeats the per-mailbox scope" ($twFix -join "`n")
+        }
         elseif ($twUnknown) { & $add 'mail-no-tenantwide' 'No tenant-wide Graph Mail.Send' 'unknown' 'the sending identities'' Graph permissions could not be read' '' }
         else { & $add 'mail-no-tenantwide' 'No tenant-wide Graph Mail.Send' 'ok' 'neither sending identity holds it -- sending is scoped to the one mailbox' '' }
     }
@@ -457,9 +469,9 @@ function Get-PimMailSetupCheckVerdict {
       PURE (MAIL-STEP-PROOF). Is the ENGINE job's send right confirmed without an engine send? Yes only when ALL hold:
         * -SetupCheck (pim.Settings 'MailSenderSetupCheck', stored by Initialize-PimMailSender from its read-back) is ok,
           for THIS sender, and names ONE scope;
-        * it lists BOTH sending identities -- the Manager's and the engine job's object ids as this Manager knows them
-          (-Setup managerObjectId / tickObjectId; an unknown id = not confirmed);
-        * the Manager's own last send (-ManagerProof: its test mail) through this mailbox SUCCEEDED.
+        * it lists the ENGINE job's identity (-Setup tickObjectId, as this Manager knows it; an unknown id = not confirmed).
+          SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the web app's identity is NOT required (it sends no mail and gets no send right);
+        * the recorded test mail (-ManagerProof) through this mailbox SUCCEEDED.
       Returns @{ ok; detail }.
     #>
     param([AllowNull()]$SetupCheck, [string]$Sender, [AllowNull()]$Setup, [AllowNull()]$ManagerProof)
@@ -474,12 +486,12 @@ function Get-PimMailSetupCheckVerdict {
     $scope = "$(& $g $SetupCheck 'scope')".Trim()
     if (-not $scope) { return (& $no 'the setup check names no scope') }
     $oids = @(@(& $g $SetupCheck 'identities') | ForEach-Object { "$(& $g $_ 'objectId')".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    $mgr = "$(& $g $Setup 'managerObjectId')".Trim().ToLowerInvariant(); $eng = "$(& $g $Setup 'tickObjectId')".Trim().ToLowerInvariant()
-    if (-not $mgr -or -not $eng -or $oids -notcontains $mgr -or $oids -notcontains $eng) { return (& $no 'the setup check does not cover both sending identities') }
+    $eng = "$(& $g $Setup 'tickObjectId')".Trim().ToLowerInvariant()
+    if (-not $eng -or $oids -notcontains $eng) { return (& $no "the setup check does not cover the engine job's identity") }
     $mp = Get-PimMailSendProofVerdict -Proof $ManagerProof -Mode 'sharedMailbox' -Sender $Sender
     if ($mp.state -ne 'ok') { return (& $no "the Manager's test mail has not succeeded through this mailbox") }
     $at = "$(& $g $SetupCheck 'at')".Trim()
-    return @{ ok = $true; detail = "granted -- confirmed by the setup check (scoped Mail.Send for both identities in $scope$(if ($at) { ", $at" })) and the test mail" }
+    return @{ ok = $true; detail = "granted -- confirmed by the setup check (scoped Mail.Send for the engine job's identity in $scope$(if ($at) { ", $at" })) and the test mail" }
 }
 
 function Get-PimMailEngineWaitingDetail {

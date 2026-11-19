@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.52 -- 2026-11-19
+
+- Security: only the engine is set up to send mail -- the mail setup steps and the commands PIM Manager shows give the send right and the mail relay password to the engine only, never to the web app (which sends no mail)
+
+## 3.1.51 -- 2026-11-19
+
+- Security clean-up: PIM Manager signs people in through Microsoft's built-in sign-in only -- the sign-in code of the retired shared sign-in front is removed, and a setting left over from it now refuses every sign-in; nothing changes in how you sign in or work
+
 ## 3.1.50 -- 2026-11-19
 
 - Security clean-up: PIM Manager no longer carries the retired shared sign-in front -- updates no longer build its image, remove its stored images from the install's own registry, and no longer re-create its database schema; nothing changes in how you sign in or work

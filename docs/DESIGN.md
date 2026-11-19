@@ -12228,8 +12228,11 @@ banner; "Verify permissions" and "Check again" check again at once.
 
 Each sending identity records the result of its own last real send, so a send right is never assumed to work. A line
 that is not complete shows its fix: the published setup script with this environment's values (an Exchange or Global
-Administrator signs in in the browser; it creates or scopes the mailbox, gives both identities their send right and
-removes a tenant-wide permission), the SMTP password script, or the PIM Manager page. Never a certificate.
+Administrator signs in in the browser; it creates or scopes the mailbox, gives the engine job's identity its send right
+and removes a tenant-wide permission from it), the SMTP password script (it lets the engine job's identity read the one
+secret), or the PIM Manager page. Never a certificate. Both scripts name the engine job's identity only: the web app
+sends no mail, so its identity never gets a send right or a Key Vault right, and both scripts refuse it when it is
+given and they are told the web app's name. A tenant-wide Mail.Send still held by the web app's identity stays a failed line, with the step to remove it.
 
 ### 30.8 The as-built document (rendered inside the environment)
 PIM Manager can describe its own installation as a plain, table-style A4 PDF -- the answer to each question of the PIM

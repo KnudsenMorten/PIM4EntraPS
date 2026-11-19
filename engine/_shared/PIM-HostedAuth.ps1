@@ -66,15 +66,9 @@
   enable the token store, so X-MS-TOKEN-AAD-ID-TOKEN is absent on every Manager except
   the one where it was enabled by hand -- default-on would reject every sign-in there.
 
-  🟡 CR7 / framework §12.11g -- WEB SIGN-IN WITHOUT A SECRET (lane build 2026-10-18, OFF by default).
-  A FOURTH layer, 'signin-front', for the shared sign-in front (FRAMEWORK/signin-front/, one
-  component for PIM and SI; RETIRED 2026-11-19, framework SECURE-WEB-1 ONE STANDARD (a) -- no longer built or shipped): the front is the only
-  container the ingress reaches, it strips EVERY inbound identity header and forwards the user's
-  signed ID token as 'Authorization: Bearer <JWT>' on each request; this Manager
-  listens on 127.0.0.1 only (Get-PimHostedListenerPrefix) and takes identity from that VERIFIED
-  token alone (Resolve-PimSigninFrontPrincipal) -- X-MS-* headers are never read in this layer.
-  Selected ONLY by PIM_HOSTED_AUTH_LAYER=signin-front; unset, every Manager keeps today's
-  Easy Auth path unchanged.
+  RETIRED 2026-11-19 (framework SECURE-WEB-1 ONE STANDARD (a)): the fourth layer 'signin-front' (the shared sign-in front,
+  CR7 / framework §12.11g) is gone. There is no front layer any more: PIM_HOSTED_AUTH_LAYER=signin-front is an unrecognised
+  value and resolves to 'none' -- every identity is refused (fail closed), never a path that trusts a forwarded token.
 
   PS 5.1-safe syntax: no ?./??, no ternary (the token library itself needs PowerShell 7 / .NET 10 -- see PIM-TokenValidation.ps1),
   null-guarded throughout. The decision functions are PURE (no I/O) so they are fully
@@ -498,9 +492,8 @@ function Resolve-PimMcpBearer {
 
 function Get-PimHostedAuthLayer {
     # PURE given its inputs: WHICH authentication layer stands in front of this hosted
-    # Manager -- 'easyauth' | 'signed-token' | 'signin-front' | 'none' (SEC-28/SEC-31, CR7,
-    # see the header). 'signin-front' is never derived from the platform -- only an explicit
-    # PIM_HOSTED_AUTH_LAYER selects it, so no existing install changes path by itself.
+    # Manager -- 'easyauth' | 'signed-token' | 'none' (SEC-28/SEC-31, see the header). The retired
+    # 'signin-front' value (2026-11-19) is unrecognised and therefore 'none' (fail closed).
     #   * explicit PIM_HOSTED_AUTH_LAYER wins; an UNRECOGNISED value is 'none' (a typo in
     #     a security setting must fail closed, never open);
     #   * unset: Container Apps / App Service (the hosts that offer Easy Auth) -> 'easyauth',
@@ -522,7 +515,6 @@ function Get-PimHostedAuthLayer {
         switch -Regex ($v) {
             '^(easyauth|easy-auth|edge)$'              { return 'easyauth' }
             '^(signed-token|signedtoken|token|strict)$' { return 'signed-token' }
-            '^(signin-front|sign-in-front|signinfront)$' { return 'signin-front' }
             default                                    { return 'none' }
         }
     }
@@ -581,8 +573,6 @@ function Resolve-PimHostedPrincipal {
         # env/platform with Get-PimHostedAuthLayer and passes it. Empty = 'easyauth' (the
         # pre-SEC-28 contract); an unrecognised value is 'none'.
         [string]$AuthLayer = '',
-        # front 1.4.0: refuse the ID token behind the front (the caller reads PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN)
-        [bool]$RequireFrontAccessToken = $false,
         # AUTH-MODERN-1 (strict layer): the raw Authorization header (a script's / MCP client's own access token, or nothing),
         # the sign-in's X-MS-TOKEN-AAD-ACCESS-TOKEN, this tenant (tid), the delegated scope, and whether the ID token may still
         # be used when no access token for this app is present (PIM_HOSTED_ID_TOKEN_FALLBACK, default on)
@@ -595,14 +585,7 @@ function Resolve-PimHostedPrincipal {
 
     $layerIn = "$AuthLayer".Trim().ToLowerInvariant()
     if (-not $layerIn) { $layerIn = 'easyauth' }
-    elseif ($layerIn -notin @('easyauth', 'signed-token', 'signin-front', 'none')) { $layerIn = Get-PimHostedAuthLayer -Value $layerIn }
-    if ($layerIn -eq 'signin-front') {
-        # CR7: the shared sign-in front. Identity from the VERIFIED forwarded ID token ONLY --
-        # -PrincipalName / -PrincipalBlob are deliberately not consulted (the front strips them,
-        # and nothing but the front can reach a loopback-bound Manager).
-        return (Resolve-PimSigninFrontPrincipal -IdToken $SignedToken -Jwks $Jwks -ExpectedIssuers $ExpectedIssuers `
-                    -ExpectedAudiences $ExpectedAudiences -NowUtc $NowUtc -RequireAccessToken $RequireFrontAccessToken)
-    }
+    elseif ($layerIn -notin @('easyauth', 'signed-token', 'none')) { $layerIn = Get-PimHostedAuthLayer -Value $layerIn }   # 'signin-front' (retired) -> 'none'
     if ($layerIn -eq 'none') {
         # 🔴 SEC-28: nothing in front strips client-supplied X-MS-* headers, so a "consistent"
         # header set is only the caller's own claim. Refuse -- never trust what anyone can write.
@@ -690,31 +673,7 @@ function Resolve-PimHostedPrincipal {
               reason = $(if ($path -eq 'id-token-fallback') { "signed ID token validated by Microsoft.IdentityModel -- FALLBACK: $note" } else { "access token validated by Microsoft.IdentityModel ($path)" }) }
 }
 
-# ---- CR7: the shared sign-in front (framework §12.11g) -------------------------
-
-function Get-PimAuthorizationBearer {
-    <#
-      PURE. The JWT in an 'Authorization: Bearer <JWT>' header value, or '' for anything else. The shared sign-in
-      front's contract (FRAMEWORK/signin-front/README.md "Upstream contract", 1.0.0): it removes every inbound
-      Authorization and sets exactly ONE -- on browser routes the signed-in user's ID token.
-    #>
-    [CmdletBinding()] param([string]$Authorization = '')
-    if ("$Authorization" -match '^\s*Bearer\s+(\S+)\s*$') { return $Matches[1] }
-    return ''
-}
-
-function Test-PimManagerFrontBearerPath {
-    <#
-      PURE. Is this one of the paths the sign-in front treats as a BEARER path (its SIGNIN_BEARER_PATHS default
-      /mcp,/.well-known -- segment-exact)? There the Authorization header is the caller's own access token (or none),
-      not the front's ID token: /mcp verifies it itself (Resolve-PimMcpBearer) and /.well-known is public metadata.
-    #>
-    # PIM 93.4: /api/app is one too WHEN the setup added it to the front's list (Set-PimManagerApiAuth.ps1): there the
-    # caller is an application with its own token, verified by the Manager itself (Invoke-PimManagerAppSignIn), never a page.
-    [CmdletBinding()] param([string]$Path = '')
-    $p = "$Path"
-    return ($p -eq '/mcp' -or $p -like '/mcp/*' -or $p -eq '/.well-known' -or $p -like '/.well-known/*' -or $p -eq '/api/app' -or $p -like '/api/app/*')
-}
+# ---- the /api page token ---------------------------------------------------------
 
 function Test-PimManagerPageToken {
     <#
@@ -730,79 +689,6 @@ function Test-PimManagerPageToken {
     $d = 0
     for ($i = 0; $i -lt $a.Length; $i++) { $d = $d -bor ([int][char]$a[$i] -bxor [int][char]$b[$i]) }
     return ($d -eq 0)
-}
-
-function Resolve-PimSigninFrontPrincipal {
-    <#
-      PURE given its inputs. CR7: who is calling, proven by the token the shared sign-in front forwarded -- since front
-      1.4.0 an ACCESS token for this app's own API scope (-AccessScope, aud = the client id or api://<client id>, v1 or
-      v2 issuer), before it the user's ID token (no scp; refused with -RequireAccessToken).
-      Validated by Microsoft.IdentityModel (Invoke-PimTokenValidation), the same helper as every other token path.
-      Fails CLOSED on: issuer or audience not pinned (any tenant's token would verify), no token, a malformed
-      token, no key set, a bad signature, bad iss / aud / exp / nbf, an access token without -AccessScope in its scp,
-      an ID token when -RequireAccessToken, an application's token (SEC-89: idtyp = app, or roles with no user --
-      each its own reason), and a token that names no user.
-      Returns @{ trusted; identity; layer = 'signin-front'; reason } -- the Resolve-PimHostedPrincipal shape.
-    #>
-    [CmdletBinding()]
-    param(
-        [string]$IdToken = '',
-        [object]$Jwks = $null,
-        [string[]]$ExpectedIssuers = @(),
-        [string[]]$ExpectedAudiences = @(),
-        [datetime]$NowUtc = ([datetime]::UtcNow),
-        # front 1.4.0: the delegated scope an access token must carry (the app registration's own scope)
-        [string]$AccessScope = 'user_impersonation',
-        # once every front forwards the access token: refuse the ID token
-        [bool]$RequireAccessToken = $false
-    )
-    $no = { param($why) return @{ trusted = $false; identity = ''; layer = 'signin-front'; reason = $why } }
-    $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($iss.Count -eq 0 -or $aud.Count -eq 0) {
-        return (& $no 'sign-in front: the issuer (this tenant) AND the audience (PIM_SIGNIN_FRONT_CLIENT_ID or PIM_HOSTED_EASYAUTH_AUD) must both be pinned -- failing closed')
-    }
-    $tok = "$IdToken".Trim()
-    if (-not $tok) { return (& $no 'sign-in front: no forwarded token on this request (refused)') }
-    if ($null -eq (Get-PimJwtParts -Token $tok)) { return (& $no 'sign-in front: the forwarded token is not a well-formed JWT') }
-    if ($null -eq $Jwks) { return (& $no 'sign-in front: no JWKS available to verify the token (failing closed)') }
-    # AUTH-MODERN-1: the token is validated by Microsoft.IdentityModel (signature RS256, issuer, audience = the client id or
-    # api://<client id>, lifetime) -- then authorised here.
-    $v = Invoke-PimTokenValidation -Token $tok -Jwks $Jwks -ExpectedIssuers $iss -ExpectedAudiences (Get-PimAccessTokenAudiences -Audiences $aud)
-    if (-not $v.valid) { return (& $no ('sign-in front: token rejected: ' + $v.reason)) }
-    $pl = $v.payload
-    # SEC-89: a token without `scp` is NOT automatically an ID token -- an application's access token has none either.
-    $appOnly = Get-PimJwtAppOnlyReason -Payload $pl
-    if ($appOnly) { return (& $no ('sign-in front: ' + $appOnly)) }
-    $scp = @("$($pl.scp)".Trim() -split '\s+' | Where-Object { $_ })
-    $kind = 'ID token'
-    if ($scp.Count) {
-        # front 1.4.0 (framework 12.11g item 10): an ACCESS token for the app's OWN API, with the scope the front asks for
-        $kind = 'access token'
-        if ($scp -notcontains "$AccessScope".Trim()) {
-            return (& $no ("sign-in front: the forwarded access token carries scope '$($scp -join ' ')', not '$AccessScope' -- refused"))
-        }
-    } else {
-        if ($RequireAccessToken) { return (& $no 'sign-in front: an ID token was forwarded, but this Manager accepts only the access token (PIM_SIGNIN_FRONT_REQUIRE_ACCESS_TOKEN) -- refused') }
-        # an ID token names the app as a bare client id, never as the api:// URI
-        if (@(@($pl.aud) | Where-Object { "$_" -match '^api://' }).Count -and -not @(@($pl.aud) | Where-Object { $aud -contains "$_" }).Count) { return (& $no 'sign-in front: token claims rejected: an ID token for the api:// audience') }
-    }
-    $who = ''
-    foreach ($c in @('preferred_username', 'upn', 'email', 'unique_name')) { $x = "$($pl.$c)".Trim(); if ($x) { $who = $x; break } }
-    if (-not $who) { return (& $no 'sign-in front: the verified token carries no username claim') }
-    return @{ trusted = $true; identity = $who; oid = (Get-PimJwtObjectId -Payload $pl); layer = 'signin-front'; reason = "sign-in front $kind validated by Microsoft.IdentityModel" }
-}
-
-function Get-PimHostedListenerPrefix {
-    <#
-      PURE. The HttpListener prefix for the HOSTED container branch of Open-PimManager.
-        'signin-front' -> http://127.0.0.1:<port>/  (§12.11g item 2: PIM's server bound to 127.0.0.1 ONLY;
-                          the sign-in front, in the same revision, is the only thing that can reach it)
-        anything else  -> http://+:<port>/          (today's path, unchanged: Easy Auth sits in front)
-    #>
-    [CmdletBinding()] param([string]$AuthLayer = '', [int]$Port = 8080)
-    if ("$AuthLayer".Trim().ToLowerInvariant() -eq 'signin-front') { return "http://127.0.0.1:$Port/" }
-    return "http://+:$Port/"
 }
 
 # ---- startup posture ----------------------------------------------------------
@@ -826,15 +712,7 @@ function Test-PimHostedAuthPosture {
     }
     $layer = "$AuthLayer".Trim().ToLowerInvariant()
     if (-not $layer) { $layer = 'easyauth' }
-    elseif ($layer -notin @('easyauth', 'signed-token', 'signin-front', 'none')) { $layer = Get-PimHostedAuthLayer -Value $layer }
-    if ($layer -eq 'signin-front') {
-        return @{ hosted = $true; strict = $true; level = 'signin-front'; ok = $true
-                  message = @(
-                      'HOSTED auth: SIGN-IN FRONT (CR7) -- listening on 127.0.0.1 only; identity = the signed ID token'
-                      '  the front forwards as Authorization: Bearer, verified on every request (signature + issuer +'
-                      '  audience + expiry). X-MS-* identity headers are never read. A request without the token is refused.'
-                  ) -join [Environment]::NewLine }
-    }
+    elseif ($layer -notin @('easyauth', 'signed-token', 'none')) { $layer = Get-PimHostedAuthLayer -Value $layer }   # 'signin-front' (retired) -> 'none'
     if ($layer -eq 'none') {
         return @{ hosted = $true; strict = $false; level = 'no-auth-edge'; ok = $false
                   message = @(

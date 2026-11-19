@@ -17237,24 +17237,27 @@
     const s = (m && m.setup) || {};
     mb = mb || (m && m.mailbox) || {};
     const v = (x, ph) => (String(x || '').trim() || ph);
-    const mi = [s.managerObjectId, s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
+    // SECURE-WEB-1 / MAIL-WEB-RIGHTS-1: the ENGINE job's identity only -- the web app sends no mail, so its own identity
+    // (s.managerObjectId, still sent by an older server) is never put in a mail command.
+    const mi = [s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
     let run = '.\\Initialize-PimMailSender.ps1 -TenantId ' + v(s.tenantId, '<tenant id>');
     if (String(mb.name || '').trim()) run += ' -MailboxName ' + mailPsArg(mb.name);
     if (String(mb.domain || '').trim()) run += ' -MailDomain ' + mailPsArg(mb.domain);
     if (String(mb.displayName || '').trim()) run += ' -DisplayName ' + mailPsArg(mb.displayName);
     if (mi.length) run += ' -ManagedIdentityObjectId ' + mi.join(',');
     if (!s.tickObjectId && s.subscriptionId && s.resourceGroup && s.tickJobName) run += ' -SubscriptionId ' + s.subscriptionId + ' -ResourceGroup ' + s.resourceGroup + ' -TickJobName ' + s.tickJobName;
-    else if (!mi.length) run += ' -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>';
+    else if (!mi.length) run += ' -ManagedIdentityObjectId <engine job identity object id>';
     run += ' -SqlServerFqdn ' + v(s.sqlServer, '<server>.database.windows.net');
     return pimSupportCmd('Initialize-PimMailSender', [run]);
   }
   function mailSetupCmdPassword(m, smtp) {
     const s = (m && m.setup) || {}; smtp = smtp || (m && m.smtp) || {};
     const v = (x, ph) => (String(x || '').trim() || ph);
-    const mi = [s.managerObjectId, s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
+    // SECURE-WEB-1: only the ENGINE job's identity reads the relay password -- never the web app's own
+    const mi = [s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
     return pimSupportCmd('Set-PimSmtpRelayPassword', ['.\\Set-PimSmtpRelayPassword.ps1 -TenantId ' + v(s.tenantId, '<tenant id>') + ' -SubscriptionId ' + v(s.subscriptionId, '<subscription id>') +
       ' -VaultName ' + v(smtp.vaultName || s.vaultHint, '<key vault name>') + (smtp.secretName && smtp.secretName !== 'PIM-SmtpRelayPassword' ? ' -SecretName ' + smtp.secretName : '') +
-      ' -ManagedIdentityObjectId ' + (mi.length ? mi.join(',') : '<manager identity object id>,<engine job identity object id>')]);
+      ' -ManagedIdentityObjectId ' + (mi.length ? mi.join(',') : '<engine job identity object id>')]);
   }
   // The fields. prefix keeps element ids unique when the Settings card and Get Started are both in the DOM.
   function mailSetupFieldsHtml(m, prefix) {

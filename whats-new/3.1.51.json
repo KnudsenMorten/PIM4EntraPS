@@ -1,0 +1,4 @@
+{"version":"3.1.51","date":"2026-11-19","type":"security",
+ "summary":"A security clean-up: PIM Manager signs people in through Microsoft's built-in sign-in only.",
+ "new":[],
+ "fixes":[{"title":"One sign-in path only","text":"The sign-in code of an older design is removed from PIM Manager. A setting left over from that design now refuses every sign-in. Nothing changes in how you sign in or work."}]}

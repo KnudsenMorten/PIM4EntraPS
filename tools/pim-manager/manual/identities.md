@@ -41,7 +41,9 @@ What keeps those rights in check:
 ## Mail
 
 Mail is never sent with a tenant-wide Mail.Send right. It goes through Exchange RBAC for Applications, scoped to one
-shared mailbox. The engine and the portal each have their own scoped send right.
+shared mailbox. Only the engine sends mail and holds that scoped send right. The portal sends no mail: it holds no send
+right and no Key Vault right, and hands each mail to the engine. With an SMTP relay, only the engine can read the relay
+password.
 
 The full permission table, per identity and per permission with the reason and what breaks without it, is in the
 security review pack (see [Security design](security)).
