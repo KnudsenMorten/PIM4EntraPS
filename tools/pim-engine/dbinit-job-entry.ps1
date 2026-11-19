@@ -111,7 +111,6 @@ if (-not @($plan.users).Count) {
 $djTrue = @('1', 'true', 'yes', 'TRUE', 'Yes')
 $askedSteps = New-Object System.Collections.Generic.List[string]; $explicitSteps = New-Object System.Collections.Generic.List[string]
 if (@($plan.users).Count) { [void]$askedSteps.Add('users') }
-if (@($plan.users | Where-Object { $_.signinOwner }).Count) { [void]$askedSteps.Add('signin-owner') }
 if ("$($env:PIM_DBINIT_DROP_USERS)".Trim()) { [void]$askedSteps.Add('drop-old-users'); [void]$explicitSteps.Add('drop-old-users') }
 
 if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in $djTrue) { [void]$askedSteps.Add('schema') }
@@ -260,37 +259,9 @@ try {
         Say "verified $($u.name) -> $($got.sid) [$have]" 'Green'
     }
 
-    # ---- SIGNIN-OWNER (PIM item 21, incident 2026-11-08 08:46Z) -----------------------------------------------------------
-    # The principal the list marks signinOwner = true (the web identity: the sign-in front keeps its key ring in schema
-    # 'signin') OWNS that schema and holds CREATE TABLE. Converged on every run, read back; the guard allows exactly the three
-    # statements Get-PimSigninOwnerSqlPlan makes. A grants-kind step (it may run beside a running job).
-    $soUsers = @($plan.users | Where-Object { $_.signinOwner })
-    if (-not $failed -and $soUsers.Count -gt 1) { Say "REFUSED signin-owner: $($soUsers.Count) principals are marked signinOwner ($(@($soUsers | ForEach-Object { $_.name }) -join ', ')) -- a schema has ONE owner" 'Red'; $failed++ }
-    elseif (-not $failed -and $soUsers.Count -eq 1 -and (& $runStep 'signin-owner')) {
-        Step 'signin-owner'
-        $so = $soUsers[0].name
-        $readSo = {
-            $c2 = $conn.CreateCommand(); $c2.CommandText = (Get-PimSigninOwnerReadQuery -User $so); $rd = $c2.ExecuteReader(); [void]$rd.Read()
-            $o = if ($rd.IsDBNull(0)) { '' } else { "$($rd['owner'])" }; $ct = ([int]$rd['createTable'] -gt 0); $rd.Close()
-            [pscustomobject]@{ owner = $o; createTable = $ct }
-        }
-        try {
-            $now = & $readSo
-            $soPlan = @(Get-PimSigninOwnerSqlPlan -User $so -Owner $now.owner -CreateTableGranted $now.createTable)
-            $soSafe = Test-PimSigninOwnerSqlSafe -Statements $soPlan
-            if (-not $soSafe.ok) { Say "REFUSING signin-owner: unexpected statement(s) $(@($soSafe.violations) -join ' | ')" 'Red'; $failed++ }
-            else {
-                foreach ($s in $soPlan) { $c3 = $conn.CreateCommand(); $c3.CommandText = $s; $c3.CommandTimeout = 120; [void]$c3.ExecuteNonQuery(); Say "applied: $s" 'Green' }
-                $back = & $readSo
-                if ($back.owner -eq $so -and $back.createTable) { Say "verified: schema signin owned by $so, CREATE TABLE held$(if (-not $soPlan.Count) { ' (nothing to change)' }) (was owner '$($now.owner)')" 'Green' }
-                else { Say "signin-owner NOT verified: owner '$($back.owner)', CREATE TABLE $($back.createTable) (wanted $so + True)" 'Red'; $failed++ }
-            }
-        } catch { Say "FAILED signin-owner for ${so}: $($_.Exception.Message)" 'Red'; $failed++ }
-    }
-
     # ---- DROP-OLD-USERS (PIM item 21 (b), framework 12.11c ruling (b)) ---------------------------------------------------
     # The OLD database users of moved roles (their system identities), asked by app id in PIM_DBINIT_DROP_USERS. A REMOVAL step
-    # (never under 'grants'), AFTER signin-owner (a schema is moved before its old owner could be dropped). Get-PimDropUsersPlan
+    # (never under 'grants'). (The retired sign-in front's signin-owner step is gone, 2026-11-19.) Get-PimDropUsersPlan
     # refuses anything this job's own list uses, any id-pim-* user, a built-in or non-Entra user, a schema owner, a user with an
     # explicit permission; the only statement is DROP USER [name]; each is read back as gone. A refusal is reported, the rest go.
     $duRaw = "$($env:PIM_DBINIT_DROP_USERS)".Trim()

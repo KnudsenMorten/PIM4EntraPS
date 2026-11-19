@@ -209,19 +209,8 @@ function ConvertTo-PimBuildContextFromZip {
         $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
         if ($inside -ne $Version) { return @{ ok = $false; path = ''; reason = "the archive holds version $inside, the signed manifest says $Version" } }
         $items = @('SOLUTIONS'); if (Test-Path -LiteralPath (Join-Path $top '.dockerignore')) { $items = @('.dockerignore') + $items }
-        # CR7 (PIM 100.168): a release that carries the shared sign-in front's source keeps it in the context, so an opted-in
-        # install builds signin-front from it. The Manager build never sees it (.dockerignore keeps SOLUTIONS/PIM4EntraPS only).
-        # 3.0.58: a release packed while the framework was past PIM's pin carries no FRAMEWORK/ -- the vendored copy (at the
-        # pin) is placed there instead, exactly as the Community context does it (the front step prefers vendor/ anyway).
-        $vsfPro = Join-Path $top 'SOLUTIONS/PIM4EntraPS/vendor/signin-front'
-        if (-not (Test-Path -LiteralPath (Join-Path $top 'FRAMEWORK/signin-front/src/Dockerfile')) -and
-            (Test-Path -LiteralPath (Join-Path $vsfPro 'src/Dockerfile')) -and (Test-Path -LiteralPath (Join-Path $vsfPro 'VERSION'))) {
-            $fwPro = Join-Path $top 'FRAMEWORK/signin-front'
-            New-Item -ItemType Directory -Force -Path $fwPro | Out-Null
-            Copy-Item -LiteralPath (Join-Path $vsfPro 'src') -Destination $fwPro -Recurse -Force
-            Copy-Item -LiteralPath (Join-Path $vsfPro 'VERSION') -Destination $fwPro -Force
-        }
-        if (Test-Path -LiteralPath (Join-Path $top 'FRAMEWORK/signin-front/src/Dockerfile')) { $items += 'FRAMEWORK' }
+        # SECURE-WEB-1 ONE STANDARD (a) (2026-11-19): the retired sign-in front is never built -- the context is the solution
+        # only, even when an older archive still carries FRAMEWORK/signin-front (the Manager build never read it).
         Push-Location -LiteralPath $top
         try {
             # A RELATIVE output name, then a move: GNU tar reads 'C:' in an absolute Windows path as a remote host.
@@ -685,20 +674,9 @@ function ConvertTo-PimBuildContextFromCommunityZip {
         if (-not (Test-Path -LiteralPath (Join-Path $sol 'tools/pim-manager/Dockerfile'))) { return @{ ok = $false; path = ''; reason = 'the archive holds no tools/pim-manager/Dockerfile' } }
         $inside = "$(Get-Content -Raw -LiteralPath $vf)".Trim()
         if ($inside -ne $Version) { return @{ ok = $false; path = ''; reason = "the archive holds version $inside, the signed manifest says $Version" } }
-        # OPEN-26 / BUG-COMMUNITY-ARCHIVE-NO-SIGNIN-FRONT (2026-11-04; owner: "no diff in the core security between pro and
-        # community"): the mirror tree carries the sign-in front's source as vendor/signin-front (src + VERSION), never as
-        # FRAMEWORK/ -- so the Community context had no front and a Community install could never build signin-front (gp185:
-        # "the source archive carries no FRAMEWORK/signin-front/src"). Place that copy where the front step reads it, exactly as
-        # the Pro context carries it; the Manager build never sees it (.dockerignore / the Dockerfile COPY read the solution).
+        # SECURE-WEB-1 ONE STANDARD (a) (2026-11-19): the retired sign-in front is never built -- the Community context is the
+        # solution only (an older mirror tree's vendor/signin-front is no longer placed as FRAMEWORK/ -- nothing builds it).
         $items = @('SOLUTIONS')
-        $vsf = Join-Path $sol 'vendor/signin-front'
-        if ((Test-Path -LiteralPath (Join-Path $vsf 'src/Dockerfile')) -and (Test-Path -LiteralPath (Join-Path $vsf 'VERSION'))) {
-            $fw = Join-Path $work 'FRAMEWORK/signin-front'
-            New-Item -ItemType Directory -Force -Path $fw | Out-Null
-            Copy-Item -LiteralPath (Join-Path $vsf 'src') -Destination $fw -Recurse -Force
-            Copy-Item -LiteralPath (Join-Path $vsf 'VERSION') -Destination $fw -Force
-            $items += 'FRAMEWORK'
-        }
         Push-Location -LiteralPath $work
         try {
             # A RELATIVE output name, then a move: GNU tar reads 'C:' in an absolute Windows path as a remote host.

@@ -13,9 +13,9 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
-## 3.1.49.1 -- 2026-11-19
+## 3.1.50 -- 2026-11-19
 
-- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.49); no change in behaviour
+- Security clean-up: PIM Manager no longer carries the retired shared sign-in front -- updates no longer build its image, remove its stored images from the install's own registry, and no longer re-create its database schema; nothing changes in how you sign in or work
 
 ## 3.1.49 -- 2026-11-17
 

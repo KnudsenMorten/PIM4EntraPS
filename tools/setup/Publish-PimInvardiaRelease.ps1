@@ -81,13 +81,13 @@ function ConvertTo-PimTestGateBody {
 function Test-PimImageOnlyPath {
     <# PURE (IMAGE-ONLY-SEND). Is a changed file one an image-only release may touch? 'image' = a Dockerfile / lock file /
        project file (Invardia judges its LINES); 'bookkeeping' = PIM's own release records (VERSION, RELEASENOTES, the
-       release map, the install contract's version, the sign-in front pin) -- sent too, Invardia decides; '' = product code. #>
+       release map, the install contract's version) -- sent too, Invardia decides; '' = product code. #>
     param([Parameter(Mandatory)][string]$Path)
     $p = "$Path".Replace('\', '/')
     $leaf = ($p -split '/')[-1]
     if ($leaf -match '(?i)^(Dockerfile|Containerfile)(\..+)?$|\.dockerfile$') { return 'image' }
     if ($leaf -match '(?i)^(packages\.lock\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Directory\.Packages\.props|Directory\.Build\.props)$|\.(csproj|fsproj|vbproj)$') { return 'image' }
-    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/(VERSION|RELEASENOTES\.md|tools/setup/install-parameters\.json|tools/pim-manager/signin-front\.version|vendor/signin-front/VERSION)$' -or $p -match '(?i)(^|/)sync/release-map\.json$') { return 'bookkeeping' }
+    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/(VERSION|RELEASENOTES\.md|tools/setup/install-parameters\.json)$' -or $p -match '(?i)(^|/)sync/release-map\.json$') { return 'bookkeeping' }
     # Invardia 2026-11-11 (868a703f, kind "version-string"): the sign-in front's version constant and VERSION file may move
     # too -- Invardia accepts ONLY lines that differ in their version numbers (any other change refuses the claim there).
     if ($p -match '(?i)(^|/)signin-front/(src/SecurityHeaders\.cs|VERSION)$' -or $leaf -match '(?i)\.version$') { return 'bookkeeping' }
@@ -305,24 +305,9 @@ if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $zip = Join-Path $OutDir "pim-manager-src-$Version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-# CR7 (framework 12.11g, PIM 100.168): a tag that carries the shared sign-in front's source packs it too (FRAMEWORK/signin-front/src
-# + VERSION), so an opted-in install's updater can build signin-front:<pinned version>. An older tag has none and packs as
-# before (git archive refuses a pathspec that matches nothing). The updater re-pack keeps it; an updater already in the field
-# re-packs only .dockerignore + SOLUTIONS and builds the Manager exactly as before (tests/Test-PimSigninFront.ps1 IMG-F*).
+# SECURE-WEB-1 ONE STANDARD (a) (2026-11-19): the zip is repo-root shaped (.dockerignore + SOLUTIONS/PIM4EntraPS) and carries
+# no sign-in front -- the retired FRAMEWORK/signin-front is not packed, built or rolled by any install.
 $zipPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
-# ls-tree, not an existence probe with cat-file: a missing path prints NOTHING (cat-file writes "fatal: ..." to stderr, which PS 5.1 with
-# ErrorActionPreference Stop turns into a terminating error -- measured on the test VM, 2026-10-18).
-# 3.0.58 (framework signin-front 1.5.0, Invardia 2026-11-08): FRAMEWORK/signin-front only while the TAG's framework VERSION is
-# PIM's pin. Past the pin it is left out: SOLUTIONS/PIM4EntraPS/vendor/signin-front (at the pin) is what the updater builds,
-# and an older updater that reads only FRAMEWORK/ answers "nothing to build" -- never another version.
-$sfVerAt = { param($rev, $path) if (@(& git -C $repo ls-tree --name-only $rev -- $path).Count) { "$(& git -C $repo show "${rev}:$path")".Trim([char]0xFEFF).Trim() } else { '' } }
-$fwVer = & $sfVerAt $tag 'FRAMEWORK/signin-front/VERSION'
-$pinVer = & $sfVerAt $tag 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/signin-front.version'
-if ($fwVer -and $pinVer -and $fwVer -ne $pinVer) {
-    Write-Host "  sign-in front: FRAMEWORK is at $fwVer, PIM pins $pinVer -- FRAMEWORK/signin-front left out, vendor/signin-front ($pinVer) carries it"
-} else {
-    foreach ($sfp in @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')) { if (@(& git -C $repo ls-tree --name-only $tag -- $sfp).Count) { $zipPaths += $sfp } }
-}
 # SEC-PKG-INTERNAL: the zip reaches every install's updater (and, with PRO-PACKAGE-FROM-INVARDIA, a customer admin's PC) --
 # internal/, CLAUDE.md, docs/REQUIREMENTS.md, docs/TESTS.md, tests/ ... are packed OUT here (_PimReleasePackage.ps1) and the
 # check below refuses a zip that still carries any of them. The images never had them (the Dockerfile deletes them).

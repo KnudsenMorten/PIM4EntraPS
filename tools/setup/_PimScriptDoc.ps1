@@ -74,7 +74,6 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Set-PimSqlPublicAccess.ps1';                  Standalone = $false }
     @{ Path = 'setup/Grant-PimSupportSqlAccess.ps1';               Standalone = $true }
     @{ Path = 'setup/Invoke-PimSupportSqlAccessJob.ps1';           Standalone = $true }
-    @{ Path = 'setup/Set-PimSigninFrontSqlState.ps1';              Standalone = $true }
     # HYBRID-DEPLOY-STANDALONE: one published file that carries the worker's other scripts (BUILD-CARRY) and runs them from a temp folder
     @{ Path = 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1';      Standalone = $true }
     @{ Path = 'pim-hybrid-worker/New-PimHybridWorkerInfra.ps1';    Standalone = $false }

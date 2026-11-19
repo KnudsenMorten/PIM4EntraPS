@@ -328,6 +328,38 @@ function Get-PimRegistryTokenActions {
 
 function Get-PimRegistryPruneMaxDeletes { <# PURE. LITERAL. Contract point 6: at most this many deletes per update; the rest waits (said). #> return 200 }
 
+function Get-PimRegistryRetiredRepositories {
+    <# PURE. LITERAL. Repositories of a RETIRED PIM design whose stored images the updater removes (framework SECURE-WEB-1
+       LEFTOVER CLEANUP, Invardia 2026-11-19: the shared sign-in front is retired; a stored image is a Defender finding). #>
+    return @('signin-front')
+}
+
+function Get-PimRegistryRetiredPlan {
+    <#
+      PURE. The plan for ONE repository of a RETIRED design (Get-PimRegistryRetiredRepositories): every manifest goes, unless
+        - a live app / job / job setting uses ANY image of it  -> ok = $false, nothing deleted (the design is not retired here)
+        - the registry lock forbids deleting it               -> kept: locked (never unlocked)
+      Same return shape as Get-PimRegistryPrunePlan (ok; reason; keep; delete; total; indexes = @()).
+    #>
+    param([object[]]$Manifests = @(), [string[]]$LiveDigests = @(), [hashtable]$LiveBy = @{})
+    $ms = @($Manifests | Where-Object { $_ })
+    $live = @($LiveDigests | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Select-Object -Unique)
+    if ($live.Count) {
+        $by = @($live | ForEach-Object { "$($LiveBy[$_])".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+        return @{ ok = $false; reason = ("a retired repository still in use" + $(if ($by.Count) { " by $($by -join ', ')" } else { '' }) + ' -- nothing deleted'); keep = @(); delete = @(); total = $ms.Count; indexes = @() }
+    }
+    $keep = @(); $delete = @()
+    foreach ($m in $ms) {
+        $tags = @($m.tags | Where-Object { "$_".Trim() })
+        if ($m.changeableAttributes -and $m.changeableAttributes.PSObject.Properties['deleteEnabled'] -and $m.changeableAttributes.deleteEnabled -eq $false) {
+            $keep += @{ digest = "$($m.digest)"; tags = $tags; why = 'kept: locked (delete disabled in the registry; not unlocked)'; extra = $true }
+        } else {
+            $delete += @{ digest = "$($m.digest)"; tags = $tags; why = 'retired design (no live use)' }
+        }
+    }
+    return @{ ok = $true; reason = 'retired design: every stored image goes (none in live use)'; keep = $keep; delete = $delete; total = $ms.Count; indexes = @() }
+}
+
 function Invoke-PimRegistryPrune {
     <#
       The whole prune for ONE install. NEVER throws. Returns @{ ran; skipped; reason; planOnly; kept; total; deleted;
@@ -358,7 +390,10 @@ function Invoke-PimRegistryPrune {
           [AllowNull()][object[]]$PreviousImages = $null, [switch]$RequirePreviousRecord,
           [scriptblock]$OwnRegistry = $null, [scriptblock]$ReleaseRecord = $null,
           [scriptblock]$Log = $null, [scriptblock]$Progress = $null, [scriptblock]$Beat = $null,
-          [ValidateRange(5, 600)][int]$BeatSeconds = 50, [int]$MaxDeletes = -1)
+          [ValidateRange(5, 600)][int]$BeatSeconds = 50, [int]$MaxDeletes = -1,
+          # SECURE-WEB-1 LEFTOVER CLEANUP (2026-11-19): repositories of a RETIRED design (Get-PimRegistryRetiredRepositories) --
+          # every stored image goes unless one is used live (then nothing) or locked (kept). Pruned after the Manager repository.
+          [string[]]$RetiredRepositories = @())
     $res = @{ ran = $false; skipped = $true; reason = ''; planOnly = [bool]$PlanOnly; kept = 0; total = 0; deleted = 0; failed = 0
               children = 0; locked = 0; warnings = 0; backlog = 0; repos = @(); line = ''; lines = @() }
     $lines = New-Object System.Collections.Generic.List[string]
@@ -387,7 +422,7 @@ function Invoke-PimRegistryPrune {
         try { & $beatNow; & $ReleaseRecord; & $beatNow; & $say "registry: release record written before the clean-up ($TargetVersion; previous: $($prevRefs.Count) image reference(s))" }
         catch { return (& $stop "registry: not pruned -- the release record could not be written ($((("$($_.Exception.Message)") -split "`n")[0])) -- nothing deleted") }
     }
-    $repos = @(@("$ManagerRepository".Trim()) + @($Repositories | ForEach-Object { "$_".Trim() }) | Where-Object { $_ } | Select-Object -Unique)
+    $repos = @(@("$ManagerRepository".Trim()) + @($Repositories | ForEach-Object { "$_".Trim() }) + @($RetiredRepositories | ForEach-Object { "$_".Trim() }) | Where-Object { $_ } | Select-Object -Unique)
     $budget = [Math]::Max(0, $MaxDeletes)
     $tellProgress = {
         if (-not $Progress) { return }
@@ -445,6 +480,13 @@ function Invoke-PimRegistryPrune {
                 if ("$($ref.digest)".Trim()) { $prevDigests += "$($ref.digest)".Trim() }
                 if ("$($ref.tag)".Trim()) { foreach ($m in @($ms | Where-Object { @($_.tags) -contains "$($ref.tag)" })) { $prevDigests += "$($m.digest)" } }
             }
+            # RETIRED design (SECURE-WEB-1 LEFTOVER CLEANUP): its own plan -- everything goes unless used live or locked; the
+            # same gates as above (own registry, previous record, release record first), the same budget and read-back below.
+            if (@($RetiredRepositories | ForEach-Object { "$_".Trim() }) -contains $repo -and $repo -ne "$ManagerRepository".Trim()) {
+                $plan = Get-PimRegistryRetiredPlan -Manifests $ms -LiveDigests @($liveDigests.ToArray()) -LiveBy $liveBy
+                $rr.plan = $plan
+                if (-not $plan.ok) { $rr.reason = $plan.reason; $rr.kept = $rr.total; & $say "registry: $repo -- $($rr.total) images, nothing deleted ($($plan.reason))"; $res.repos += $rr; continue }
+            } else {
             $curV = ''
             if ($repo -eq "$ManagerRepository".Trim()) { $curV = "$TargetVersion".Trim() }
             elseif ($liveVersions.Count) { $curV = "$(@($liveVersions | Sort-Object -Descending)[0])" }
@@ -490,6 +532,7 @@ function Invoke-PimRegistryPrune {
                 if ($refErr) { $plan = @{ ok = $false; reason = "the referrers (attestations / signatures) of the kept images could not be read ($refErr) -- nothing deleted"; keep = @(); delete = @(); indexes = @() } }
                 elseif ($refs.Count) { $plan = Get-PimRegistryPrunePlan @planArgs -Referrers $refs }
             }
+            }   # end of the normal (not retired) plan
             $rr.plan = $plan
             if (-not $plan.ok) { $rr.reason = $plan.reason; $rr.kept = $rr.total; & $say "registry: $repo -- $($rr.total) images, nothing deleted ($($plan.reason))"; $res.repos += $rr; continue }
             $keepAll = @($plan.keep)

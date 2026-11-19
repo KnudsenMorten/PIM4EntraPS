@@ -1,0 +1,4 @@
+{"version":"3.1.50","date":"2026-11-19","type":"security",
+ "summary":"A security clean-up: PIM Manager removes what is left of an older sign-in design it no longer uses.",
+ "new":[],
+ "fixes":[{"title":"Older sign-in parts removed","text":"Updates remove the stored images and settings of an older sign-in design that PIM Manager no longer uses. Nothing changes in how you sign in or work."}]}

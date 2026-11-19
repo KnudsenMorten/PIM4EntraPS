@@ -171,7 +171,7 @@ param(
     [ValidateSet('', 'Community', 'Trial', 'Pro')][string]$Edition = '',
     # Pro / trial: the update ring (2 = design partners, 3 = broad, the default)
     [ValidateSet('', '2', '3')][string]$UpdateRing = '',
-    # the install's own Key Vault name (the sign-in front's keys); default kv-pim-<token>
+    # the install's own Key Vault name (where PIM keeps its secrets); default kv-pim-<token>
     [string]$KeyVaultName = '',
     # §97: also give the engine User Access Administrator at the tenant root (off by default; Reader there is always given)
     [switch]$EngineAzureRootUserAccessAdmin,
@@ -215,13 +215,11 @@ param(
     # (PIM never removes the Support app from the group, 100.116) or a managed-tenant install.
     [scriptblock]$ReleaseSqlAdmin,
     # test seam (INSTALL-1 GAP): param([string]$Sql) -> one scalar from the PIM database, as the installer -- records the trial /
-    # Pro install edition (Set-PimInstallEditionSetting). A real install: the sign-in front step's database I/O.
+    # Pro install edition (Set-PimInstallEditionSetting). A real install: New-PimInstallIo's database I/O.
     [scriptblock]$StoreSql,
     # --- test seam (BUILT-IN-AUTH-1, offline tests/Test-PimGuidedInstall.ps1): param([hashtable]$A, [scriptblock]$OnStep)
     # -> @{ ok; failedStep; reason; completed[]; keyVaultId } in place of Invoke-PimInstallKeyVault -- omit it for a real install ---
     [scriptblock]$InstallKeyVault,
-    # IGNORED since BUILT-IN-AUTH-1 (no install path moves to the sign-in front any more): kept so existing callers bind
-    [scriptblock]$SigninFront,
     # --- test seam (INSTALL-1 item 5, public -> private): param([hashtable]$A) -> the exit code of Convert-PimToPrivate.ps1 ---
     [scriptblock]$ConvertToPrivate
 )
@@ -243,12 +241,11 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
 # BUILT-IN-AUTH-1 (owner 2026-11-14): the install ends on Microsoft's built-in sign-in (the deploy's 'easyauth' step); from
-# _PimInstallSigninFront.ps1 it runs only the install's own Key Vault step and the database I/O (New-PimInstallSigninFrontIo)
-. (Join-Path $sol 'engine\_shared\PIM-SigninFrontImage.ps1')
-. (Join-Path $here '_PimInstallSigninFront.ps1')
-# the step's real I/O builds the front image (PIM-AcrBuild) and writes the front's database state (PIM-SqlStore): loaded HERE,
-# at file scope -- a library dot-sourced inside a function is gone when that function returns
-if (-not (Get-Command Invoke-PimAcrRestBuild -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-AcrBuild.ps1') }
+# _PimInstallKeyVault.ps1 it runs the install's own Key Vault step and the database I/O (New-PimInstallIo). The shared
+# sign-in front is retired (framework SECURE-WEB-1 ONE STANDARD (a)): nothing installs, builds or moves to it.
+. (Join-Path $here '_PimInstallKeyVault.ps1')
+# the database I/O (PIM-SqlStore): loaded HERE, at file scope -- a library dot-sourced inside a function is gone when that
+# function returns
 if (-not (Get-Command Resolve-PimSqlClientType -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1') }
 $null = Start-PimScriptRun -Script 'Install-PimManager'
 # framework 8.13 INSTALL-HANDOFF (REQ 100.66): Invardia's bootstrap may have signed the person in already and handed this
@@ -843,8 +840,8 @@ if (-not $azSeam) {
 $editionNote = ''
 if (-not $StoreSql -and -not $azSeam) {
     $StoreSql = { param([string]$Sql)
-        $Io = New-PimInstallSigninFrontIo -SubscriptionId $cfg.subscriptionId -ResourceGroup $names.resourceGroup -TenantId $cfg.tenantId -AcrName $names.acr `
-                -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
+        $Io = New-PimInstallIo -SubscriptionId $cfg.subscriptionId -ResourceGroup $names.resourceGroup -TenantId $cfg.tenantId `
+                -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase
         & $Io.Sql $Sql }
 }
 $connectNote = ''
@@ -902,8 +899,8 @@ if ($InstallKeyVault -or -not $azSeam) {
                  PrivateNetwork = [bool]$cfg.privateNetwork }   # rule 11: a private install's vault is private (made / recovered / found)
     if (-not $InstallKeyVault) {
         $InstallKeyVault = { param([hashtable]$A, [scriptblock]$OnStep)
-            $io = New-PimInstallSigninFrontIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId -AcrName $names.acr `
-                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase -SetupDir $here
+            $io = New-PimInstallIo -SubscriptionId $A.SubscriptionId -ResourceGroup $A.ResourceGroup -TenantId $A.TenantId `
+                    -SqlServerFqdn $names.sqlFqdn -SqlDatabase $names.sqlDatabase
             Invoke-PimInstallKeyVault @A -OnStep $OnStep -Io $io }
     }
     $kvR = $null

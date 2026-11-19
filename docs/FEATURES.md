@@ -296,9 +296,9 @@ deployment is a supported choice) and no credentials lying around.
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
   instead.
-- **No leftover sign-in secret.** ✅ 2026-11-04 — Once the sign-in front is live, the installation removes the old Easy
-  Auth client secret from the PIM Manager app registration and reads the result back. An installation still on Easy
-  Auth keeps its secret until it moves.
+- **No leftover sign-in secret.** ✅ 2026-11-04 — Microsoft's built-in sign-in runs without a client secret (a federated
+  credential), and setup removes the old Easy Auth client secret from the PIM Manager app registration and reads the
+  result back. (The optional sign-in front this first came with is retired: every installation uses the built-in sign-in.)
 - **Support hears about the findings that matter at once.** ✅ 2026-11-06 — Live access that differs from your
   definitions, new privileged roles or groups that nobody manages, and the break-glass emergency override being switched
   on also reach Invardia support as alerts. Each update reports its stages, and every status report says which PIM jobs

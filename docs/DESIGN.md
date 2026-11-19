@@ -3791,16 +3791,19 @@ the installation's own update identity and only the rights that identity already
   app registration the update identity does not own is left as it is and reported, and every change is read
   back before it is reported as done. Turning the built-in sign-in on stays a setup step.
 
-**The retired sign-in front leaves nothing behind.** Once the update reads back that no role assignment
+**The retired sign-in front leaves nothing in use behind.** Once the update reads back that no role assignment
 remains on the front's Key Vault key, it removes what is left of the front with the installation's own
-identity: the front's stored sessions and key ring in the database, the Manager's front-only settings, the
-old reply address on an app registration it owns (the built-in sign-in's own address is kept) and, last,
-the key itself (a recoverable delete; the vault's retention and purge protection stay in force). While any
+identity: the front's stored sessions and key ring in the database, the Manager's front-only settings and the
+old reply address on an app registration it owns (the built-in sign-in's own address is kept). The key itself
+is KEPT: with no role assignment on it nothing can use it, so it is accepted as inert and reported as such -- it
+is never deleted, and no new right is needed for it. While any
 role assignment remains on the key, or the front still runs in front of the Manager, nothing is removed. Every
 step is read back and reported; a step the update identity has no right to do is reported, never forced.
 
-An installation that chose the optional sign-in front (`Set-PimManagerSigninFront.ps1`) keeps it -- an
-update never moves it back.
+**The sign-in front is retired** (2026-11-19): the web app runs only its own container behind Microsoft's built-in sign-in.
+No release builds, ships, pins or installs the front any more, no update rolls it, and no installation is moved onto it;
+what an older installation still carries of it is only detected (the setup steps and the end-of-install check name a
+leftover front container) and cleaned up as described above.
 
 The **access request portal** (the separate request app) uses the same built-in sign-in, also without
 a secret: its API answers `401` to anyone without a valid Microsoft Entra token, and the request app
@@ -3815,10 +3818,10 @@ limits, a lockout after repeated wrong PINs and a short, HttpOnly, Secure, SameS
    INTERNET ─────────────► ✖  private-only variant: no public endpoint (publicNetworkAccess = Disabled)
 
  ┌──────────────────────── Entra ID  (customer tenant) ───────────────────────────┐
- │  • sign-in front (interactive sign-in) • App reg / SPN (app-only, cert in KV)    │
+ │  • built-in sign-in (interactive)      • App reg / SPN (app-only, cert in KV)    │
  │  • the PIM roles, groups, AUs this manager governs                               │
  └────────────────▲───────────────────────────────────────────▲────────────────────┘
-        user sign-in │ (sign-in front)          Graph/ARM REST  │ (app-only, PIM-Rest, no modules)
+        user sign-in │ (built-in sign-in)       Graph/ARM REST  │ (app-only, PIM-Rest, no modules)
                      │                                          │
  ┌───────────────────┴──── VNet  <platform-vnet> <address>   ───┴────────────────────┐
  │   ADMIN ACCESS BY LEVEL (private, from trusted subnets only)                        │
@@ -5377,8 +5380,8 @@ Before 3.0.45 both reached Invardia as an unclassified failure.
 **Old images leave the installation's registry (IMAGE-PRUNE, built 2026-11-12, release pending).** The registry's
 vulnerability scan reads every image stored in it, so the images of old releases kept reporting old findings long after
 the installation stopped running them. After a successful update, the updater keeps only the current release's image
-and the one previous release's image in the installation's own registry, per PIM repository (the Manager image and the
-sign-in front image). Rolling back one version uses the previous image; an older rollback builds its image again.
+and the one previous release's image in the installation's own registry, per PIM repository (the Manager image; the retired sign-in front's
+stored images are removed outright). Rolling back one version uses the previous image; an older rollback builds its image again.
 - *When.* Only after the update succeeded: the Manager passed its health check, every job is on the new build, the
   installation is not held, and the Manager's image read again at that moment is the new one. A failed, held or
   rolled-back update prunes nothing.
@@ -5391,7 +5394,8 @@ sign-in front image). Rolling back one version uses the previous image; an older
   the current and previous release is listed with its reason: the app or job that uses it, locked, or the kept image it
   belongs to.
 - *What it never touches.* Any other registry or resource, any repository other than PIM's, and a repository whose current
-  version tag is not there. The sign-in front repository is pruned only when a running container names its version.
+  version tag is not there. The retired sign-in front's repository is emptied outright (2026-11-19), unless one of its
+  images is still used live (then nothing of it is deleted) or locked (kept).
 - *Rights.* Deleting uses the updater's existing Contributor right on the registry (it already builds images there). When
   the identity has no delete right on the registry, the step is skipped with one line and nothing is deleted.
 - *Output.* One line per repository and a total ("registry: kept 2 of 31 images; deleted 29"). Kept and deleted are the

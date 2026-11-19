@@ -68,7 +68,7 @@
 
   🟡 CR7 / framework §12.11g -- WEB SIGN-IN WITHOUT A SECRET (lane build 2026-10-18, OFF by default).
   A FOURTH layer, 'signin-front', for the shared sign-in front (FRAMEWORK/signin-front/, one
-  component for PIM and SI, pinned at tools/pim-manager/signin-front.version -- 1.1.0): the front is the only
+  component for PIM and SI; RETIRED 2026-11-19, framework SECURE-WEB-1 ONE STANDARD (a) -- no longer built or shipped): the front is the only
   container the ingress reaches, it strips EVERY inbound identity header and forwards the user's
   signed ID token as 'Authorization: Bearer <JWT>' on each request; this Manager
   listens on 127.0.0.1 only (Get-PimHostedListenerPrefix) and takes identity from that VERIFIED

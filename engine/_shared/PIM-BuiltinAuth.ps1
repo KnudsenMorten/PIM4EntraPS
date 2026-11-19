@@ -898,3 +898,35 @@ function Invoke-PimSigninFrontLeftoverClean {
         return (& $done 'unknown' 'not cleaned (an unexpected error)')
     }
 }
+
+# ---- framework 8.17 SignIn: the sign-in layer, read-only detection ------------------------------------------------------
+# Moved here from the removed engine/_shared/PIM-SigninFrontImage.ps1 (SECURE-WEB-1 ONE STANDARD (a), 2026-11-19): the front
+# is not built, shipped or rolled any more, but a Manager that still carries a 'signin-front' container is REPORTED as such
+# (a leftover the owner must see), never hidden.
+function Get-PimSignInLayer {
+    <#
+      PURE. Framework 8.17 SignIn (agreed SI + PIM + Invardia 2026-10-20): the web app's sign-in layer, read from the RUNNING
+      app, never from a config file. -App = the Manager container app (ARM), -AuthConfig = its authConfigs/current (ARM) and
+      -AuthRead = that read answered (a missing auth config is $null with -AuthRead $true = no Easy Auth).
+        a container named 'signin-front'           -> layer 'signin-front', version = its image tag up to the first '-'
+                                                      (signin-front:1.2.1-src-<hash> -> '1.2.1'; no tag = $null)
+        else authConfigs/current platform.enabled  -> 'easyauth' (version $null)
+        else                                       -> 'none'     (an OPEN web app is reported, never left out)
+      No app, or the auth config was not read on an app without the front = $null (not known -- never a guess).
+      @{ layer; version; checkedUtc }
+    #>
+    param([AllowNull()][object]$App, [AllowNull()][object]$AuthConfig = $null, [bool]$AuthRead = $false, [datetime]$NowUtc = [datetime]::UtcNow)
+    if ($null -eq $App -or $null -eq $App.properties) { return $null }
+    $ts = $NowUtc.ToUniversalTime().ToString('o')
+    $fr = @(@($App.properties.template.containers) | Where-Object { $_ -and "$($_.name)" -eq 'signin-front' })
+    if ($fr.Count) {
+        $img = "$($fr[0].image)"
+        $tag = if ($img -match ':([^:/@]+)$') { $Matches[1] } else { '' }
+        $ver = (($tag -split '-')[0]).Trim()
+        return [ordered]@{ layer = 'signin-front'; version = $(if ($ver) { $ver } else { $null }); checkedUtc = $ts }
+    }
+    if (-not $AuthRead) { return $null }
+    $on = $false
+    if ($AuthConfig -and $AuthConfig.properties -and $AuthConfig.properties.platform) { $on = ("$($AuthConfig.properties.platform.enabled)" -match '^(?i)true$') }
+    return [ordered]@{ layer = $(if ($on) { 'easyauth' } else { 'none' }); version = $null; checkedUtc = $ts }
+}

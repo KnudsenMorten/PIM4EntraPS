@@ -105,7 +105,6 @@ $here = Split-Path -Parent $PSCommandPath
 $solRootPsa = Split-Path -Parent (Split-Path -Parent $here)
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-ArmSetup.ps1') }
-. (Join-Path $solRootPsa 'engine\_shared\PIM-SigninFrontImage.ps1')   # CR7: -Verify checks the sign-in front the archive carries
 . (Join-Path $here '_PimReleasePackage.ps1')   # SEC-PKG-INTERNAL: what the archive must never carry (packed out + refused below)
 
 function Invoke-PimSharedKeyBlob {
@@ -293,29 +292,12 @@ Note "archive    $archive"
 # carries what was committed. Build-PimManagerImage learned this already -- it tars HEAD for the
 # same reason -- and a release artifact has even less business shipping an uncommitted tree.
 Step 'pack the build context from HEAD'
-# CR7 (framework 12.11g, PIM 100.168): the archive ALSO carries the shared sign-in front's source (FRAMEWORK/signin-front/src
-# + VERSION), so an install's updater can build signin-front:<pinned version> in its own registry. Repo-root shaped as before;
-# the Manager build is unchanged (.dockerignore keeps only SOLUTIONS/PIM4EntraPS in its context), and an updater already in
-# the field builds the Manager from this archive exactly as from the previous one (tests/Test-PimSigninFront.ps1 IMG-F*).
-# Only what exists at the packed revision is named -- `git archive` refuses a pathspec that matches nothing.
-$sfPaths = @('FRAMEWORK/signin-front/src', 'FRAMEWORK/signin-front/VERSION')
+# Repo-root shaped: .dockerignore + SOLUTIONS/PIM4EntraPS. SECURE-WEB-1 ONE STANDARD (a) (2026-11-19): the retired shared
+# sign-in front (FRAMEWORK/signin-front) is NOT carried any more -- no install builds or runs it.
 $isRepo = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 if ($isRepo) {
     if ($PSCmdlet.ShouldProcess($archive, 'git archive HEAD')) {
         $packPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
-        # ls-tree, not an existence probe with cat-file: a missing path prints nothing (cat-file's stderr "fatal" is a terminating error on PS 5.1).
-        # 3.0.58: FRAMEWORK/signin-front only while HEAD's framework VERSION is PIM's pin. Past the pin (framework 1.5.0, PIM
-        # pinned 1.4.5) it is left out: the archive's vendor/signin-front (inside SOLUTIONS/PIM4EntraPS, at the pin) is what
-        # the updater builds, and an older updater that reads only FRAMEWORK/ answers "nothing to build" -- never another version.
-        # ls-tree first: git show of a missing path writes "fatal" to stderr (a terminating error on PS 5.1 with Stop)
-        $sfVerAt = { param($path) if (@(& git -C $RepoRoot ls-tree --name-only HEAD -- $path).Count) { "$(& git -C $RepoRoot show "HEAD:$path")".Trim([char]0xFEFF).Trim() } else { '' } }
-        $fwVer = & $sfVerAt 'FRAMEWORK/signin-front/VERSION'
-        $pinVer = & $sfVerAt 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/signin-front.version'
-        if ($fwVer -and $pinVer -and $fwVer -ne $pinVer) {
-            Note "sign-in front: FRAMEWORK is at $fwVer, PIM pins $pinVer -- FRAMEWORK/signin-front left out, vendor/signin-front ($pinVer) carries it"
-        } else {
-            foreach ($sfp in $sfPaths) { if (@(& git -C $RepoRoot ls-tree --name-only HEAD -- $sfp).Count) { $packPaths += $sfp } }
-        }
         # SEC-PKG-INTERNAL: internal/, CLAUDE.md, REQUIREMENTS.md, TESTS.md, tests/ ... packed out (_PimReleasePackage.ps1)
         $packExcludes = @(Get-PimReleaseExcludePathspecs)
         & git -C $RepoRoot archive --format=tar.gz -o $archive HEAD -- @packPaths @packExcludes
@@ -330,11 +312,7 @@ if ($isRepo) {
         Push-Location $RepoRoot
         try {
             $tmpName = "pim-src-$Version.tar.gz"
-            $fwVf = Join-Path $RepoRoot 'FRAMEWORK\signin-front\VERSION'; $pinVf = Join-Path $solRoot 'tools\pim-manager\signin-front.version'
-            $fwVer = if (Test-Path -LiteralPath $fwVf) { "$(Get-Content -LiteralPath $fwVf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
-            $pinVer = if (Test-Path -LiteralPath $pinVf) { "$(Get-Content -LiteralPath $pinVf -Raw)".Trim([char]0xFEFF).Trim() } else { '' }
-            $sfUse = if ($fwVer -and $pinVer -and $fwVer -ne $pinVer) { Note "sign-in front: FRAMEWORK is at $fwVer, PIM pins $pinVer -- FRAMEWORK/signin-front left out, vendor/signin-front carries it"; @() } else { $sfPaths }
-            $tarPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS') + @($sfUse | Where-Object { Test-Path -LiteralPath (Join-Path $RepoRoot $_) })
+            $tarPaths = @('.dockerignore', 'SOLUTIONS/PIM4EntraPS')
             # SEC-PKG-INTERNAL: a synced tree carries internal/, CLAUDE.md, tests/ ... too. tar is handed a FILE LIST (-T, the
             # same in GNU tar and the bsdtar of Windows) with every internal-only path left out -- never an --exclude pattern,
             # whose matching differs between the two.
@@ -399,13 +377,7 @@ if ((-not $WhatIfPreference) -and ($Verify -or $StorageAccount)) {
         throw ("Publish-PimSourceArchive: REFUSED -- {0} file line(s) carry a real identifier or a secret: {1}{2}. Nothing was uploaded." -f $contentHits.Count, (@($contentHits | Select-Object -First 5) -join '; '), $(if ($contentHits.Count -gt 5) { "; and $($contentHits.Count - 5) more" } else { '' }))
     }
     Note "verified: $($listing.Count) entries, Dockerfile at the expected path, no internal-only path, no real identifier in the content"
-    # CR7: the sign-in front an opted-in install builds from this archive. NOT a refusal -- the Manager ships either way and
-    # an install not behind the front never reads it -- but said loudly, because an opted-in install cannot build its front
-    # from an archive without it (or with a component other than the one pinned).
-    $sfCheck = New-PimSigninFrontBuildContext -ArchivePath $archive -OutFile (Join-Path $OutDir ("signin-front-ctx-$Version.tar.gz"))
-    Remove-Item -LiteralPath (Join-Path $OutDir ("signin-front-ctx-$Version.tar.gz")) -Force -ErrorAction SilentlyContinue
-    if ($sfCheck.ok) { Note "sign-in front: carries signin-front $($sfCheck.version) = the pinned version ($($sfCheck.files) source files, from $($sfCheck.source))" }
-    else { Warn "sign-in front: an opted-in install could NOT build its front from this archive -- $($sfCheck.reason)" }
+
 }
 
 # ---- 3. upload + read link ----------------------------------------------------------------------
