@@ -1,0 +1,13 @@
+{
+  "version": "3.1.49.1",
+  "date": "2026-11-19",
+  "type": "security",
+  "summary": "A security update: PIM Manager runs on Microsoft's latest patched .NET 10.0.15 images.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Latest patched Microsoft base images",
+      "text": "PIM Manager now runs on the newest patched Microsoft .NET images. Nothing changes in how you sign in or work."
+    }
+  ]
+}

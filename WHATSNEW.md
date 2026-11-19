@@ -1,5 +1,17 @@
 # What's new in PIM Manager
 
+## 3.1.49.1 · 2026-11-19 · Security
+
+A security update: PIM Manager runs on Microsoft's latest patched .NET 10.0.15 images.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Latest patched Microsoft base images** - PIM Manager now runs on the newest patched Microsoft .NET images. Nothing changes in how you sign in or work.
+
 ## 3.1.49 · 2026-11-17 · Security
 
 The removal of old support database rights no longer waits for the nightly update.

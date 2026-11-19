@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.49.1 -- 2026-11-19
+
+- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.49); no change in behaviour
+
 ## 3.1.49 -- 2026-11-17
 
 - Security: while the removal of the Support app's old standing database right is pending and no support session is open, the 15-minute update check runs the full update path to do it (at most once an hour); a full run no longer waits a day after it found a session open. A missing proof still waits a day.
