@@ -7,11 +7,11 @@ component has its own identity, and each identity has only the rights its job ne
 
 | Identity | Kind | What it does | What it can never do |
 |---|---|---|---|
-| Portal | Managed identity of the portal app | Reads the tenant for the screens (Graph read-only), stages changes in the database, starts the engine job | Write to the tenant, change the database schema, change the engine, push images, administer SQL |
+| Portal | Managed identity of the portal app | Shows what the engine stored, stages changes in the database, and after a commit or **Run now** puts one wake message on the wake queue | Call Microsoft Graph (it holds no Graph permission), write to the tenant, start, stop or change any job, read Key Vault, change the database schema, push images, administer SQL |
 | Engine | Managed identity of the engine job | Applies the desired state to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR | Change objects that are not defined in the database; delete an account by itself |
 | Updater | Managed identity of the update job | Builds the new version in your registry, applies the schema, rolls the apps | Change database security outside the signed grant procedure |
 | Image pull | User-assigned managed identity | Pulls images from your registry | Reach the database (it has no database user at all) |
-| Sign-in front | App registration, with the portal's managed identity as a federated credential | Signs administrators in (OpenID Connect code flow with PKCE, 8-hour fixed session) | Hold a secret: there is none |
+| Sign-in app registration | App registration, with the portal's managed identity as a federated credential | Signs administrators in through Microsoft's built-in sign-in for Azure Container Apps (8-hour fixed session); the portal checks the signed token on every request | Hold a secret: there is none |
 | PIM Activator (optional) | App registration, public client with PKCE | Lets each user activate their **own** eligible groups and roles | Act beyond the signed-in user's own eligibility |
 | Invardia Support app (optional) | App registration in your tenant, only if you create it | Troubleshooting on request (see [Support access](support-access)) | Anything after you switch it off |
 
@@ -33,10 +33,16 @@ What keeps those rights in check:
 
 ## The portal's rights
 
-- Microsoft Graph: **read-only** permissions only. Every change is queued in the database and applied by the engine.
-- Azure: Reader on the hosting subscription and on the PIM resource group; **Container Apps Jobs Operator on the engine
-  job only**, so it can start that job and nothing else.
+- Microsoft Graph: **no permission**. The people and group pickers read what the engine stored. Every change is queued
+  in the database and applied by the engine.
+- Azure: Reader on the PIM resource group; Storage Blob Data Contributor on the sign-in token store (one blob
+  container); Storage Queue Data Message Sender on the wake queue (one queue). It holds **no right on any job** and
+  **no Key Vault role**.
+- Starting the engine: after a commit or **Run now**, the portal puts one message on the wake queue. The wake job,
+  which runs as the engine's identity, starts one normal engine run, usually within a minute. If the wake queue cannot
+  be used, the next scheduled run picks the change up, within about five minutes.
 - Database: its own role (pim_web), with no right to change the schema.
+- Each update removes any right the portal's identity should not hold, where it can, and reports the rest.
 
 ## Mail
 

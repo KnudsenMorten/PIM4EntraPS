@@ -1,0 +1,6 @@
+{"version":"3.1.53","date":"2026-11-20","type":"feature",
+ "summary":"New SuperAdmins can sign in at once, and one unreadable Azure subscription no longer hides the others.",
+ "new":[{"title":"New SuperAdmins can sign in at once","text":"A person you make SuperAdmin under Settings > Manager access & roles now gets access to the PIM Manager sign-in automatically. If PIM Manager may not do this, the page names the one step to take."}],
+ "fixes":[{"title":"Azure subscriptions read one by one","text":"If PIM Manager cannot read one Azure subscription, that subscription is shown as not read, and every other subscription is shown as normal. Nothing in the unread subscription is reported as removed."},
+          {"title":"Clearer names and labels","text":"The engine's app registration gets the product name on a new install, and administrative units are named as such in error messages."},
+          {"title":"Documentation brought up to date","text":"The help pages in PIM Manager, the feature list and earlier What's new entries now match what PIM Manager does today."}]}

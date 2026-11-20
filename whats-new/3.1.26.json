@@ -2,7 +2,7 @@
   "version": "3.1.26",
   "date": "2026-11-15",
   "type": "security",
-  "summary": "Security release: Microsoft's own sign-in and token checks protect PIM Manager, the request API uses Entra tokens only, and Pro adds a chat in the Manager.",
+  "summary": "Stronger sign-in protection, simpler and safer access for ticketing systems, faster changes after Commit, and for Pro a chat in the Manager.",
   "new": [
     {
       "title": "Chat in the Manager (Pro)",
@@ -11,24 +11,24 @@
   ],
   "fixes": [
     {
-      "title": "Microsoft's token library",
-      "text": "Every sign-in token is checked with Microsoft's own library, which PIM Manager tests at every start before it serves a request."
+      "title": "Sign-in checked by Microsoft's own code",
+      "text": "Every sign-in is checked with Microsoft's own sign-in checks, and PIM Manager makes sure they work each time it starts, before anyone can use it."
     },
     {
       "title": "Your sign-in stays fresh",
       "text": "The page renews your sign-in before it ends, and offers Sign in again or Sign in with another account when needed."
     },
     {
-      "title": "Entra tokens instead of API keys",
-      "text": "The access request API accepts only Microsoft Entra application tokens with an app role. Applications on your allow-list get the role automatically."
+      "title": "No shared keys for ticketing systems",
+      "text": "Ticketing systems that switch admin accounts on for a time now sign in with their own Microsoft Entra identity. Shared keys are gone, and the systems you already approved keep working without a change."
     },
     {
       "title": "Commit and Run now within a minute",
-      "text": "Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job."
+      "text": "After Commit or Run now, your change is applied within about a minute, and the Manager itself still cannot start or change the engine."
     },
     {
       "title": "Smaller fixes",
-      "text": "The web app holds no Key Vault role (the break-glass passphrase is checked against a protected verifier in the PIM database), and discovery mails are marked as information, not warnings."
+      "text": "The Manager no longer needs access to the key store, the emergency passphrase is checked safely inside your own database, and discovery mails are marked as information, not warnings."
     }
   ]
 }

@@ -363,6 +363,32 @@ function Get-PimUplinkBacklog {
 # 60 would skip every other run and make it two-hourly).
 $script:PimUplinkHeartbeatHours = 1
 function Get-PimUplinkHeartbeatHours { <# PURE. The heartbeat interval in hours -- a literal (child-scope safe). #> return 1 }
+
+function Get-PimUplinkDocsVersion {
+    <#
+      DOCS-FRESH (framework ALIGN-AUTO-ALL item 3): the version the shipped docs name as live -- engine/docs-version.txt (one
+      line, moved with VERSION by the release step). Returns the version when the file holds a clean 3- or 4-part version,
+      else '' (a missing / empty / malformed file = the heartbeat leaves docsVersion out). Never throws.
+      -Path / -Text are test seams.
+    #>
+    param([string]$Path = '', [AllowNull()][string]$Text = $null)
+    try {
+        $t = $Text
+        # a [string] parameter turns a $null default into '' -- so "-Text not given" is read from the BOUND parameters (runner proof)
+        if (-not $PSBoundParameters.ContainsKey('Text')) {
+            # the file next to THIS library's folder: engine/_shared/PIM-Uplink.ps1 -> engine/docs-version.txt. The defining file
+            # of this function, not $PSScriptRoot (inside a function that is not reliably the library's folder -- runner proof)
+            $lib = "$($MyInvocation.MyCommand.ScriptBlock.File)"; if (-not $lib) { $lib = "$((Get-Command Get-PimUplinkDocsVersion -ErrorAction SilentlyContinue).ScriptBlock.File)" }
+            $p = if ("$Path".Trim()) { $Path } elseif ($lib) { Join-Path (Split-Path -Parent (Split-Path -Parent $lib)) 'docs-version.txt' } else { '' }
+            if (-not $p) { return '' }
+            if (-not (Test-Path -LiteralPath $p)) { return '' }
+            $t = [IO.File]::ReadAllText($p)
+        }
+        $v = "$t".Trim()
+        if ($v -match '^\d{1,4}\.\d{1,6}\.\d{1,6}(\.\d{1,6})?$') { return $v }
+    } catch { }
+    return ''
+}
 function Get-PimUplinkHeartbeatDue {
     <#
       PURE. True when no heartbeat was sent in the last interval (less the tick's slack) -- or ever. The slack is 10 minutes,
@@ -3898,6 +3924,10 @@ function Invoke-PimUplinkCycle {
             $hb | Add-Member -NotePropertyName 'LicenceId' -NotePropertyValue $lid -Force
         }
         if ($hb -and $sender.Mode -eq 'identified' -and $eps.Count) { $hb | Add-Member -NotePropertyName 'Endpoints' -NotePropertyValue ([object[]]$eps) -Force }
+        # DOCS-FRESH (framework ALIGN-AUTO-ALL item 3; Invardia's PIM contract: top-level docsVersion, type version): the version the
+        # shipped docs name as live (engine/docs-version.txt, moved with VERSION by the release step). Only a clean 3/4-part
+        # version is sent -- anything else leaves the field out (a bad value must never cost the heartbeat).
+        if ($hb) { $dv = Get-PimUplinkDocsVersion; if ($dv) { $hb | Add-Member -NotePropertyName 'docsVersion' -NotePropertyValue $dv -Force } }
         # PIM 100.102: ActiveGuards -- the IDENTIFIED heartbeat (sent with the install key) ALWAYS carries it once the state was
         # read ([] = nothing is held), and NEVER when it was not read -- under PowerShell 7 (Test-PimUplink reads the JSON text).
         # DECISION (owner side, 2026-10-12): under Windows PowerShell 5.1 the field is NOT sent. WHY: 5.1's ConvertTo-Json writes

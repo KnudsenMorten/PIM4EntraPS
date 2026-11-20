@@ -562,7 +562,7 @@ function Write-PimEngineChangeAudit {
         }
         $key = if ($Item -and $Item.PSObject.Properties['key']) { "$($Item.key)" } else { '' }
         $label = ''
-        if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { try { $label = Get-PimFailureItemLabel -Key $key -Row $row } catch { $label = '' } }
+        if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { try { $label = Get-PimFailureItemLabel -Key $key -Row $row -Scope "$Scope" } catch { $label = '' } }
         $snap = if (Get-Command ConvertTo-PimFailureRowSnapshot -ErrorAction SilentlyContinue) { ConvertTo-PimFailureRowSnapshot -Row $row } else { $row }
         $verb = switch ("$Op") { 'Create' { 'create' } 'Update' { 'update' } 'Remove' { 'remove' } default { "$Op".ToLowerInvariant() } }
         $after = [ordered]@{
@@ -635,6 +635,32 @@ function Get-PimEngineItemStoreRefs {
         if ($k) { $out.Add(@{ entity = $b; key = $k }) }
     }
     return @($out.ToArray())
+}
+
+function New-PimEngineDerivedOrigin {
+    <#
+      SIGNED-REQ-DERIVED-1. One stored row a DERIVED change comes from, as @{ entity; key } (the pim.Rows entity + store key),
+      or $null when no key can be made. -Row: the definition row (its SourceEntity names the entity unless -Entity is given).
+      A provider puts these on its desired item as pimDerivedFrom = @(...); the signed-request check judges the change by them.
+    #>
+    param([string]$Entity = '', [AllowNull()][object]$Row = $null, [string]$Key = '')
+    $f = { param($o, $n) if ($null -eq $o) { '' } elseif ($o -is [System.Collections.IDictionary]) { "$($o[$n])" } elseif ($o.PSObject.Properties[$n]) { "$($o.$n)" } else { '' } }
+    $e = "$Entity".Trim(); if (-not $e) { $e = (& $f $Row 'SourceEntity').Trim() }
+    if (-not $e) { return $null }
+    $k = "$Key".Trim()
+    if (-not $k -and $null -ne $Row -and (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { try { $k = "$(Get-PimStoreRowKey -Base $e -Row $Row)".Trim() } catch { $k = '' } }
+    if (-not $k) { return $null }
+    return @{ entity = $e; key = $k }
+}
+
+function Get-PimEngineItemDerivedOrigins {
+    # SIGNED-REQ-DERIVED-1. The origins a provider put on an item's row (pimDerivedFrom), or @().
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return @() }
+    $v = $null
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains('pimDerivedFrom')) { $v = $Row['pimDerivedFrom'] } }
+    elseif ($Row.PSObject.Properties['pimDerivedFrom']) { $v = $Row.pimDerivedFrom }
+    return @(@($v) | Where-Object { $null -ne $_ })
 }
 
 function ConvertTo-PimJournalRowArray {
@@ -1226,7 +1252,7 @@ function Invoke-PimEngineScope {
             $__rrCs = $__ledgerCs
             if (-not $__rrCs -and -not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $__rrCs = Get-PimSqlSettingsConnectionString } catch { $__rrCs = $null } }
             $__rrLabel = $null
-            if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { $__rrLabel = { param($c) Get-PimFailureItemLabel -Key "$($c.key)" -Row $c.live } }
+            if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { $__rrScope = "$Scope"; $__rrLabel = { param($c) Get-PimFailureItemLabel -Key "$($c.key)" -Row $c.live -Scope $__rrScope } }
             $__rrPlan = Get-PimReconcileRemovalPlan -Scope $Scope -Provider $p -Desired @($desired) -SetAsideDesiredCount $__pkgDesiredDropped -Live @($live) -KeyOf $p.KeyOf -HasTypes:([bool]$p.TypeKeyOf) `
                 -ClaimedKeys @(@($diff.remove) | Where-Object { $_ } | ForEach-Object { "$($_.key)" }) -LedgerConnectionString "$__rrCs" -Mode $__rrMode `
                 -Budget $__rrBudget -AlreadyRemoving @($diff.remove).Count -LabelOf $__rrLabel
@@ -1532,11 +1558,16 @@ function Invoke-PimEngineScope {
                 $__srRow = if ($op -eq 'Remove') { if ($item.PSObject.Properties['row'] -and $null -ne $item.row) { $item.row } elseif ($item.PSObject.Properties['live']) { $item.live } else { $null } } elseif ($item.PSObject.Properties['desired']) { $item.desired } else { $null }
                 $__srCommit = $null; try { $__srCommit = Resolve-PimEngineChangeCommit -Entity $entity -Op $op -Row $__srRow } catch { $__srCommit = $null }
                 $__srRefs = @(); try { $__srRefs = @(Get-PimEngineItemStoreRefs -Entity $entity -Row $__srRow) } catch { $__srRefs = @() }
-                $__srV = Test-PimEngineSignedRequest -Commit $__srCommit -Refs $__srRefs -Op $op -State $__srState -Scope "$Scope" -Key "$($item.key)"
+                # SIGNED-REQ-DERIVED-1: a change the provider DERIVES from stored rows names them (pimDerivedFrom) -- judged by them
+                $__srOrig = @(); try { $__srOrig = @(Get-PimEngineItemDerivedOrigins -Row $__srRow) } catch { $__srOrig = @() }
+                $__srV = Test-PimEngineSignedRequest -Commit $__srCommit -Refs $__srRefs -Op $op -State $__srState -Scope "$Scope" -Key "$($item.key)" -Origins $__srOrig
                 $__srLine = Add-PimSignedRequestObservation -Verdict $__srV -Scope $Scope -Op $op -Key "$($item.key)" -State $__srState
                 if ($__srLine) {
-                    Write-Host ("    [signed-request] {0}" -f $__srLine) -ForegroundColor $(if ($__srV.refuse) { 'Red' } else { 'DarkYellow' })
-                    try { $item | Add-Member -NotePropertyName pimSignedRequest -NotePropertyValue ([ordered]@{ mode = "$($__srV.mode)"; verified = $false; result = $(if ($__srV.refuse) { 'refused' } else { 'would have refused' }); reason = "$($__srV.reason)"; commitId = "$($__srV.commitId)" }) -Force } catch { }
+                    Write-Host ("    [signed-request] {0}" -f $__srLine) -ForegroundColor $(if ($__srV.refuse) { 'Red' } elseif ($__srV.ok) { 'DarkGray' } else { 'DarkYellow' })
+                    $__srRes = if ($__srV.refuse) { 'refused' } elseif ($__srV.ok) { 'verified through the row it comes from' } else { 'would have refused' }
+                    $__srAud = [ordered]@{ mode = "$($__srV.mode)"; verified = [bool]$__srV.ok; result = $__srRes; reason = "$($__srV.reason)"; commitId = "$($__srV.commitId)" }
+                    if (@($__srV.derivedFrom).Count) { $__srAud['derivedFrom'] = @($__srV.derivedFrom) }
+                    try { $item | Add-Member -NotePropertyName pimSignedRequest -NotePropertyValue $__srAud -Force } catch { }
                 }
                 if ($__srV.refuse) {
                     $script:__skipped++

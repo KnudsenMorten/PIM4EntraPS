@@ -2,5 +2,5 @@
  "summary":"The Access page shows what a change gives before you make it, who has a permission, a people-by-groups grid, and can copy one admin's access to another.",
  "new":[{"title":"See the impact before you give","text":"Each give says how many permissions it reaches and how many are Tier 0. A give that reaches Tier 0 or many permissions asks first."},
         {"title":"Who has this","text":"Click a group or permission to see everyone who has it and how, with a remove per person and a CSV export."},
-        {"title":"Matrix, make like and compare","text":"A people-by-groups grid with tick boxes, Make like to copy one admin's access to another, and Compare to see two admins side by side. Every change still goes through Pending changes."}],
+        {"title":"Matrix, make like and compare","text":"Matrix shows people and their direct groups as a grid: select a box to give, clear it to remove. Make like copies one admin's access to another; Compare shows two admins. Every change still goes through Pending changes."}],
  "fixes":[]}

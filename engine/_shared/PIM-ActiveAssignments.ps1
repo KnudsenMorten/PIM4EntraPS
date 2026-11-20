@@ -1100,14 +1100,16 @@ function Get-PimAzureEligibilitySchedules {
       Get-PimAzureEligibilityParallelMinimum subscriptions, the reads run in runspaces (ForEach-Object -Parallel, one ARM
       token, nextLink paging, 429 / 5xx retried with Retry-After). A subscription a runspace could not read is read again
       one by one through Invoke-PimArm (its own retries) afterwards; only one that fails THERE counts as failed.
-      Returns { items (List, in subscription order); failed; error (the first failure); parallel (bool) }. Never throws.
+      Returns { items (List, in subscription order); failed; failedIds (the subscription ids that failed); error (the first
+      failure); parallel (bool) }. Never throws.
       -ChunkReader: test seam ( { param([string[]]$subIds) } returning @{ sub; ok; items; error } per subscription ).
     #>
     param([string[]]$SubscriptionIds = @(), [ValidateRange(1, 64)][int]$Parallel = 16, [scriptblock]$ChunkReader = $null)
     $subsIn = @($SubscriptionIds | Where-Object { "$_".Trim() })
     $items = New-Object System.Collections.Generic.List[object]
     $failed = 0; $firstErr = ''
-    $readOne = { param($sid) @(Invoke-PimArm -Path "/subscriptions/$sid/providers/Microsoft.Authorization/roleEligibilitySchedules" -ApiVersion '2020-10-01' -All) }
+    $failedIds = New-Object System.Collections.Generic.List[string]   # TRUST-1-NEXT (b): WHICH subscriptions failed
+    $readOne ={ param($sid) @(Invoke-PimArm -Path "/subscriptions/$sid/providers/Microsoft.Authorization/roleEligibilitySchedules" -ApiVersion '2020-10-01' -All) }
     $usePar = ($Parallel -gt 1 -and $subsIn.Count -ge (Get-PimAzureEligibilityParallelMinimum) -and ($ChunkReader -or $PSVersionTable.PSVersion.Major -ge 7))
     $answers = @{}
     if ($usePar) {
@@ -1155,11 +1157,12 @@ function Get-PimAzureEligibilitySchedules {
         try { foreach ($v in @(& $readOne $sid)) { if ($null -ne $v) { $items.Add($v) } } }
         catch {
             $failed++
+            $failedIds.Add("$sid")
             if (-not $firstErr) { $firstErr = "$($_.Exception.Message)" }
             Write-Warning ("  [revoke] ARM role-eligibility schedules for /subscriptions/{0} failed: {1}" -f $sid, $_.Exception.Message)
         }
     }
-    return [pscustomobject]@{ items = $items; failed = $failed; error = $firstErr; parallel = $usePar }
+    return [pscustomobject]@{ items = $items; failed = $failed; failedIds = $failedIds.ToArray(); error = $firstErr; parallel = $usePar }
 }
 
 function Invoke-PimActiveAssignmentsSnapshot {
@@ -1360,16 +1363,33 @@ function Invoke-PimActiveAssignmentsSnapshot {
                         hint = 'Grant the engine SPN at least Reader on the target subscription(s) so Azure-RBAC active assignments can be enumerated.' })
                     $azOk = $false
                 }
+                # TRUST-1-NEXT (b): a subscription that cannot be read is named (its id), never a silent gap -- only ITS rows are
+                # then carried from the last good read (AA-AZURE-SUBSCRIPTION-NOT-READ); every other subscription is read as normal
+                $actFailIds = New-Object System.Collections.Generic.List[string]; $actFailErr = ''
                 foreach ($s in $subs) {
                     $scope = "/subscriptions/$($s.subscriptionId)"
                     try {
+                        $subRows = @()
                         foreach ($ri in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleAssignmentScheduleInstances" -ApiVersion '2020-10-01-preview' -All)) {
                             $p = $ri.properties
                             $rdId = "$($p.roleDefinitionId)"
-                            $azRows += [pscustomobject]@{ Id = "$($ri.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId
+                            $subRows += [pscustomobject]@{ Id = "$($ri.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId
                                 RoleDefinitionName = ($rdId -split '/' | Select-Object -Last 1); Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)" }
                         }
-                    } catch { Write-Warning ("  [revoke] ARM role-assignment instances for {0} failed: {1}" -f $scope, $_.Exception.Message) }
+                        $azRows += $subRows   # all of a subscription or none of it
+                    } catch {
+                        $actFailIds.Add("$($s.subscriptionId)"); if (-not $actFailErr) { $actFailErr = "$($_.Exception.Message)" }
+                        Write-Warning ("  [revoke] ARM role-assignment instances for {0} failed: {1}" -f $scope, $_.Exception.Message)
+                    }
+                }
+                if ($actFailIds.Count -gt 0 -and $actFailIds.Count -ge $subs.Count) {
+                    # not one subscription could be read: the whole Azure part failed (carried as a whole by the job)
+                    & $addErr 'azure-rbac' ("all {0} subscription(s) could not be read: {1}" -f $subs.Count, $actFailErr) ''
+                    $azOk = $false; $azRows = @()
+                } elseif ($actFailIds.Count -gt 0) {
+                    $sem = "{0} of {1} subscription(s) could not be read: {2}" -f $actFailIds.Count, $subs.Count, $actFailErr
+                    [void]$surfaceErrors.Add([ordered]@{ surface = 'azure-rbac'; code = 'AA-AZURE-SUBSCRIPTION-NOT-READ'; error = $sem
+                        hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'azure-rbac' -ErrorMessage $actFailErr); subscriptionIds = [string[]]@($actFailIds | Sort-Object -Unique) })
                 }
             } catch {
                 $em = "$($_.Exception.Message)"
@@ -1415,7 +1435,16 @@ function Invoke-PimActiveAssignmentsSnapshot {
                     & $addAzRow ([pscustomobject]@{ Id = "$($es.id)"; PrincipalId = "$($p.principalId)"; RoleDefinitionId = $rdId; RoleDefinitionName = $rdName
                                                     Scope = "$($p.scope)"; PrincipalType = "$($p.principalType)"; Start = $st; End = $en }) 'eligible'
                 }
-                if ($eligFailedSubs -gt 0) { throw ("{0} of {1} subscription(s) could not be read: {2}" -f $eligFailedSubs, $eSubs.Count, $eligErr) }
+                # TRUST-1-NEXT (b): SOME subscriptions failed -> only THOSE are unknown (a surface error naming them, code
+                # AA-AZURE-SUBSCRIPTION-NOT-READ; the job carries their last good eligible rows), every other subscription's rows
+                # stay. Every subscription failed (or a reader that does not name them) -> the whole eligible half, as before.
+                $eFailIds = @(); if ($eRead.PSObject.Properties['failedIds']) { $eFailIds = @($eRead.failedIds | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() } | Sort-Object -Unique) }
+                if ($eligFailedSubs -gt 0 -and ($eligFailedSubs -ge $eSubs.Count -or $eFailIds.Count -ne $eligFailedSubs)) { throw ("{0} of {1} subscription(s) could not be read: {2}" -f $eligFailedSubs, $eSubs.Count, $eligErr) }
+                if ($eligFailedSubs -gt 0) {
+                    $sem = "{0} of {1} subscription(s) could not be read: {2}" -f $eligFailedSubs, $eSubs.Count, $eligErr
+                    [void]$surfaceErrors.Add([ordered]@{ surface = 'azure-rbac'; code = 'AA-AZURE-SUBSCRIPTION-NOT-READ'; error = $sem
+                        hint = (Get-PimActiveAssignmentSurfaceHint -Surface 'azure-rbac' -ErrorMessage $eligErr); state = 'eligible'; subscriptionIds = [string[]]$eFailIds })
+                }
                 Write-Host ("  [revoke] azure-rbac: {0} eligible role schedule(s) across {1} subscription(s)" -f ($rows.Count - $azEligStart), $eSubs.Count) -ForegroundColor DarkGray
             } catch {
                 $em = "$($_.Exception.Message)"
@@ -1428,7 +1457,10 @@ function Invoke-PimActiveAssignmentsSnapshot {
     }
     # the Azure read stamp of THIS generation: now when Azure was read completely, the carried read's stamp when carried, none
     # when the read failed (the next run then reads Azure again)
-    $azureReadUtc = if (-not $azRead) { $azPrevUtc } elseif ($azOk) { $runUtc } else { '' }
+    # TRUST-1-NEXT (b): some subscriptions not read = not read completely ('' here; the job stamps the part when it carried their
+    # rows, and the header's 'carried' entry makes the next run read Azure again)
+    $azSubUnread = @($surfaceErrors | Where-Object { "$($_.surface)" -eq 'azure-rbac' -and $_.Contains('subscriptionIds') }).Count -gt 0
+    $azureReadUtc = if (-not $azRead) { $azPrevUtc } elseif ($azOk -and -not $azSubUnread) { $runUtc } else { '' }
 
     # ---- 3. the groups to read: chosen AFTER the role rows ------------------
     # The group list holds EVERY group of the tenant, so a group that holds a role is known by it. Only when that list could not
@@ -1737,6 +1769,20 @@ function Split-PimActiveAssignmentsSurfaceErrors {
     return @{ failed = $failed.ToArray(); absent = $absent.ToArray() }
 }
 
+function Get-PimActiveAssignmentsRowSubscriptionId {
+    <# PURE. TRUST-1-NEXT (b): the subscription id an Azure row sits at or below (its scope, else its id), '' when above every
+       subscription (a management group, the root) or not an Azure row. #>
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return '' }
+    foreach ($n in 'scope', 'id') {
+        $v = "$(Get-PimActiveAssignmentsHeaderField $Row $n)"
+        if ($n -eq 'id') { $v = $v -replace '^azure-rbac(-eligible)?:', '' }
+        if ($v -match '^(?i)/subscriptions/([^/]+)') { return "$($Matches[1])".ToLowerInvariant() }
+        if ($n -eq 'scope' -and $v.Trim()) { return '' }   # a scope above every subscription
+    }
+    return ''
+}
+
 function Merge-PimActiveAssignmentsCarriedRows {
     <#
       TRUST-1 gap 4 (framework points 2 + 8). The rows of a surface that FAILED this run are replaced by that surface's rows of the
@@ -1770,7 +1816,16 @@ function Merge-PimActiveAssignmentsCarriedRows {
             foreach ($ge in $bySurface[$surf]) { foreach ($gid in @(Get-PimActiveAssignmentsHeaderField $ge 'groupIds')) { if ("$gid".Trim()) { [void]$grpSet.Add("$gid".Trim()) } } }
             if ($grpSet.Count -eq 0) { $grpSet = $null }
         }
-        $prevRead = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $PreviousHeader $parts[$surf].stamp))"
+        # TRUST-1-NEXT (b): a failure of SOME Azure subscriptions (every entry names its subscriptionIds) carries only the rows of
+        # those subscriptions (scope at or below /subscriptions/<id>), plus a previous row ABOVE every subscription (a management
+        # group / the root, listed through a subscription) that this run did not see again -- never reported absent
+        $subSet = $null
+        if ($t -eq 'azure-rbac' -and @($bySurface[$surf] | Where-Object { $sv = Get-PimActiveAssignmentsHeaderField $_ 'subscriptionIds'; $null -eq $sv -or -not @($sv | Where-Object { "$_".Trim() }).Count }).Count -eq 0) {
+            $subSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($se in $bySurface[$surf]) { foreach ($sbid in @(Get-PimActiveAssignmentsHeaderField $se 'subscriptionIds')) { if ("$sbid".Trim()) { [void]$subSet.Add("$sbid".Trim()) } } }
+            if ($subSet.Count -eq 0) { $subSet = $null }
+        }
+        $prevRead ="$(ConvertTo-PimActiveAssignmentsIsoStamp -Value (Get-PimActiveAssignmentsHeaderField $PreviousHeader $parts[$surf].stamp))"
         $want = [long]-1; [void][long]::TryParse("$(Get-PimActiveAssignmentsHeaderField $prevCounts $t)", [ref]$want)
         $reader = $null
         if ($null -ne $Context) { if ($Context.ContainsKey('ReadKind')) { $reader = { param($c, $s, $k) & $c.ReadKind $c $s $k } } elseif ($t -eq 'azure-rbac' -and $Context.ContainsKey('ReadAzure')) { $reader = { param($c, $s, $k) & $c.ReadAzure $c $s } } }
@@ -1789,9 +1844,20 @@ function Merge-PimActiveAssignmentsCarriedRows {
         if ($null -ne $got) {
             # never ` = if (...) { list }`: an if-statement's output unrolls the list (a one-row list became the row itself)
             $keep = $got
-            if ($eligOnly -or $null -ne $grpSet) {
+            if ($eligOnly -or $null -ne $grpSet -or $null -ne $subSet) {
+                $nowIds = $null
+                if ($null -ne $subSet) { $nowIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase); foreach ($r0 in @($Rows)) { if ($null -ne $r0 -and "$($r0.type)" -eq $t) { [void]$nowIds.Add("$($r0.id)") } } }
                 $keep = [System.Collections.Generic.List[object]]::new()
-                foreach ($r in $got) { if ((-not $eligOnly -or "$($r.state)" -eq 'eligible') -and ($null -eq $grpSet -or $grpSet.Contains("$($r.groupId)"))) { $keep.Add($r) } }
+                foreach ($r in $got) {
+                    if ($eligOnly -and "$($r.state)" -ne 'eligible') { continue }
+                    if ($null -ne $grpSet -and -not $grpSet.Contains("$($r.groupId)")) { continue }
+                    if ($null -ne $subSet) {
+                        $rSub = Get-PimActiveAssignmentsRowSubscriptionId -Row $r
+                        if ($rSub) { if (-not $subSet.Contains($rSub)) { continue } }
+                        elseif ($nowIds.Contains("$($r.id)")) { continue }   # above every subscription and read again this run
+                    }
+                    $keep.Add($r)
+                }
             }
             $maxD = Get-PimTrustCarryMaxAgeDays
             $ageOf = { param($iso) $a = $null; try { $a = [datetime]::Parse("$iso", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $a = $null }; if ($null -eq $a) { -1 } else { ($NowUtc.ToUniversalTime() - $a).TotalDays } }
@@ -1813,12 +1879,16 @@ function Merge-PimActiveAssignmentsCarriedRows {
                 $r['carried'] = $true; $r['carriedFromUtc'] = $from; $r['stale'] = [bool]$rs
                 if ($null -ne $grpSet) { $g0 = "$($r['groupId'])"; if (-not $grpFrom.Contains($g0) -or "$from" -lt "$($grpFrom[$g0])") { $grpFrom[$g0] = $from } }
                 if ($null -ne $grpSet -and $rs) { $g0 = "$($r['groupId'])"; if (-not $grpStale.Contains($g0) -or "$from" -lt "$($grpStale[$g0])") { $grpStale[$g0] = $from } }
+                if ($null -ne $subSet -and $rs) { $s0 = Get-PimActiveAssignmentsRowSubscriptionId -Row $r; if (-not $s0) { $s0 = '/' }; if (-not $grpStale.Contains($s0) -or "$from" -lt "$($grpStale[$s0])") { $grpStale[$s0] = $from } }
             }
-            $replace[$t] = @{ rows = $keep; eligibleOnly = $eligOnly; groups = $grpSet }
-            $carried.Add([ordered]@{ surface = $surf; type = $t; rows = [long]$keep.Count; fromSnapshotId = $sid; readUtc = $prevRead; eligibleOnly = $eligOnly; groupIds = $(if ($null -ne $grpSet) { [string[]]@($grpSet | Sort-Object) } else { $null }); subset = ($null -ne $grpSet)
+            $replace[$t] = @{ rows = $keep; eligibleOnly = $eligOnly; groups = $grpSet; subscriptions = $subSet }
+            $carried.Add([ordered]@{ surface = $surf; type = $t; rows = [long]$keep.Count; fromSnapshotId = $sid; readUtc = $prevRead; eligibleOnly = $eligOnly; groupIds = $(if ($null -ne $grpSet) { [string[]]@($grpSet | Sort-Object) } else { $null }); subset = ($null -ne $grpSet -or $null -ne $subSet)
                 # round 6 F1: per carried group its oldest real read -- an all-failed run after this one ages each group from here
-                groupsFrom = $(if ($null -ne $grpSet) { $grpFrom } else { $null }) })
+                groupsFrom = $(if ($null -ne $grpSet) { $grpFrom } else { $null })
+                # TRUST-1-NEXT (b): the subscriptions not read this run (UNKNOWN, their rows carried) + the stable code
+                subscriptionIds = $(if ($null -ne $subSet) { [string[]]@($subSet | Sort-Object) } else { $null }); code = $(if ($null -ne $subSet) { 'AA-AZURE-SUBSCRIPTION-NOT-READ' } else { $null }) })
             if ($null -ne $grpSet) { foreach ($g0 in @($grpStale.Keys)) { $stale.Add([ordered]@{ surface = $surf; groupId = "$g0"; code = 'AA-SOURCE-STALE'; sinceUtc = "$($grpStale[$g0])" }) } }
+            elseif ($null -ne $subSet) { foreach ($s0 in @($grpStale.Keys)) { $stale.Add([ordered]@{ surface = $surf; subscriptionId = "$s0"; code = 'AA-SOURCE-STALE'; sinceUtc = "$($grpStale[$s0])" }) } }
             elseif ($isStale) { $stale.Add([ordered]@{ surface = $surf; code = 'AA-SOURCE-STALE'; sinceUtc = $prevRead }) }
         } else { $missing.Add([ordered]@{ surface = $surf; type = $t; reason = $(if ($sid -le 0) { 'no previous complete read to carry from' } else { 'the previous rows of this part could not be carried' }) }) }
     }
@@ -1826,7 +1896,9 @@ function Merge-PimActiveAssignmentsCarriedRows {
     foreach ($r in @($Rows)) {
         if ($null -eq $r) { continue }
         $rt = "$($r.type)"
-        if ($replace.ContainsKey($rt) -and (-not $replace[$rt].eligibleOnly -or "$($r.state)" -eq 'eligible') -and ($null -eq $replace[$rt].groups -or $replace[$rt].groups.Contains("$($r.groupId)"))) { continue }
+        # a fresh row of a failed subscription is dropped (its last good rows replace it); a fresh row above every subscription stays
+        if ($replace.ContainsKey($rt) -and (-not $replace[$rt].eligibleOnly -or "$($r.state)" -eq 'eligible') -and ($null -eq $replace[$rt].groups -or $replace[$rt].groups.Contains("$($r.groupId)")) -and
+            ($null -eq $replace[$rt].subscriptions -or $replace[$rt].subscriptions.Contains("$(Get-PimActiveAssignmentsRowSubscriptionId -Row $r)"))) { continue }
         $out.Add($r)
     }
     foreach ($t in @($replace.Keys)) { foreach ($r in $replace[$t].rows) { $out.Add($r) } }
@@ -1876,6 +1948,7 @@ function Register-PimActiveAssignmentsStaleParts {
     foreach ($sx in @($Stale)) {
         if ($null -eq $sx) { continue }
         $g = "$(Get-PimActiveAssignmentsHeaderField $sx 'groupId')".Trim()
+        if (-not $g) { $g = "$(Get-PimActiveAssignmentsHeaderField $sx 'subscriptionId')".Trim() }   # TRUST-1-NEXT (b): azure-rbac.<subscription>
         $part = "$(Get-PimActiveAssignmentsHeaderField $sx 'surface')" + $(if ($g) { ".$g" } else { '' })
         try { [void](Register-PimTrustStaleReport -Job 'pim-active-assignments-snapshot' -Part $part -Code 'AA-SOURCE-STALE' -SinceUtc "$(Get-PimActiveAssignmentsHeaderField $sx 'sinceUtc')" -NowUtc $NowUtc) } catch { }
     }
@@ -2099,7 +2172,13 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
             # round 6 F1: the part's read time IS this run's (the snapshot leaves it '' when any group failed) -- else the next run
             # finds no read time and carries nothing; each carried group keeps its own date on its rows (+ groupsFrom)
             else { $entry[$parts["$($cr.surface)"].stamp] = "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $entry['refreshedUtc'])" }
-            if ("$($cr.type)" -eq 'azure-rbac') { $entry['azureRows'] = [long]$cr.rows; $entry['azureMode'] = 'carried'; $entry['azureReason'] = 'the Azure read failed this run -- the last good rows are carried' }
+            if ("$($cr.type)" -eq 'azure-rbac' -and [bool]$cr.subset) {
+                # TRUST-1-NEXT (b): Azure WAS read, only some subscriptions not -- the header's Azure count is every Azure row stored
+                # (what the next run carries forward / checks against), the part named read with those subscriptions unknown
+                $entry['azureRows'] = [long]$entry['counts']['azure-rbac']; $entry['azureMode'] = 'read'
+                $entry['azureReason'] = "$(@($cr.subscriptionIds).Count) subscription(s) could not be read this run [AA-AZURE-SUBSCRIPTION-NOT-READ] -- their last good rows are carried"
+            }
+            elseif ("$($cr.type)" -eq 'azure-rbac') { $entry['azureRows'] = [long]$cr.rows; $entry['azureMode'] = 'carried'; $entry['azureReason'] = 'the Azure read failed this run -- the last good rows are carried' }
         }
         if (@($mc.carried).Count) { $entry['carried'] = @($mc.carried) }
         if (@($mc.missing).Count) { $entry['missing'] = @($mc.missing) }
@@ -2190,15 +2269,19 @@ function Get-PimActiveAssignmentsPartialText {
         $nm = if ($names.ContainsKey($s)) { $names[$s] } else { $s }
         $gids = @(@(& $fld $e 'groupIds') | Where-Object { "$_".Trim() })
         $why = "$(& $fld $e 'error')".Trim()
-        $why = ($why -replace '^the schedules of \d+ group\(s\) could not be read:?\s*', '' -split "`n")[0].Trim()
+        $why = ($why -replace '^the schedules of \d+ group\(s\) could not be read:?\s*', '' -replace '^\d+ of \d+ subscription\(s\) could not be read:?\s*', '' -split "`n")[0].Trim()
         if ($why.Length -gt 160) { $why = $why.Substring(0, 157) + '...' }
+        # TRUST-1-NEXT (b): SOME Azure subscriptions not read -- named as such, never as all of Azure
+        $sids = @(@(& $fld $e 'subscriptionIds') | Where-Object { "$_".Trim() })
         $c = @(@($Carried) | Where-Object { $null -ne $_ -and "$(& $fld $_ 'surface')" -eq $s }) | Select-Object -First 1
         $isMissing = @(@($Missing) | Where-Object { $null -ne $_ -and "$(& $fld $_ 'surface')" -eq $s }).Count -gt 0
-        $what = if ($gids.Count) { "$nm`: $($gids.Count) group(s) could not be read this time; every other group was read" } else { "$nm could not be read this time" }
+        $what = if ($gids.Count) { "$nm`: $($gids.Count) group(s) could not be read this time; every other group was read" }
+                elseif ($sids.Count) { "$nm`: $($sids.Count) subscription(s) could not be read this time; every other subscription was read" }
+                else { "$nm could not be read this time" }
         if ($why) { $what += " ($why)" }
         if ($c) {
             $rows = [long](& $fld $c 'rows'); $rd = "$(& $fld $c 'readUtc')"
-            $what += if ($gids.Count) { ". Their $rows assignment(s) from the last read ($rd) are kept as they were" } else { ". The $rows assignment(s) from the last complete read ($rd) are kept as they were" }
+            $what += if ($gids.Count -or $sids.Count) { ". Their $rows assignment(s) from the last read ($rd) are kept as they were" } else { ". The $rows assignment(s) from the last complete read ($rd) are kept as they were" }
         } elseif ($isMissing) { $what += '. There is no earlier read to show instead, so this part is missing from the list until the next run' }
         $parts.Add($what)
     }

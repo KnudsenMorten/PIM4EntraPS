@@ -14511,7 +14511,14 @@
         const widened = entries.some(e => { const p = prev[e.identity.toLowerCase()]; return (rank[e.role] || 0) > 0 && (p === undefined || (rank[e.role] || 0) > (rank[p] || 0)); });
         if (widened && !(await pimSettingInfoConfirm('ManagerAccess.RoleMapping', true))) { msg.textContent = 'Not saved.'; return; }
         msg.textContent = 'Saving…'; msg.style.color = '#57606a';
-        try { await api('PUT', '/api/access-map', { entries }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; if (hint) hint.textContent = 'mapping updated'; }
+        try {
+          const saved = await api('PUT', '/api/access-map', { entries });
+          // NEW-SUPERADMIN-SIGNIN: a new SuperAdmin is assigned to the sign-in app by the engine -- say so, and say plainly when it could not be queued
+          const sa = (saved && Array.isArray(saved.signinAssign)) ? saved.signinAssign : [];
+          const notQ = sa.filter(s => !s.queued);
+          msg.textContent = 'Saved ✓' + (sa.length && !notQ.length ? ' -- the engine gives ' + sa.length + ' new SuperAdmin(s) sign-in access within a few minutes' : '') + (notQ.length ? ' -- sign-in access NOT queued: ' + notQ.map(s => (s.identity ? s.identity + ': ' : '') + s.reason).join('; ') : '');
+          msg.style.color = notQ.length ? '#9a6700' : '#116329'; if (hint) hint.textContent = 'mapping updated';
+        }
         catch (e) { msg.textContent = e.message; msg.style.color = '#cf222e'; }
       };
     };

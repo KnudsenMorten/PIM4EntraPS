@@ -82,7 +82,8 @@ deployment is a supported choice) and no credentials lying around.
   no interactive prompts, no secrets baked into the image, and diagnostics that work in
   a fully unattended environment.
 - **The web console cannot change your directory by itself.** ✅ 2026-09-12 The Manager's own
-  identity holds read-only directory permissions. Everything that changes the tenant — a
+  identity holds no Microsoft Graph permission (*changed 2026-11-17, 3.1.42: until 3.1.41 it held a read-only
+  set*); its pickers read what the engine stored. Everything that changes the tenant — a
   revoke, a Temporary Access Pass re-issue, a sign-in session revoke, a configuration commit —
   is queued and carried out by the engine, which holds the write permissions. A compromised
   browser session or web process therefore cannot write to Entra directly.
@@ -140,8 +141,8 @@ deployment is a supported choice) and no credentials lying around.
   installation records the senior administrators you name in the Manager's access list in the
   database, so a freshly built environment is never one nobody is allowed to manage.
 - **Permissions granted for you.** Setup assigns the engine's identity the exact directory
-  permissions it needs, and the Manager's identity a separate read-only set, so both work on
-  first run instead of failing on access — and a re-run cannot quietly widen the Manager. A
+  permissions it needs, and gives the Manager's identity no Graph permission at all (*changed 2026-11-17, 3.1.42*),
+  so the engine works on first run instead of failing on access — and a re-run cannot quietly widen the Manager. A
   refused grant stops the installation and names the permission, instead of producing a
   deployment that looks healthy and cannot work.
 - **Notification mail is set up with the narrowest send right.** ✅ 2026-09-13 The installation
@@ -205,9 +206,10 @@ deployment is a supported choice) and no credentials lying around.
   read the Community channel and verified the signed release with the built-in key.
 - **Give your Invardia support access, and take it back.** ✅ 2026-10-04 — One command gives your Invardia Support
   app its own read-only user in the PIM database. At the troubleshoot level that is all; at the setup level (it may
-  repair and upgrade), database administration exists only inside an open support session, for at most 8 hours
-  (*changed 2026-11-05, 3.0.40: the app is never a standing member of the database admin group, nor an owner of
-  PIM's own app registrations or groups*). The same command with a remove switch takes everything back. Nothing is granted twice, and every change is read back.
+  repair and upgrade), more than read access exists only inside an open support session: time-limited access in the
+  PIM database itself, for at most 8 hours, that ends by itself. The app is never made a member of the database admin
+  group (*changed 2026-11-17, 3.1.42: until 3.1.41 it was a time-limited member of that group during a session*), and
+  never an owner of PIM's own app registrations or groups (*changed 2026-11-05, 3.0.40*). The same command with a remove switch takes everything back. Nothing is granted twice, and every change is read back.
 - **Your as-built document reaches support directly, also from a private installation.** ✅ 2026-11-05 — When support
   asks for the as-built document, the installation creates it and sends it straight to Invardia. It counts as delivered
   only when Invardia's answer matches the document's size and SHA-256 checksum. Your storage stays closed to the
@@ -1424,6 +1426,13 @@ deployment is a supported choice) and no credentials lying around.
   sits behind the panel. The list inside the panel scrolls inside the panel, and its buttons (Select all, Clear,
   Revoke) stay visible. On Delegation overview the panel can be **collapsed to one line** and expanded again; the
   page remembers it while the browser stays open. **Back to overview** is a clear button on both pages.
+- **Get Started covers Azure and the workloads, and says who needs what.** ✅ 2026-11-10 (3.0.82) — Get Started has
+  two optional steps. **Azure resources** shows each Azure scope PIM Manager manages and, for a scope where the engine
+  identity lacks User Access Administrator (or Owner), the exact command that grants it. **Workloads** shows Defender
+  XDR, Intune and Power BI: what is missing, with **Confirm** or **Not used** per workload. Both steps use the same
+  checks as Discovery & gaps > Workload prerequisites, stay grey while nothing needs them and turn amber only for
+  something in use that is not ready. The **Engine permissions** step opens with a **Who needs what** table: each
+  identity by name and object id, with its rights.
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -1779,10 +1788,13 @@ deployment is a supported choice) and no credentials lying around.
   what PIM Manager manages — its own groups and administrators: gaps, groups named like yours that nothing defines any
   more, and wrong permissions. Access granted outside PIM Manager is shown on **Review all delegations** instead, and
   ordinary groups are never reported.
-- **Defender XDR custom roles, managed end to end.** ✅ 2026-09-19 PIM creates each Defender custom role with
-  the permissions and data sources you specify, keeps it that way, and flags a role whose live permissions
-  drifted. The Defender template covers Security operations, Security posture, Authorization & settings and
-  Data operations.
+- **Defender XDR roles stay yours; PIM Manager only adds the group.** ✅ 2026-11-13 (3.1.22) PIM Manager never
+  creates, changes or deletes a Defender XDR role. You create the role in the Defender portal, named like the group;
+  PIM Manager adds the group to that existing role only when the role grants no more than its definition says. A role
+  that is missing or grants more is reported, and the assignment waits. Differences in data sources are reported and
+  never fail the run. The Defender template covers Security operations, Security posture, Authorization & settings and
+  Data operations. (*changed 2026-11-13, 3.1.22: from 2026-09-19 until 3.1.21, PIM Manager created each Defender
+  custom role itself.*)
 - **Workload prerequisites, checked and shown.** ✅ 2026-09-19 One script per workload checks what that
   workload needs (permissions, activation, tenant settings), fixes what can be fixed automatically, and tells you
   exactly what to do by hand. The Manager shows a green, amber or red status with the command to run. For Defender
@@ -1925,16 +1937,23 @@ deployment is a supported choice) and no credentials lying around.
   guards, job history and more. It also does routine work: deciding and ending access requests, approvals,
   access-review decisions, owner reviews, auto-extend, running and cancelling jobs, and staging and committing your own
   changes. Every tool runs the page's own code under the signed-in person's own role. Emergency access, break-glass,
-  revocations, deletions and settings changes stay in the Manager.
-- **Chat in the Manager (Pro).** 🟡 built for 3.1.26 — An **Ask** button in the Manager opens a chat: ask in plain words
+  revocations, deletions and settings changes stay in the Manager. (*changed 2026-11-16, 3.1.33: the assistant
+  connection is closed on every installation and answers "not found" until it is opened for your installation through
+  Invardia support; then a SuperAdmin switches it on under Settings > Features.*)
+- **The API for scripts and services is closed until it is opened.** ✅ 2026-11-16 (3.1.32) — The application API that
+  scripts and services use is closed on every installation and answers "not found" until it is opened for your
+  installation through Invardia support. The Manager's own pages, sign-in and the person's own assistant are not
+  affected.
+- **Chat in the Manager (Pro).** ✅ 2026-11-15 (3.1.26) — An **Ask** button in the Manager opens a chat: ask in plain words
   ("who can activate Global Administrator?", "which jobs failed today?") or have a change prepared. The answers come from
   your own Azure OpenAI deployment, and the chat works only through the assistant (MCP) tools your own role allows, so it
   reads only what you can read. It looks things up and **prepares** changes as pending changes; saving, approving,
   emergency access, revocations and deletions are never done from the chat -- you save a prepared change in the page.
   PIM Manager signs in to Azure OpenAI with its own managed identity: there is no key to enter or store, and only an Azure
   OpenAI address is accepted. Every action the chat runs is in the audit trail; the conversation itself stays in your
-  browser tab. Off by default; a SuperAdmin sets it up under **Settings › Features & edition › AI chat**, and **Check**
-  proves the sign-in and one test answer.
+  browser tab. Off by default; it needs the AI assistant connection opened and switched on (the chat uses its tools),
+  and then a SuperAdmin sets it up under **Settings › Features & edition › AI chat**, and **Check** proves the sign-in
+  and one test answer.
 
 ## 12. Notifications / Email
 - **Run PIM Manager without mail, on purpose.** ✅ 2026-11-17 (built, not released) — Settings > Mail & alerting (and Get Started > Mail sender) offers **Not set up (on purpose)**. PIM Manager then sends no mail (TAP codes, approvals and alerts are not sent) and says so once a day in its log. The Mail sender step counts as done, and nothing reports mail as a problem: no reminder, no warning, no support case. Choose a shared mailbox or an SMTP relay at any time to start sending.
@@ -2407,7 +2426,7 @@ licence state.
 **Free — the community edition, for a single tenant.** The full portal; eligible, time-boxed access with approval
 and a complete audit trail; a second approver for sensitive changes and the evidence export (*changed 2026-11-04,
 3.0.29: core security is the same in both editions*); Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
-Defender XDR role delegation, including Defender custom roles; delegation by group; policy templates (a Standard and
+Defender XDR role delegation (PIM Manager adds your groups to Defender roles you keep; it never creates, changes or deletes a Defender role); delegation by group; access packages; existing office accounts as administrators; policy templates (a Standard and
 a RequireApproval template per kind, renameable, with a default per kind); drift detection; reports (standing and expiring access)
 and the current delegations list; administrator accounts and first-time access passes; permission templates imported in the portal or by script and tenant
 preparation from one configuration file; nightly self-updating to signed releases from Invardia's Community channel; and community support.
@@ -2417,7 +2436,8 @@ Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Pow
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
 enforced); delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report;
 the management report (a PowerPoint for management); the access request API for ticketing systems; the AI assistant
-(MCP), API applications and the API and MCP reference; and PIM for on-premises Active Directory.
+connection and API applications (both closed on every installation until opened through Invardia support) and the API
+and assistant reference; the chat in the Manager (off by default); and PIM for on-premises Active Directory.
 
 **Pro — the multi-tenant half.** Define once and target tenants by tag and by rollout wave; signed definition sets
 verified on arrival; a clear view of what reaches each tenant and what is held back; per-customer rules; a read-only
@@ -2473,9 +2493,16 @@ Everything an organisation needs to govern its own tenant:
 - a **second approver** for sensitive changes (separation of duties);
 - the **evidence export** — who may hold what, who held it, and who approved;
 - **Entra ID roles, PIM for Groups, administrative units and Azure RBAC**;
-- **Intune and Defender XDR** role delegation, including Defender custom roles;
+- **Intune and Defender XDR** role delegation — PIM Manager adds your groups to Defender roles you create and keep; it
+  never creates, changes or deletes a Defender role, and reports a role that is missing or grants more than defined;
 - **delegation by group** — permission groups and tiering, so access is granted by
   membership rather than by hand;
+- **access packages** — a Microsoft Entra access package decides who joins a delegation group, and PIM Manager decides
+  how it is activated; each package gets new groups of its own (names ending in -AP), existing groups are never used
+  or renamed, and nothing happens until you define a package (the tenant needs a Microsoft Entra ID Governance
+  licence);
+- **existing accounts as administrators** — an administrator of the type "Existing account (office user)" gets
+  delegations only: PIM Manager never creates, changes, disables or deletes that account;
 - **policy templates** — a Standard and a RequireApproval template per kind, renameable, with a default per kind;
 - **drift detection** — what exists in the directory versus what your model says;
 - **reports**, including standing access and expiring access, and the **current delegations** list;
@@ -2502,11 +2529,15 @@ On top of the free edition, a Pro licence adds:
   report is off until you switch it on);
 - the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
   time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
-- the **AI assistant (MCP)** — an assistant reads every view of the portal and does routine work under the person's own role;
-- the **chat in the Manager** — ask questions and have changes prepared, answered by your own Azure OpenAI deployment under
-  the person's own role;
+- the **AI assistant connection** — an AI assistant reads every view of the portal and does routine work under the
+  person's own role; closed on every installation (it answers "not found") until it is opened for your installation
+  through Invardia support, and then a SuperAdmin switches it on under **Settings > Features**;
+- the **chat in the Manager** — ask questions in plain words and have changes prepared, answered by your own Azure
+  OpenAI deployment without a key, under the person's own role; a change is only prepared, and a person saves it. Off
+  by default: it needs the AI assistant connection opened and switched on, and then its own switch;
 - **API applications** — scripts and services use the PIM Manager API with their own application, as Reader or Admin: they
-  manage settings with code, and propose changes to admins and their roles that a person approves;
+  manage settings with code, and propose changes to admins and their roles that a person approves; closed on every
+  installation (it answers "not found") until it is opened for your installation through Invardia support;
 - the **API and MCP reference** in the portal — every route and assistant tool of the version you run, for your role;
 - **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
   just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
@@ -2664,7 +2695,7 @@ command. What you end up with:
 | Component | What it is | Why it is cheap |
 |---|---|---|
 | **PIM Manager** | an Azure Container App behind Microsoft Entra sign-in | scales to **zero** when nobody is using it |
-| **Engine** | one scheduled Container Apps job (every 5 minutes) | runs for seconds, then stops |
+| **Engine** | one scheduled Container Apps job (every 5 minutes); a commit or **Run now** wakes it through the wake queue, usually within a minute (PIM Manager itself holds no right on any job) | runs for seconds, then stops |
 | **Database** | Azure SQL (S0), passwordless (managed identities only) | the one always-on part |
 | **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from the downloaded release |
 
@@ -2694,7 +2725,11 @@ Invoke-WebRequest https://github.com/KnudsenMorten/PIM4EntraPS/releases/latest/d
 
 The installer checks that it is the file published with its release, downloads the release into a new, empty folder,
 checks the download against the release (a difference stops it and nothing is installed), and runs the guided
-installation from that folder. It creates everything in your subscription, including the updater job that keeps the
+installation from that folder. Every other answer has a default. A Community installation asks one question:
+"Connect this install to Invardia: health reports + updates on request". No answer means no: the installation then
+sends nothing that identifies your tenant and still updates itself each night from the signed Community channel. A
+scripted install answers with `-ConnectToInvardia` or `-NoConnectToInvardia`, and you can change the choice later
+under **Settings > Licence**. A Pro installation is always connected. It creates everything in your subscription, including the updater job that keeps the
 installation up to date (see *Keeping it up to date*). If it stops, run the same second line with `-Resume`: finished
 steps are skipped.
 

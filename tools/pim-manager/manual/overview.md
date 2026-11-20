@@ -11,7 +11,7 @@ the product keeps working without any connection to Invardia.
 
 | Part | What it is | What it does |
 |---|---|---|
-| Portal (PIM Manager) | A Container App behind a sign-in front | Where administrators look, stage changes, approve and commit. It reads your tenant; it never writes to it. |
+| Portal (PIM Manager) | A Container App behind Microsoft's built-in sign-in for Azure Container Apps | Where administrators look, stage changes, approve and commit. It shows what the engine read from your tenant; it holds no Microsoft Graph permission and never writes to the tenant. |
 | Engine | A Container Apps job on a schedule | Reads the desired state from the database and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR. |
 | Updater | A Container Apps job, daily by default | Builds the new version from source inside your own registry, applies the database schema and rolls the portal and jobs. |
 | Database | Azure SQL, Entra sign-in only | The desired state, settings, the audit log and the commit journal. |
@@ -25,7 +25,9 @@ the product keeps working without any connection to Invardia.
 2. When the change is sensitive, a second person approves it.
 3. The administrator commits. The commit is written to the database together with its journal row (who, what, before
    and after) in one transaction.
-4. The portal starts the engine job. It has the right to start that one job and nothing else.
+4. The portal puts one wake message on the wake queue; it holds no right on any job. The wake job starts one engine
+   run, usually within a minute. If the wake queue cannot be used, the next scheduled run, within about five minutes,
+   picks the change up.
 5. The engine signs in with its own managed identity, checks every guard (see [Guards and Strict mode](guards)) and
    applies the change through the Microsoft APIs.
 6. The outcome is written back: the applied state per row, the audit event, and a mail when something needs attention.

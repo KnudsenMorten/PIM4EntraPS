@@ -34,6 +34,10 @@
                same verdict function decides both.
     An unknown value is OBSERVE (reported, never refused): a typo must neither switch protection off silently nor start
     refusing changes nobody chose to refuse.
+  * DERIVED CHANGES (SIGNED-REQ-DERIVED-1): a change no commit names itself but that a provider derives from stored rows
+    (pimDerivedFrom on the desired item) is judged by the signed state of EVERY row it comes from -- that row's latest
+    commit verifies AND the row still hashes as that commit wrote it, or the adoption covers the row. See the block above
+    Test-PimEngineSignedRequest.
   * ADOPTION OF EXISTING DESIRED STATE: one SuperAdmin-signed adoption record (Role 'adoption') carries a manifest of every
     stored row's SHA-256 (computed in SQL, HASHBYTES over pim.Rows.DataJson) at the moment of adoption. A change whose row
     still hashes exactly as adopted (or a removal of a row already gone when adopted, by a commit made before it) is
@@ -743,9 +747,9 @@ function Initialize-PimSignedRequestRun {
     $cfg = Get-PimSignedRequestConfig -Value (Get-PimSignedRequestSettingValue -ConnectionString $cs) -ExtraAudiences $extra
     $st = @{ run = $corr; mode = $cfg.mode; unknown = $cfg.unknown; raw = $cfg.raw; audiences = @($cfg.audiences); issuers = @(); jwks = $null; keysError = ''
              roleMap = @{}; sigs = @{}; verdicts = @{}; tokenChecks = @{}; adoption = $null; adoptionNote = ''; rowHashes = $null
-             counts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0 }; reasons = @{}
-             runCounts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0; remembered = 0 }; lines = (New-Object System.Collections.Generic.List[string])
-             judged = $null; judgedDirty = $false }
+             counts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0; derived = 0 }; reasons = @{}
+             runCounts = @{ checked = 0; verified = 0; wouldRefuse = 0; refused = 0; adopted = 0; remembered = 0; derived = 0 }; lines = (New-Object System.Collections.Generic.List[string])
+             judged = $null; judgedDirty = $false; originJournal = @{}; rowHashesFailed = $false }
     $global:PIM_SignedRequestRun = $st
     if ($st.mode -eq 'off') { return $st }
     if ($st.unknown) { $st.lines.Add("signed requests: the mode '$($cfg.raw)' is not off / observe / enforce -- treated as OBSERVE (nothing is refused)") }
@@ -867,11 +871,164 @@ function Save-PimSignedRequestJudged {
     } catch { Write-Warning "[signed-requests] the judged outcomes were not saved (they are judged again next run): $($_.Exception.Message)"; return $false }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# SIGNED-REQ-DERIVED-1 (found at internal 2026-11-15, observe mode): a change the engine DERIVES from a definition row (a
+# group joining the administrative unit its definition names, an owner its definition lists) is keyed by what it reads live
+# (auId|groupId, GroupName|OwnerId) -- no commit names that key, so every such change read "no commit names this change"
+# and ENFORCE would have refused legitimate work. The provider now carries the stored row(s) the change comes from on the
+# desired item (pimDerivedFrom = @(@{ entity; key }), New-PimEngineDerivedOrigin), and a change no commit names directly is
+# judged by the SIGNED STATE OF EVERY ROW IT COMES FROM:
+#   * the row's latest journal row written by a PIM commit (any age, not the 30-day attribution window) names the commit;
+#     that commit must verify exactly as a direct one does (Get-PimSignedRequestCommitVerdict -- requester + approver);
+#   * the row must still hold EXACTLY what that commit wrote: SHA-256 of the journal's AfterJson = SHA-256 of pim.Rows
+#     DataJson now (the one hash definition, HASHBYTES in SQL). A row changed afterwards -- a direct SQL write, a 'system'
+#     write nobody signed -- is refused ("the row changed after its signed commit");
+#   * else the verified adoption covers the row when it hashes exactly as adopted;
+#   * else refused. EVERY origin must pass (fail closed). A change with no origin and no commit stays refused as before.
+# A change some commit names DIRECTLY keeps today's verdict unchanged (derived judging is only the no-commit case).
+# Observe logs each derived change that VERIFIES too ("verified through the row it comes from"), so the linkage can be
+# proven at an install before anyone switches enforce on.
+# ---------------------------------------------------------------------------------------------------------------------
+
+function Get-PimSignedRequestOriginJournalSql {
+    # The latest journal row a PIM COMMIT (Source not '' / 'system', Test-PimCommitJournalIsPimCommit) wrote per origin row,
+    # with the hash of the row it wrote -- the same HASHBYTES definition as Get-PimSignedRequestRowHashSql.
+    return @"
+IF OBJECT_ID('pim.CommitJournal') IS NOT NULL
+SELECT j.Entity, j.[Key], j.Id, j.CommitId, j.CommittedUtc, j.Op, j.InitiatedBy, j.ApprovedBy, j.Source,
+       CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', ISNULL(j.AfterJson, N'')), 2) AS H
+FROM OPENJSON(@j) WITH (e NVARCHAR(100) '$.e', k NVARCHAR(400) '$.k') w
+CROSS APPLY (SELECT TOP 1 c.Entity, c.[Key], c.Id, c.CommitId, c.CommittedUtc, c.Op, c.InitiatedBy, c.ApprovedBy, c.Source, c.AfterJson
+             FROM pim.CommitJournal c
+             WHERE c.Entity = w.e AND c.[Key] = w.k AND LOWER(LTRIM(RTRIM(ISNULL(c.Source, N'')))) NOT IN (N'', N'system')
+             ORDER BY c.Id DESC) j
+"@
+}
+
+function Get-PimSignedRequestOriginJournal {
+    <#
+      The latest PIM-commit journal row of each origin row: -Refs @(@{ entity; key }) -> 'entity|key' (lower) -> { Id;
+      CommitId; CommittedUtc; Op; InitiatedBy; ApprovedBy; Source; H }. Read once per key per run (-State .originJournal).
+      Test seam: $global:PIM_SignedRequestOriginJournalSeam (the same map). THROWS on a read failure (the caller's verdict is
+      then "the check could not run" -- never a pass).
+    #>
+    param([object[]]$Refs = @(), [hashtable]$State = $null)
+    $cache = $null
+    if ($State) { if (-not ($State.originJournal -is [hashtable])) { $State.originJournal = @{} }; $cache = $State.originJournal }
+    $want = [ordered]@{}
+    foreach ($r in @($Refs)) {
+        if ($null -eq $r) { continue }
+        $k = ConvertTo-PimSignedRequestRowRef -Entity "$($r.entity)" -Key "$($r.key)"
+        if ($cache -and $cache.ContainsKey($k)) { continue }
+        $want[$k] = [ordered]@{ e = "$($r.entity)".Trim(); k = "$($r.key)".Trim() }
+    }
+    $got = @{}
+    if ($want.Count) {
+        if ($global:PIM_SignedRequestOriginJournalSeam -is [hashtable]) {
+            foreach ($k in @($want.Keys)) { if ($global:PIM_SignedRequestOriginJournalSeam.ContainsKey($k)) { $got[$k] = $global:PIM_SignedRequestOriginJournalSeam[$k] } }
+        } elseif ($global:PIM_SignedRequestOriginJournalSeam -is [scriptblock]) {
+            $sm = & $global:PIM_SignedRequestOriginJournalSeam @($want.Keys)
+            if ($sm -is [hashtable]) { foreach ($k in @($want.Keys)) { if ($sm.ContainsKey($k)) { $got[$k] = $sm[$k] } } }
+        } else {
+            $cs = Get-PimSignedRequestStoreCs
+            if (-not "$cs".Trim()) { throw 'no SQL store to read the change journal from' }
+            $json = ConvertTo-Json -InputObject @($want.Values) -Compress -Depth 3
+            foreach ($row in @(Invoke-PimSqlQuery -ConnectionString $cs -Parameters @{ j = $json } -Sql (Get-PimSignedRequestOriginJournalSql))) {
+                $got[(ConvertTo-PimSignedRequestRowRef -Entity "$($row.Entity)" -Key "$($row.Key)")] = $row
+            }
+        }
+        if ($cache) { foreach ($k in @($want.Keys)) { $cache[$k] = $(if ($got.ContainsKey($k)) { $got[$k] } else { $null }) } }
+    }
+    $out = @{}
+    foreach ($r in @($Refs)) {
+        if ($null -eq $r) { continue }
+        $k = ConvertTo-PimSignedRequestRowRef -Entity "$($r.entity)" -Key "$($r.key)"
+        $v = if ($cache) { $cache[$k] } elseif ($got.ContainsKey($k)) { $got[$k] } else { $null }
+        if ($null -ne $v) { $out[$k] = $v }
+    }
+    return $out
+}
+
+function Get-PimSignedRequestDerivedOrigins {
+    <# PURE. The usable origins of a derived change: @(@{ entity; key }) with both set, de-duplicated (lower). #>
+    param([object[]]$Origins = @())
+    $seen = @{}; $out = New-Object System.Collections.Generic.List[object]
+    foreach ($o in @($Origins)) {
+        if ($null -eq $o) { continue }
+        $e = if ($o -is [System.Collections.IDictionary]) { "$($o['entity'])" } else { "$($o.entity)" }
+        $k = if ($o -is [System.Collections.IDictionary]) { "$($o['key'])" } else { "$($o.key)" }
+        if (-not $e.Trim() -or -not $k.Trim()) { continue }
+        $rk = ConvertTo-PimSignedRequestRowRef -Entity $e -Key $k
+        if ($seen.ContainsKey($rk)) { continue }
+        $seen[$rk] = $true
+        $out.Add(@{ entity = $e.Trim(); key = $k.Trim() })
+    }
+    return @($out.ToArray())
+}
+
+function Test-PimSignedRequestOrigin {
+    <#
+      PURE given the inputs. One origin row of a derived change. -Ref @{ entity; key }; -Journal: its latest PIM-commit journal
+      row (or $null); -RowHashes: the current row hashes; -CommitVerdict: Get-PimSignedRequestCommitVerdict's answer for that
+      journal row's commit (ConvertTo-PimSignedRequestOriginCommit; $null when there is no journal row); -Adoption: the
+      verified adoption (or $null).
+      Returns @{ ok; via ('signed commit' | 'adoption' | ''); reason; commitId; ref }.
+    #>
+    param([Parameter(Mandatory)][object]$Ref, [AllowNull()][object]$Journal, [hashtable]$RowHashes = @{}, [AllowNull()][object]$CommitVerdict = $null, [AllowNull()][object]$Adoption = $null)
+    $rk = ConvertTo-PimSignedRequestRowRef -Entity "$($Ref.entity)" -Key "$($Ref.key)"
+    $label = "$($Ref.entity)|$($Ref.key)"
+    $cur = if ($RowHashes.ContainsKey($rk)) { "$($RowHashes[$rk])" } else { '' }
+    if (-not $cur) { return @{ ok = $false; via = ''; reason = "the row it comes from ($label) is not in the store"; commitId = ''; ref = $label } }
+    $cid = ''; $why = ''
+    if ($null -ne $Journal -and "$($Journal.CommitId)".Trim()) {
+        $cid = "$($Journal.CommitId)".Trim()
+        $cv = $CommitVerdict
+        if ($null -eq $cv) { $cv = @{ ok = $false; reason = 'the commit was not checked'; signedBy = @() } }
+        if ($cv.ok) {
+            if ("$($Journal.H)".Trim() -and "$($Journal.H)".Trim().ToUpperInvariant() -eq $cur.Trim().ToUpperInvariant()) {
+                return @{ ok = $true; via = 'signed commit'; reason = "$label signed by $(@($cv.signedBy) -join ', ') (commit $cid)"; commitId = $cid; ref = $label }
+            }
+            $why = "the row changed after its signed commit $cid (it no longer holds what that commit wrote)"
+        } else { $why = "commit ${cid}: $($cv.reason)" }
+    } else { $why = 'no signed commit made this row' }
+    if ($null -ne $Adoption) {
+        $ad = Test-PimSignedRequestAdoptionCovers -Adoption $Adoption -Op 'Update' -Refs @(@{ entity = "$($Ref.entity)"; key = "$($Ref.key)" }) -RowHashes $RowHashes -Commit $null
+        if ($ad.ok) { return @{ ok = $true; via = 'adoption'; reason = "$label $($ad.reason) (adoption $($Adoption.commitId) by $($Adoption.by))"; commitId = $cid; ref = $label } }
+        $why = "$why; $($ad.reason)"
+    } else { $why = "$why; no verified adoption of the existing desired state" }
+    return @{ ok = $false; via = ''; reason = "$label -- $why"; commitId = $cid; ref = $label }
+}
+
+function ConvertTo-PimSignedRequestOriginCommit {
+    # PURE. An origin's journal row -> the commit shape Get-PimSignedRequestCommitVerdict reads. $null without a commit id.
+    param([AllowNull()][object]$Journal)
+    if ($null -eq $Journal -or -not "$($Journal.CommitId)".Trim()) { return $null }
+    $cu = $Journal.CommittedUtc; if ($cu -is [datetime]) { $cu = [datetime]::SpecifyKind($cu, [DateTimeKind]::Utc) }
+    return [pscustomobject]@{ CommitId = "$($Journal.CommitId)".Trim(); InitiatedBy = "$($Journal.InitiatedBy)"; ApprovedBy = "$($Journal.ApprovedBy)"; CommittedUtc = $cu; via = 'journal' }
+}
+
+function Get-PimSignedRequestDerivedJudgedKey {
+    <# PURE. The remembered-refusal key of a DERIVED change: every origin's latest commit journal row + current hash. '' when
+       an origin has no journal row (no commit made it: judged again next run, as a change no commit names). #>
+    param([object[]]$Origins = @(), [hashtable]$Journal = @{}, [hashtable]$RowHashes = @{}, [string]$Scope = '', [string]$Op = '', [string]$Key = '', [string]$Mode = '', [string]$AdoptionId = '')
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($o in @($Origins | Sort-Object { ConvertTo-PimSignedRequestRowRef -Entity "$($_.entity)" -Key "$($_.key)" })) {
+        $rk = ConvertTo-PimSignedRequestRowRef -Entity "$($o.entity)" -Key "$($o.key)"
+        $j = if ($Journal.ContainsKey($rk)) { $Journal[$rk] } else { $null }
+        if ($null -eq $j -or -not "$($j.Id)".Trim()) { return '' }
+        $parts.Add("$rk@$($j.Id)@$(if ($RowHashes.ContainsKey($rk)) { $RowHashes[$rk] })")
+    }
+    if (-not $parts.Count) { return '' }
+    return (@('derived', ($parts -join ','), "$Scope".Trim(), "$Op".Trim(), "$Key".Trim(), "$Mode".Trim(), "$AdoptionId".Trim()) -join '|').ToLowerInvariant()
+}
+
 function Test-PimEngineSignedRequest {
     <#
       THE ENGINE CHECK for one change, right before its handler acts. -Commit: Resolve-PimEngineChangeCommit's answer (or
       $null); -Refs: Get-PimEngineItemStoreRefs; -Scope / -Key: the change (the remembered-refusal key, SIGNED-REQ-STUCK-1).
-      Returns @{ mode; ok; refuse; reason; commitId; via; remembered; judgedUtc }:
+      -Origins (SIGNED-REQ-DERIVED-1): the stored rows a DERIVED change comes from (Get-PimEngineItemDerivedOrigins); used only
+      when no commit names the change directly and the op is not a Remove -- then EVERY origin must be signed (or adopted).
+      Returns @{ mode; ok; refuse; reason; commitId; via; remembered; judgedUtc; derivedFrom }:
         mode off              -> ok, nothing checked (and nothing counted);
         observe / unknown     -> ok = the verdict; refuse = $false ALWAYS (applied as today, reported when not ok);
         enforce               -> refuse = -not ok.
@@ -879,10 +1036,11 @@ function Test-PimEngineSignedRequest {
                                  read or checked again, the stored reason is returned.
       Never throws: a fault in the check itself is a verdict "the check could not run: ..." (refused only in enforce).
     #>
-    param([AllowNull()][object]$Commit, [object[]]$Refs = @(), [string]$Op = '', [hashtable]$State = $null, [string]$Scope = '', [string]$Key = '')
+    param([AllowNull()][object]$Commit, [object[]]$Refs = @(), [string]$Op = '', [hashtable]$State = $null, [string]$Scope = '', [string]$Key = '', [object[]]$Origins = @())
     if ($null -eq $State) { $State = Initialize-PimSignedRequestRun }
-    if ($State.mode -eq 'off') { return @{ mode = 'off'; ok = $true; refuse = $false; reason = ''; commitId = ''; via = ''; remembered = $false; judgedUtc = '' } }
+    if ($State.mode -eq 'off') { return @{ mode = 'off'; ok = $true; refuse = $false; reason = ''; commitId = ''; via = ''; remembered = $false; judgedUtc = ''; derivedFrom = @() } }
     $ok = $false; $reason = ''; $cid = ''; $via = ''
+    $derivedFrom = @()
     $jk = ''
     try {
         $jk = Get-PimSignedRequestJudgedKey -Commit $Commit -Scope $Scope -Op $Op -Key $Key -Mode "$($State.mode)" -AdoptionId $(if ($null -ne $State.adoption) { "$($State.adoption.commitId)" } else { '' })
@@ -890,7 +1048,7 @@ function Test-PimEngineSignedRequest {
             $jm = Get-PimSignedRequestJudged -State $State
             if ($jm.ContainsKey($jk)) {
                 return @{ mode = $State.mode; ok = $false; refuse = ($State.mode -eq 'enforce'); reason = "$($jm[$jk].reason)"; commitId = "$($Commit.CommitId)".Trim(); via = ''
-                          remembered = $true; judgedUtc = "$($jm[$jk].judgedUtc)" }
+                          remembered = $true; judgedUtc = "$($jm[$jk].judgedUtc)"; derivedFrom = @() }
             }
         }
     } catch { $jk = '' }
@@ -907,6 +1065,9 @@ function Test-PimEngineSignedRequest {
             # cannot see this file's functions when the scheduler dot-sources it at script scope; $State resolves up the call
             # stack (Get-PimSignedRequestCommitVerdict declares no $State of its own).
         $journal = ($Commit -and "$($Commit.CommitId)".Trim() -and "$($Commit.via)" -ne 'attribution')
+        # SIGNED-REQ-DERIVED-1: no commit names the change itself, but the provider says which stored rows it comes from
+        $orig = @()
+        if (-not $journal -and "$Op" -notmatch '^(?i)remove$') { $orig = @(Get-PimSignedRequestDerivedOrigins -Origins @($Origins)) }
         if ($journal) {
             $cid = "$($Commit.CommitId)".Trim()
             $vk = "{0}|{1}|{2}" -f $cid, "$($Commit.InitiatedBy)".ToLowerInvariant(), "$($Commit.ApprovedBy)".ToLowerInvariant()
@@ -914,13 +1075,44 @@ function Test-PimEngineSignedRequest {
             else { $cv = Get-PimSignedRequestCommitVerdict -Commit $Commit -Signatures @(Get-PimSignedRequestRunSignatures -State $State -CommitId $cid) -Verify $verify; $State.verdicts[$vk] = $cv }
             if ($cv.ok) { $ok = $true; $via = 'signed commit'; $reason = "signed by $(@($cv.signedBy) -join ', ')" }
             else { $reason = "$($cv.reason)" }
+        } elseif ($orig.Count) {
+            if ($State.rowHashesFailed) { throw "the stored rows' hashes could not be read this run" }
+            if ($null -eq $State.rowHashes) { $State.rowHashes = Get-PimSignedRequestRowHashes -ConnectionString (Get-PimSignedRequestStoreCs) }
+            $oj = Get-PimSignedRequestOriginJournal -Refs $orig -State $State
+            $djk = Get-PimSignedRequestDerivedJudgedKey -Origins $orig -Journal $oj -RowHashes $State.rowHashes -Scope $Scope -Op $Op -Key $Key -Mode "$($State.mode)" -AdoptionId $(if ($null -ne $State.adoption) { "$($State.adoption.commitId)" } else { '' })
+            if ($djk) {
+                $jk = $djk
+                $jm = Get-PimSignedRequestJudged -State $State
+                if ($jm.ContainsKey($djk)) {
+                    return @{ mode = $State.mode; ok = $false; refuse = ($State.mode -eq 'enforce'); reason = "$($jm[$djk].reason)"; commitId = ''; via = ''
+                              remembered = $true; judgedUtc = "$($jm[$djk].judgedUtc)"; derivedFrom = @() }
+                }
+            }
+            $res = New-Object System.Collections.Generic.List[object]
+            foreach ($o in $orig) {
+                $ork = ConvertTo-PimSignedRequestRowRef -Entity "$($o.entity)" -Key "$($o.key)"
+                $oRow = if ($oj.ContainsKey($ork)) { $oj[$ork] } else { $null }
+                $oc = ConvertTo-PimSignedRequestOriginCommit -Journal $oRow
+                $ocv = $null
+                if ($oc) {
+                    $vk = "{0}|{1}|{2}" -f $oc.CommitId, "$($oc.InitiatedBy)".ToLowerInvariant(), "$($oc.ApprovedBy)".ToLowerInvariant()
+                    if ($State.verdicts.ContainsKey($vk)) { $ocv = $State.verdicts[$vk] }
+                    else { $ocv = Get-PimSignedRequestCommitVerdict -Commit $oc -Signatures @(Get-PimSignedRequestRunSignatures -State $State -CommitId $oc.CommitId) -Verify $verify; $State.verdicts[$vk] = $ocv }
+                }
+                $res.Add((Test-PimSignedRequestOrigin -Ref $o -Journal $oRow -RowHashes $State.rowHashes -CommitVerdict $ocv -Adoption $State.adoption))
+            }
+            $derivedFrom = @($res.ToArray() | ForEach-Object { [ordered]@{ row = "$($_.ref)"; commitId = "$($_.commitId)"; ok = [bool]$_.ok; via = "$($_.via)" } })
+            $bad = @($res.ToArray() | Where-Object { -not $_.ok })
+            $cid = "$(@(@($bad) + @($res.ToArray()) | Where-Object { "$($_.commitId)" } | Select-Object -First 1 | ForEach-Object { $_.commitId }))"
+            if (-not $bad.Count) { $ok = $true; $via = 'derived'; $reason = 'derived from ' + (@($res.ToArray() | ForEach-Object { "$($_.reason)" }) -join '; ') }
+            else { $reason = 'derived from a row that is not signed: ' + (@($bad | ForEach-Object { "$($_.reason)" }) -join '; ') }
         } else { $reason = 'no commit names this change' }
-        if (-not $ok) {
+        if (-not $ok -and -not $orig.Count) {
             # the adoption of the existing desired state may cover it
             if ($null -ne $State.adoption) {
                 if ($null -eq $State.rowHashes) {
                     try { $State.rowHashes = Get-PimSignedRequestRowHashes -ConnectionString (Get-PimSignedRequestStoreCs) }
-                    catch { $State.rowHashes = @{}; $State.lines.Add("signed requests: the stored rows' hashes could not be read -- the adoption covers nothing this run: $($_.Exception.Message)") }
+                    catch { $State.rowHashes = @{}; $State.rowHashesFailed = $true; $State.lines.Add("signed requests: the stored rows' hashes could not be read -- the adoption covers nothing this run: $($_.Exception.Message)") }
                 }
                 $ad = Test-PimSignedRequestAdoptionCovers -Adoption $State.adoption -Op $Op -Refs @($Refs) -RowHashes $State.rowHashes -Commit $(if ($journal) { $Commit } else { $null })
                 if ($ad.ok) { $ok = $true; $via = 'adoption'; $reason = "$($ad.reason) (adoption $($State.adoption.commitId) by $($State.adoption.by))" }
@@ -936,13 +1128,17 @@ function Test-PimEngineSignedRequest {
             $State.judgedDirty = $true
         } catch { }
     }
-    return @{ mode = $State.mode; ok = $ok; refuse = ($State.mode -eq 'enforce' -and -not $ok); reason = $reason; commitId = $cid; via = $via; remembered = $false; judgedUtc = '' }
+    return @{ mode = $State.mode; ok = $ok; refuse = ($State.mode -eq 'enforce' -and -not $ok); reason = $reason; commitId = $cid; via = $via; remembered = $false; judgedUtc = ''; derivedFrom = @($derivedFrom) }
 }
 
 function Get-PimSignedRequestReasonClass {
     # PURE. A short class of a reason, for the counts (never the user names).
     param([string]$Reason)
     $r = "$Reason"
+    # SIGNED-REQ-DERIVED-1: the origin's own state first (these phrases are unique to a derived change)
+    if ($r -match 'the row changed after its signed commit') { return 'origin-changed' }
+    if ($r -match 'is not in the store') { return 'origin-missing' }
+    if ($r -match 'no signed commit made this row') { return 'origin-no-commit' }
     # "nothing captured for this person" first: its text may quote why ANOTHER person's token did not fit
     if ($r -match 'no signed token was captured') { return 'not-captured' }
     if ($r -match 'not \(any longer\) published') { return 'key-not-published' }
@@ -977,7 +1173,15 @@ function Add-PimSignedRequestObservation {
     # .counts = not yet saved (Save-PimSignedRequestStats empties it); .runCounts = this run, for its log line
     $bump = { param($n) foreach ($c in @($State.counts, $State.runCounts)) { if ($c -is [hashtable]) { $c[$n] = 1 + [int]$c[$n] } } }
     & $bump 'checked'
-    if ($Verdict.ok) { & $bump 'verified'; if ("$($Verdict.via)" -eq 'adoption') { & $bump 'adopted' }; return '' }
+    if ($Verdict.ok) {
+        & $bump 'verified'; if ("$($Verdict.via)" -eq 'adoption') { & $bump 'adopted' }
+        if ("$($Verdict.via)" -ne 'derived') { return '' }
+        # SIGNED-REQ-DERIVED-1: the linkage is LOGGED (observe and enforce) so it can be proven before enforce is switched on
+        & $bump 'derived'
+        $dl = ("signed request verified through the row it comes from: {0} {1} {2} -- {3}" -f $Scope, $Op, $Key, "$($Verdict.reason)")
+        if ($State.lines.Count -lt 200) { $State.lines.Add($dl) } elseif ($State.lines.Count -eq 200) { $State.lines.Add('signed requests: more changes did not verify -- see the counts') }
+        return $dl
+    }
     $cls = Get-PimSignedRequestReasonClass -Reason "$($Verdict.reason)"
     $State.reasons[$cls] = 1 + [int]$State.reasons[$cls]
     # the change's STATE in plain words (SIGNED-REQ-STUCK-1): applied or held, and that it is judged once per commit
@@ -995,8 +1199,9 @@ function Get-PimSignedRequestRunLogLines {
     if (-not ($st -is [hashtable]) -or "$($st.mode)" -eq 'off') { return @() }
     $c = $st.runCounts
     if ([int]$c.checked -eq 0 -and $st.lines.Count -eq 0) { return @() }
-    $out = @(("signed requests ({0}): {1} change(s) checked, {2} verified ({3} by the adoption), {4} would have been refused, {5} refused{6}" -f $st.mode, [int]$c.checked, [int]$c.verified, [int]$c.adopted, [int]$c.wouldRefuse, [int]$c.refused,
-                $(if ([int]$c.remembered -gt 0) { ", $([int]$c.remembered) judged on an earlier run (not checked again$(if ($st.mode -eq 'enforce') { '; still held' } else { '' }))" } else { '' })))
+    $out = @(("signed requests ({0}): {1} change(s) checked, {2} verified ({3} by the adoption), {4} would have been refused, {5} refused{6}{7}" -f $st.mode, [int]$c.checked, [int]$c.verified, [int]$c.adopted, [int]$c.wouldRefuse, [int]$c.refused,
+                $(if ([int]$c.remembered -gt 0) { ", $([int]$c.remembered) judged on an earlier run (not checked again$(if ($st.mode -eq 'enforce') { '; still held' } else { '' }))" } else { '' }),
+                $(if ([int]$c.derived -gt 0) { ", $([int]$c.derived) verified through the signed row it comes from" } else { '' })))
     $out += @($st.lines.ToArray())
     $st.lines.Clear()
     foreach ($k in @($c.Keys)) { $c[$k] = 0 }
@@ -1018,8 +1223,9 @@ function Merge-PimSignedRequestStats {
     $c = $State.counts
     return [ordered]@{
         mode = "$($State.mode)"; sinceUtc = $since; updatedUtc = $NowUtc.ToString('o')
-        lastRun = [ordered]@{ run = "$($State.run)"; checked = [int]$c.checked; verified = [int]$c.verified; adopted = [int]$c.adopted; wouldRefuse = [int]$c.wouldRefuse; refused = [int]$c.refused }
-        totals = [ordered]@{ checked = (& $num $pt 'checked') + [int]$c.checked; verified = (& $num $pt 'verified') + [int]$c.verified; wouldRefuse = (& $num $pt 'wouldRefuse') + [int]$c.wouldRefuse; refused = (& $num $pt 'refused') + [int]$c.refused }
+        lastRun = [ordered]@{ run = "$($State.run)"; checked = [int]$c.checked; verified = [int]$c.verified; adopted = [int]$c.adopted; wouldRefuse = [int]$c.wouldRefuse; refused = [int]$c.refused; derived = [int]$c.derived }
+        totals = [ordered]@{ checked = (& $num $pt 'checked') + [int]$c.checked; verified = (& $num $pt 'verified') + [int]$c.verified; wouldRefuse = (& $num $pt 'wouldRefuse') + [int]$c.wouldRefuse; refused = (& $num $pt 'refused') + [int]$c.refused
+                             derived = (& $num $pt 'derived') + [int]$c.derived }
         reasons = $reasons
     }
 }

@@ -1,5 +1,19 @@
 # What's new in PIM Manager
 
+## 3.1.53 · 2026-11-20 · Feature update
+
+New SuperAdmins can sign in at once, and one unreadable Azure subscription no longer hides the others.
+
+### New features
+
+- **New SuperAdmins can sign in at once** - A person you make SuperAdmin under Settings > Manager access & roles now gets access to the PIM Manager sign-in automatically. If PIM Manager may not do this, the page names the one step to take.
+
+### Fixes
+
+- **Azure subscriptions read one by one** - If PIM Manager cannot read one Azure subscription, that subscription is shown as not read, and every other subscription is shown as normal. Nothing in the unread subscription is reported as removed.
+- **Clearer names and labels** - The engine's app registration gets the product name on a new install, and administrative units are named as such in error messages.
+- **Documentation brought up to date** - The help pages in PIM Manager, the feature list and earlier What's new entries now match what PIM Manager does today.
+
 ## 3.1.52 · 2026-11-19 · Security
 
 A security update: only PIM Manager's engine is set up to send mail.
@@ -38,7 +52,7 @@ None in this version.
 
 ## 3.1.49 · 2026-11-17 · Security
 
-The removal of old support database rights no longer waits for the nightly update.
+An old support access right is removed sooner, without waiting for the nightly update.
 
 ### New features
 
@@ -46,7 +60,7 @@ None in this version.
 
 ### Fixes
 
-- **Old support rights removed sooner** - While the removal of old standing support database rights is pending and no support session is open, the 15-minute update check now runs it, at most once an hour.
+- **Old support access removed sooner** - An old support access right from an earlier version is now removed within the hour, instead of at the nightly update.
 
 ## 3.1.48 · 2026-11-17 · Fix-only
 
@@ -72,17 +86,17 @@ None in this version.
 
 - **Update retries a short network hiccup** - When an update cannot reach a container registry for a moment, it tries again at once and on the next runs. Only a third failure is reported as a failed update.
 
-## 3.1.46 · 2026-11-17 · Fix-only
+## 3.1.46 · 2026-11-17 · Feature update
 
 An installation can run without mail on purpose, and it is then reported as not set up instead of not working.
 
 ### New features
 
-None in this version.
+- **Run without mail on purpose** - Choose Not set up (on purpose) under Mail. The mail check then shows a neutral line, Get Started counts the step as done, and no support ticket is raised.
 
 ### Fixes
 
-- **Mail not set up on purpose** - Choose Not set up (on purpose) under Mail. The mail check then shows a neutral line, Get Started counts the step as done, and no support ticket is raised.
+None in this version.
 
 ## 3.1.45 · 2026-11-17 · Security
 
@@ -179,7 +193,7 @@ The Access page shows what a change gives before you make it, who has a permissi
 
 - **See the impact before you give** - Each give says how many permissions it reaches and how many are Tier 0. A give that reaches Tier 0 or many permissions asks first.
 - **Who has this** - Click a group or permission to see everyone who has it and how, with a remove per person and a CSV export.
-- **Matrix, make like and compare** - A people-by-groups grid with tick boxes, Make like to copy one admin's access to another, and Compare to see two admins side by side. Every change still goes through Pending changes.
+- **Matrix, make like and compare** - Matrix shows people and their direct groups as a grid: select a box to give, clear it to remove. Make like copies one admin's access to another; Compare shows two admins. Every change still goes through Pending changes.
 
 ### Fixes
 
@@ -238,7 +252,7 @@ None in this version.
 
 ## 3.1.33 · 2026-11-16 · Security
 
-The assistant connection (MCP) is closed by default, and an update no longer reports a short-lived helper job as not updated.
+The connection for AI assistants is closed by default, and an update no longer reports a short-lived helper job as not updated.
 
 ### New features
 
@@ -246,7 +260,7 @@ None in this version.
 
 ### Fixes
 
-- **Assistant connection closed by default** - The MCP connection for AI assistants is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages and sign-in are not affected.
+- **Assistant connection closed by default** - The connection that lets AI assistants work with PIM Manager is switched off on every installation. Only a deliberate setting on your installation opens it again. The PIM Manager pages and sign-in are not affected.
 - **Update report without a false alarm** - An update no longer reports a short-lived helper job, which the same update creates and removes, as still on the previous version.
 
 ## 3.1.32 · 2026-11-16 · Security
@@ -336,7 +350,7 @@ None in this version.
 
 ## 3.1.26 · 2026-11-15 · Security
 
-Security release: Microsoft's own sign-in and token checks protect PIM Manager, the request API uses Entra tokens only, and Pro adds a chat in the Manager.
+Stronger sign-in protection, simpler and safer access for ticketing systems, faster changes after Commit, and for Pro a chat in the Manager.
 
 ### New features
 
@@ -344,11 +358,11 @@ Security release: Microsoft's own sign-in and token checks protect PIM Manager, 
 
 ### Fixes
 
-- **Microsoft's token library** - Every sign-in token is checked with Microsoft's own library, which PIM Manager tests at every start before it serves a request.
+- **Sign-in checked by Microsoft's own code** - Every sign-in is checked with Microsoft's own sign-in checks, and PIM Manager makes sure they work each time it starts, before anyone can use it.
 - **Your sign-in stays fresh** - The page renews your sign-in before it ends, and offers Sign in again or Sign in with another account when needed.
-- **Entra tokens instead of API keys** - The access request API accepts only Microsoft Entra application tokens with an app role. Applications on your allow-list get the role automatically.
-- **Commit and Run now within a minute** - Commit and Run now wake the engine within about a minute, while the web app still holds no right on the engine's job.
-- **Smaller fixes** - The web app holds no Key Vault role (the break-glass passphrase is checked against a protected verifier in the PIM database), and discovery mails are marked as information, not warnings.
+- **No shared keys for ticketing systems** - Ticketing systems that switch admin accounts on for a time now sign in with their own Microsoft Entra identity. Shared keys are gone, and the systems you already approved keep working without a change.
+- **Commit and Run now within a minute** - After Commit or Run now, your change is applied within about a minute, and the Manager itself still cannot start or change the engine.
+- **Smaller fixes** - The Manager no longer needs access to the key store, the emergency passphrase is checked safely inside your own database, and discovery mails are marked as information, not warnings.
 
 ## 3.1.25 · 2026-11-14 · Security
 

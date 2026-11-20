@@ -90,6 +90,13 @@ function Get-PimQueueActionCatalog {
         @{ type='defender-role-create'
            description='Create ONE missing Defender XDR custom role with exactly the name and permissions PIM''s definition lists (a Support fix on a ticket; verified by reading the role back)'
            verifiable=$true }
+        # NEW-SUPERADMIN-SIGNIN product part (owner 2026-11-10): a person made SuperAdmin in PIM Manager is assigned to the Manager's own
+        # sign-in application (assignment required -- Entra refuses them otherwise). The web app holds no Graph right, so the
+        # ENGINE does it as its own identity (AppRoleAssignment.ReadWrite.All, an approved engine right). Adds ONE assignment
+        # for that person, reads it back; never removes or changes anyone else's (Invoke-PimQueueManagerSigninAssign).
+        @{ type='manager-signin-assign'
+           description='Assign ONE new SuperAdmin to the PIM Manager sign-in application (assignment required); verified by reading the assignment back; never removes anyone'
+           verifiable=$true }
     ) | ForEach-Object { [pscustomobject]$_ }
 }
 
@@ -133,6 +140,127 @@ function Invoke-PimQueueDefenderRoleCreate {
     $back = @(); for ($i = 0; $i -lt 4 -and -not $back.Count; $i++) { if ($i) { Start-Sleep -Seconds 3 }; try { $back = @(& $findByName) } catch { $back = @() } }
     if (-not $back.Count) { return [pscustomobject]@{ ok = $false; terminal = $true; verification = 'indeterminate'; detail = "defender-role-create: the role '$name' was sent$(if ($redirected) { ' (answered with a redirect)' }) but is not there on read-back -- not retried (ticket $ticket)" } }
     return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "the Defender XDR role '$name' was created by the engine with exactly [$($acts -join '; ')] (ticket $ticket; read back)" }
+}
+
+function Get-PimManagerSigninDeniedText {
+    <# PURE. NEW-SUPERADMIN-SIGNIN: the plain reason when the engine may not assign people to the sign-in application. #>
+    param([string]$Who = '', [string]$AppName = '')
+    $app = if ("$AppName".Trim()) { "'$AppName'" } else { 'the PIM Manager sign-in application' }
+    return ("PIM could not give {0} access to {1}: the engine identity is not allowed to assign people to enterprise applications " +
+            "(it needs the Microsoft Graph permission AppRoleAssignment.ReadWrite.All). Nothing was changed. Until that permission is " +
+            "granted, an administrator assigns them in Microsoft Entra admin center > Enterprise applications > {1} > Users and groups.") -f $(if ("$Who".Trim()) { $Who } else { 'the new SuperAdmin' }), $app
+}
+
+function Invoke-PimQueueManagerSigninAssign {
+    <#
+      NEW-SUPERADMIN-SIGNIN product part (owner 2026-11-10, "a new SuperAdmin is not assigned to the sign-in app"): the ENGINE half. A person made
+      SuperAdmin in PIM Manager (PUT /api/access-map queues one 'manager-signin-assign' per NEW SuperAdmin) is assigned to the
+      Manager's sign-in application (the enterprise application whose appId the web app signs people in with), with the default
+      access role -- the same assignment setup makes (Set-PimManagerEasyAuth) -- and READ BACK. The web identity holds no Graph
+      right; the engine does it as its own identity (AppRoleAssignment.ReadWrite.All).
+        already assigned directly, or through a group that is assigned -> ok, nothing written
+        the application does not require assignment                   -> ok, nothing written (every user may sign in)
+        the engine may not read / assign (403)                        -> terminal, the plain reason (Get-PimManagerSigninDeniedText)
+        the person / the application is not found                     -> terminal, said plainly, nothing written
+      🔒 Only ever ADDS this one person's assignment: never a DELETE, never another principal, never an app role change.
+      -Graph: test seam param($Method, $Path, $Body, $All) (the queue's GraphInvoker shape). -ReadBackDelaySec: test seam.
+      Returns the queue's @{ ok; terminal; verification; detail }.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [scriptblock]$Graph, [int]$ReadBackDelaySec = 3,
+          # 🔒 the TRUST ANCHOR (review 2026-11-20): the queued request is NOT believed. The engine re-reads the stored Manager
+          # access map itself and acts only for a person who IS a SuperAdmin there now (by the bound object id when the entry
+          # has one). -AccessMap: test seam / the map as read; $null = read it from the store (-ConnectionString).
+          [AllowNull()][object]$AccessMap = $null, [string]$ConnectionString = '')
+    $g = { param($n) if ($Payload -is [System.Collections.IDictionary]) { $Payload[$n] } elseif ($Payload.PSObject.Properties[$n]) { $Payload.$n } else { $null } }
+    $who = "$(& $g 'identity')".Trim(); $oid = "$(& $g 'objectId')".Trim(); $appId = "$(& $g 'appId')".Trim().ToLowerInvariant()
+    $guidRx = '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$'
+    $no = { param($why, $v) [pscustomobject]@{ ok = $false; terminal = $true; verification = $(if ($v) { $v } else { 'none' }); detail = "manager-signin-assign NOT done -- $why" } }
+    if (-not $who -and -not $oid) { return (& $no 'the request names no person' $null) }
+    if ($appId -notmatch $guidRx) { return (& $no 'the request names no sign-in application (this install has no built-in sign-in application id)' $null) }
+    if ($oid -and $oid -notmatch $guidRx) { $oid = '' }
+    # 0. the person must be a SuperAdmin in the STORED access map now -- never on the request's word
+    $map = $AccessMap
+    if ($null -eq $map) {
+        try {
+            $cs = "$ConnectionString".Trim()
+            if (-not $cs -and (Get-Command Resolve-PimBreakGlassStore -ErrorAction SilentlyContinue)) { $cs = "$((Resolve-PimBreakGlassStore).cs)".Trim() }
+            if (-not $cs) { return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = 'manager-signin-assign: the store (Manager access) could not be read -- retried, nothing written' } }
+            $map = Get-PimSqlSetting -ConnectionString $cs -Name 'ManagerAccess'
+        } catch { return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = "manager-signin-assign: the store (Manager access) could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- retried, nothing written" } }
+    }
+    $mv = $map; if ($mv -is [string]) { try { $mv = $mv | ConvertFrom-Json } catch { $mv = $null } }
+    if ($mv -and -not ($mv -is [array]) -and $mv.PSObject.Properties['managerAccess']) { $mv = $mv.managerAccess }
+    $sa = @(@($mv) | Where-Object { $_ -and "$($_.role)".Trim() -eq 'SuperAdmin' })
+    $hit = @($sa | Where-Object { ($who -and "$($_.identity)".Trim() -ieq $who) -or ($oid -and "$($_.objectId)".Trim() -ieq $oid) })
+    if (-not $hit.Count) { return (& $no "'$(if ($who) { $who } else { $oid })' is not a SuperAdmin in the stored Manager access -- nothing written" $null) }
+    $boundOid = "$($hit[0].objectId)".Trim().ToLowerInvariant()
+    if ($boundOid -match $guidRx) {
+        if ($oid -and $oid.ToLowerInvariant() -ne $boundOid) { return (& $no "the request's object id is not the one bound to '$($hit[0].identity)' in the stored Manager access -- nothing written" $null) }
+        $oid = $boundOid
+    }
+    if (-not $who) { $who = "$($hit[0].identity)".Trim() }
+    $call = if ($Graph) { $Graph } else { { param($m, $p, $b, $all) if ($all) { Invoke-PimGraph -All -Path $p } elseif ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } } }
+    $denied = { param($m) "$m" -match '(?i)\b403\b|Authorization_RequestDenied|Insufficient privileges|Forbidden' }
+    $notFound = { param($m) "$m" -match '(?i)\b404\b|Request_ResourceNotFound|does not exist|NotFound' }
+    $label = if ($who) { $who } else { $oid }
+    # 1. the sign-in application's service principal (by its appId -- never by a name)
+    $sp = $null
+    try { $sp = & $call 'GET' "/servicePrincipals(appId='$appId')?`$select=id,appId,displayName,appRoleAssignmentRequired" $null $false }
+    catch {
+        if (& $denied $_.Exception.Message) { return (& $no (Get-PimManagerSigninDeniedText -Who $label) $null) }
+        if (& $notFound $_.Exception.Message) { return (& $no "the sign-in application $appId has no enterprise application (service principal) in this tenant" $null) }
+        return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = "manager-signin-assign: the sign-in application could not be read ($($_.Exception.Message)) -- retried, nothing written" }
+    }
+    if (-not $sp -or -not "$($sp.id)".Trim()) { return (& $no "the sign-in application $appId has no enterprise application (service principal) in this tenant" $null) }
+    $spId = "$($sp.id)"; $appName = "$($sp.displayName)"
+    # 🔒 only PIM Manager's OWN sign-in application (the product names, Invardia 2026-11-07, incl. the install label and the
+    # earlier product name) -- a request naming any other enterprise application is refused, never assigned
+    if ($appName.Trim() -notmatch '^(?i)(PIM Manager|PIM4EntraPS Manager|PIM4EntraPS-Manager)( \([^()]{1,80}\))?$') {
+        return (& $no "the application $appId ('$appName') is not PIM Manager's sign-in application -- nothing written" $null)
+    }
+    if ("$($sp.appRoleAssignmentRequired)" -notmatch '^(?i)true$') {
+        return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "the sign-in application '$appName' does not require an assignment -- $label can sign in already; nothing was written" }
+    }
+    # 2. the person (the object id the Manager bound, else the sign-in name)
+    if (-not $oid) {
+        try { $u = & $call 'GET' "/users/$([uri]::EscapeDataString($who))?`$select=id,userPrincipalName" $null $false; $oid = "$($u.id)".Trim() }
+        catch {
+            if (& $denied $_.Exception.Message) { return (& $no (Get-PimManagerSigninDeniedText -Who $label -AppName $appName) $null) }
+            if (& $notFound $_.Exception.Message) { return (& $no "no user '$who' was found in this tenant -- check the sign-in name in Manager access" $null) }
+            return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = "manager-signin-assign: '$who' could not be read ($($_.Exception.Message)) -- retried, nothing written" }
+        }
+        if (-not $oid) { return (& $no "no user '$who' was found in this tenant -- check the sign-in name in Manager access" $null) }
+    }
+    $readAssigned = { @(@(& $call 'GET' "/servicePrincipals/$spId/appRoleAssignedTo?`$select=id,principalId,principalType&`$top=999" $null $true) | Where-Object { $_ } | ForEach-Object { "$($_.principalId)".ToLowerInvariant() }) }
+    $assigned = @()
+    try { $assigned = @(& $readAssigned) }
+    catch {
+        if (& $denied $_.Exception.Message) { return (& $no (Get-PimManagerSigninDeniedText -Who $label -AppName $appName) $null) }
+        return [pscustomobject]@{ ok = $false; terminal = $false; verification = 'none'; detail = "manager-signin-assign: the assignments of '$appName' could not be read ($($_.Exception.Message)) -- retried, nothing written" }
+    }
+    if ($assigned -contains $oid.ToLowerInvariant()) { return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "$label is already assigned to '$appName' -- nothing was written" } }
+    # admitted through a group that is assigned: nothing to add (best effort -- a failed read just assigns the person directly)
+    try {
+        $grp = @(@(& $call 'GET' "/users/$oid/transitiveMemberOf/microsoft.graph.group?`$select=id" $null $true) | Where-Object { $_ } | ForEach-Object { "$($_.id)".ToLowerInvariant() })
+        $via = @($grp | Where-Object { $assigned -contains $_ })
+        if ($via.Count) { return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "$label can sign in to '$appName' already through an assigned group -- nothing was written" } }
+    } catch { }
+    # 3. the ONE assignment: the default access role (all zeros), as setup makes it
+    try { [void](& $call 'POST' "/servicePrincipals/$spId/appRoleAssignedTo" ([ordered]@{ principalId = $oid; resourceId = $spId; appRoleId = '00000000-0000-0000-0000-000000000000' }) $false) }
+    catch {
+        if (& $denied $_.Exception.Message) { return (& $no (Get-PimManagerSigninDeniedText -Who $label -AppName $appName) $null) }
+        if ("$($_.Exception.Message)" -notmatch '(?i)already exists|Permission being assigned already exists') {
+            return (& $no "Microsoft Entra refused the assignment of $label to '$appName': $(("$($_.Exception.Message)" -split "`n")[0])" $null)
+        }
+    }
+    # 4. read back
+    $ok = $false
+    for ($i = 0; $i -lt 4 -and -not $ok; $i++) {
+        if ($i -and $ReadBackDelaySec -gt 0) { Start-Sleep -Seconds $ReadBackDelaySec }
+        try { $ok = (@(& $readAssigned) -contains $oid.ToLowerInvariant()) } catch { $ok = $false }
+    }
+    if (-not $ok) { return (& $no "$label was sent to '$appName' but the assignment is not there on read-back -- assign them in Microsoft Entra admin center > Enterprise applications > '$appName' > Users and groups" 'indeterminate') }
+    return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "$label was assigned to the sign-in application '$appName' by the engine (read back) -- they can sign in to PIM Manager now" }
 }
 
 function Get-PimQueueActionType {
@@ -769,6 +897,8 @@ function Invoke-PimQueueAction {
     if ($type -eq 'notify-mail') { return (Invoke-PimQueueNotifyMail -Payload $p) }
     # owner 2026-11-16: the Support fix 'create-defender-role' -- a Defender role, no principal, so none of the guards below apply
     if ($type -eq 'defender-role-create') { return (Invoke-PimQueueDefenderRoleCreate -Payload $p) }   # Graph BETA as the engine identity
+    # NEW-SUPERADMIN-SIGNIN: a new SuperAdmin -> the Manager's sign-in application (an ADD of one person's access; nothing is removed)
+    if ($type -eq 'manager-signin-assign') { return (Invoke-PimQueueManagerSigninAssign -Payload $p -Graph $GraphInvoker -ConnectionString $ConnectionString) }
 
     # REQ-Y (operator 2026-09-19: "revoke is pro", hard): a queued revoke of a current delegation needs a Pro licence at
     # EXECUTION too (the Manager refuses to queue one without it; this covers an entry queued before). Refused before any

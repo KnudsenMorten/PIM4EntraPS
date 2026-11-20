@@ -3960,7 +3960,11 @@ assignment, or an applied Azure revoke, sets a "refresh Azure" mark (`pim.Settin
 the change after the commit. A stored Azure read older than 26 hours is read again whatever the clock. Between those
 reads the Azure rows are **carried forward** from the stored generation; when they cannot be read back, or their number
 is not the one the header states, Azure is read (a part of a snapshot is never presented as complete). A store without
-the table form reads Azure on every run, as before. **The Manager never reads the tenant**: Refresh only queues the job
+the table form reads Azure on every run, as before. **One unreadable subscription is unknown for that subscription only**:
+when some subscriptions answer and others do not, the readable ones are read as normal, and the unreadable ones are
+named with the code AA-AZURE-SUBSCRIPTION-NOT-READ and the reason; their last good rows are kept (marked as not read this
+run, so they cannot be revoked from the list) and nothing of them is reported as removed. The run is a warning and the next
+run reads Azure again. Only when no subscription can be read is the whole Azure part treated as not read. **The Manager never reads the tenant**: Refresh only queues the job
 (`Request-PimActiveAssignmentsSnapshotRefresh` -> a scheduler trigger of type `active-assignments-snapshot`).
 
 **Data contract (the stored rows; the page is built to exactly this).**
@@ -4568,7 +4572,7 @@ built-in sign-in uses the web identity's federated credential). The mode only ch
    ```powershell
    az login
    .\tools\setup\Install-PimEngineAppRegistration.ps1 `
-       -DisplayName "PIM4EntraPS Engine" -GrantConsent
+       -DisplayName "PIM Manager Engine" -GrantConsent
    ```
 
    It is **pure REST + certificate** (no Graph/Az PowerShell modules, no
@@ -8228,6 +8232,13 @@ exportable read-only viewer (Reader role may view; §18.11).
   model it could not read and reads the result back, and is shown in **Settings → Manager access &
   roles**. An identity in no source is Reader; a stored model that cannot be parsed is refused, never
   waved through.
+- **A new SuperAdmin can sign in.** When a save in Settings makes someone a SuperAdmin (a new entry or a
+  raised role), the Manager queues one engine action per person; the engine, with its own identity,
+  assigns that person to the Manager's sign-in application (assignment is required there) and reads the
+  assignment back. Someone already assigned, directly or through an assigned group, is left as is; no
+  other assignment is ever removed or changed. The Manager itself holds no directory right. When the
+  assignment cannot be made (no right to assign people to enterprise applications, the person not
+  found), the save answer and the queue entry say why in plain words and name the Entra step.
 - **Gates** (server-side per endpoint; the GUI also hides what the role can't do):
 
 | Capability | Reader | Admin | SuperAdmin |

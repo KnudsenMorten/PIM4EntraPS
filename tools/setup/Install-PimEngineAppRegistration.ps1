@@ -37,7 +37,8 @@
          (IMP-49 p).
 
 .PARAMETER DisplayName
-    App registration display name. Default 'PIM4EntraPS Engine'.
+    App registration display name. Default 'PIM Manager Engine' (NAM-01; an existing app named 'PIM4EntraPS Engine' is
+    found by either form and keeps its name -- only the default for a NEW app changed).
 
 .PARAMETER TenantId
     Tenant to operate in. Defaults to the az-logged-in tenant.
@@ -101,7 +102,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$DisplayName = 'PIM4EntraPS Engine',
+    [string]$DisplayName = 'PIM Manager Engine',   # NAM-01: the product name (an existing 'PIM4EntraPS Engine' app is still found by its other form and keeps its name)
     [string]$TenantId,
     [string]$ExistingThumbprint,
     [string]$CertSubject = 'CN=PIM4EntraPS-Engine',

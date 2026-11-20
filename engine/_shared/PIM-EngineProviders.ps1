@@ -3812,6 +3812,7 @@ function New-PimAuMembersProvider {
             $tagToAu = Get-PimTagToAuName
             $auByName = Get-PimLiveAuIdByNameMap   # 100.122 F6: unique names only -- a name two AUs carry is in nobody's map (DUPLICATE-AU-NAME)
             $out = New-Object System.Collections.Generic.List[object]
+            $__canDerive = [bool](Get-Command New-PimEngineDerivedOrigin -ErrorAction SilentlyContinue)
             foreach ($d in (Get-PimGroupDefinitionRows)) {
                 $auTag = "$($d.AdministrativeUnitTag)"; if (-not $auTag) { continue }   # not an AU-scoped group
                 $gn = "$($d.GroupName)"; if (-not $gn) { continue }
@@ -3821,7 +3822,10 @@ function New-PimAuMembersProvider {
                 # Group or AU not live yet -> nothing to reconcile this pass; the next run
                 # picks it up. That is the self-healing the old create-time attach lacked.
                 if (-not $gid -or -not $auId) { continue }
-                $out.Add([pscustomobject]@{ auId = $auId; auName = $auName; groupId = $gid; GroupName = $gn })
+                # SIGNED-REQ-DERIVED-1: the membership comes from the group's definition row (it names the AU tag) AND the AU's
+                # definition row (it names which AU that is) -- the signed-request check judges the change by both.
+                $__from = if ($__canDerive) { @(@((New-PimEngineDerivedOrigin -Row $d), (New-PimEngineDerivedOrigin -Entity 'PIM-Definitions-AU' -Key $auTag)) | Where-Object { $null -ne $_ }) } else { @() }
+                $out.Add([pscustomobject]@{ auId = $auId; auName = $auName; groupId = $gid; GroupName = $gn; pimDerivedFrom = $__from })
             }
             $out.ToArray()
         }
@@ -8632,14 +8636,17 @@ function New-PimGroupOwnersProvider {
             # 95.2l: the plan / budget of an earlier pass in this run never carries over.
             $ctx['GroupOwners.ownerMigration'] = $null; $ctx['GroupOwners.migrationBudget'] = $null
             $__eligOn = Test-PimGroupOwnersEligibleEnabled
+            $__canDerive = [bool](Get-Command New-PimEngineDerivedOrigin -ErrorAction SilentlyContinue)
             # REQ-L: plus an Azure permission group's owners, from the PIM-Definitions-Resources row the Azure wizards stage
             # (only rows that name Owners -- see Get-PimResourceOwnerDefinitionRows).
             foreach ($g in @(@(Get-PimGroupDefinitionRows) + @(Get-PimResourceOwnerDefinitionRows))) {
                 if ($null -eq $g) { continue }
+                # SIGNED-REQ-DERIVED-1: an owner comes from the group's definition row -- the signed-request check judges it by that row.
+                $__from = if ($__canDerive) { @(@(New-PimEngineDerivedOrigin -Row $g) | Where-Object { $null -ne $_ }) } else { @() }
                 if (-not $__eligOn) {
                     # GroupOwnersEligible OFF (the default): exactly what this scope always did.
                     foreach ($oid in (Resolve-PimGroupOwnerIds -Row $g -Ctx $ctx)) {
-                        $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid" })
+                        $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid"; pimDerivedFrom = $__from })
                     }
                     continue
                 }
@@ -8649,7 +8656,7 @@ function New-PimGroupOwnersProvider {
                     $oid = Resolve-PimPrincipalId $e
                     if (-not $oid -or $__seen.ContainsKey("$oid".ToLowerInvariant())) { continue }
                     $__seen["$oid".ToLowerInvariant()] = $true
-                    $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid"; OwnerRef = "$e"; OwnerKind = (Resolve-PimGroupOwnerEntryKind -Entry "$e" -Id "$oid") })
+                    $out.Add([pscustomobject]@{ GroupName = $g.GroupName; OwnerId = "$oid"; OwnerRef = "$e"; OwnerKind = (Resolve-PimGroupOwnerEntryKind -Entry "$e" -Id "$oid"); pimDerivedFrom = $__from })
                 }
             }
             if ($__eligOn) { $ctx['GroupOwners.desired'] = $out.ToArray() }

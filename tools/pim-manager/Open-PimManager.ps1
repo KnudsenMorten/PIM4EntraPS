@@ -6738,6 +6738,84 @@ function Add-PimManagerNotifyRequest {
     } catch { return [pscustomobject]@{ queued = $false; id = ''; reason = "$(("$($_.Exception.Message)" -split "`n")[0])" } }
 }
 
+function Get-PimManagerNewSuperAdmins {
+    <#
+      PURE. NEW-SUPERADMIN-SIGNIN: the identities that are SuperAdmin in -After and were NOT SuperAdmin in -Before (a new entry, or a role raised
+      to SuperAdmin). Case-insensitive on the identity. Returns @( @{ identity; objectId } ) -- objectId only when the entry
+      carries one (SEC-90 binding), never taken from anywhere else.
+    #>
+    param([AllowNull()][object[]]$Before = @(), [AllowNull()][object[]]$After = @())
+    $f = { param($o, $n) if ($null -eq $o) { return '' }; if ($o -is [System.Collections.IDictionary]) { return "$($o[$n])".Trim() }; $p = $o.PSObject.Properties[$n]; if ($p) { "$($p.Value)".Trim() } else { '' } }
+    $was = @{}
+    foreach ($e in @($Before)) { if ($null -ne $e -and (& $f $e 'role') -eq 'SuperAdmin') { $id = (& $f $e 'identity').ToLowerInvariant(); if ($id) { $was[$id] = $true } } }
+    $out = New-Object System.Collections.Generic.List[object]; $seen = @{}
+    foreach ($e in @($After)) {
+        if ($null -eq $e -or (& $f $e 'role') -ne 'SuperAdmin') { continue }
+        $id = & $f $e 'identity'; $k = $id.ToLowerInvariant()
+        if (-not $id -or $was.ContainsKey($k) -or $seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $out.Add([ordered]@{ identity = $id; objectId = (& $f $e 'objectId') })
+    }
+    return $out.ToArray()   # enumerated: @(...) of nothing is empty
+}
+
+function Get-PimManagerSigninAppId {
+    # NEW-SUPERADMIN-SIGNIN: the appId of this Manager's built-in sign-in application (PIM_HOSTED_EASYAUTH_AUD carries '<id>' and/or
+    # 'api://<id>'); '' when the install has none. -Value: test seam.
+    param([AllowNull()][object]$Value = $null)
+    $raw = if ($null -ne $Value) { $Value } else { "$env:PIM_HOSTED_EASYAUTH_AUD" }
+    foreach ($a in @("$raw" -split '[,;]+')) {
+        $t = ("$a".Trim() -replace '^(?i)api://', '').Trim('/').ToLowerInvariant()
+        if ($t -match '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { return $t }
+    }
+    return ''
+}
+
+function Add-PimManagerSigninAssignActions {
+    <#
+      NEW-SUPERADMIN-SIGNIN product part (owner 2026-11-10): every NEW SuperAdmin is assigned to the Manager's sign-in application (assignment
+      required; Entra refuses them otherwise). The web app holds NO Graph right: ONE queued engine action per person
+      ('manager-signin-assign', committed at once, the tick started -- Add-PimManagerCommittedAction); the ENGINE assigns and
+      reads back (Invoke-PimQueueManagerSigninAssign). Never a silent skip: each person gets { identity; queued; queueId;
+      reason } -- no sign-in application on this install, or a queue that failed, says so. Never throws.
+      -AppId / -Queue { param($entity, $key, $payload, $by, $why) }: test seams.
+    #>
+    param([AllowNull()][object[]]$People = @(), [AllowNull()][object]$AppId = $null, [scriptblock]$Queue = $null)
+    $out = New-Object System.Collections.Generic.List[object]
+    $app = if ($null -ne $AppId) { "$AppId".Trim().ToLowerInvariant() } else { Get-PimManagerSigninAppId }
+    if (-not $Queue) { $Queue = { param($en, $k, $pl, $by, $why) Add-PimManagerCommittedAction -Entity $en -Key $k -Payload $pl -By $by -Justification $why } }
+    $by = "$(try { Get-PimManagerActorName } catch { '' })"; if (-not $by.Trim()) { $by = 'PIM Manager' }
+    foreach ($p in @($People)) {
+        if ($null -eq $p) { continue }
+        $who = "$($p.identity)".Trim(); if (-not $who) { continue }
+        if (-not $app) { $out.Add([ordered]@{ identity = $who; queued = $false; queueId = ''; reason = 'this install has no built-in sign-in application id (PIM_HOSTED_EASYAUTH_AUD), so PIM cannot assign the new SuperAdmin to it -- assign them in Microsoft Entra admin center > Enterprise applications > the PIM Manager sign-in application > Users and groups' }); continue }
+        try {
+            $pl = [pscustomobject][ordered]@{ type = 'manager-signin-assign'; identity = $who; objectId = "$($p.objectId)".Trim(); appId = $app; requestedBy = $by }
+            $qa = & $Queue 'PIM-Action-ManagerSigninAssign' ("manager-signin-assign|{0}" -f $who.ToLowerInvariant()) $pl $by ("'{0}' was made SuperAdmin in PIM Manager: assign them to the sign-in application" -f $who)
+            $out.Add([ordered]@{ identity = $who; queued = $true; queueId = "$($qa.id)"; reason = '' })
+        } catch { $out.Add([ordered]@{ identity = $who; queued = $false; queueId = ''; reason = "the sign-in assignment could not be queued: $(("$($_.Exception.Message)" -split "`n")[0]) -- assign them in Microsoft Entra admin center > Enterprise applications > the PIM Manager sign-in application > Users and groups" }) }
+    }
+    return $out.ToArray()   # enumerated: @(...) of nothing is empty
+}
+
+function Invoke-PimManagerAccessSigninAssign {
+    <#
+      NEW-SUPERADMIN-SIGNIN product part: called by PUT /api/access-map AFTER the save and its read-back. Each NEW SuperAdmin (the stored map,
+      with the object ids the Manager bound, against -Before) gets ONE queued engine action (Add-PimManagerSigninAssignActions);
+      the web app holds no Graph right. Audited per person (access.map.signin-assign). NEVER throws and never fails the save:
+      returns the per-person list { identity; queued; queueId; reason } for the answer.
+    #>
+    param([AllowNull()][object[]]$Before = @(), [AllowNull()][object[]]$Saved = @())
+    $out = @()
+    try {
+        $now = @($Saved); try { $bm = Get-PimManagerSetting -Name 'ManagerAccess'; if ($bm -and $bm.PSObject.Properties['managerAccess']) { $now = @($bm.managerAccess) } } catch { }
+        $newSa = @(Get-PimManagerNewSuperAdmins -Before @($Before) -After @($now))
+        if ($newSa.Count) { $out = @(Add-PimManagerSigninAssignActions -People $newSa) }
+        foreach ($s in @($out)) { try { Write-PimManagerAuditEvent -Action 'access.map.signin-assign' -Target "$($s.identity)" -After ([ordered]@{ queued = [bool]$s.queued; queueId = "$($s.queueId)"; reason = "$($s.reason)" }) -Result $(if ($s.queued) { 'ok' } else { 'error' }) } catch { } }
+    } catch { $out = @([ordered]@{ identity = ''; queued = $false; queueId = ''; reason = "the sign-in assignment of the new SuperAdmin(s) could not be queued: $($_.Exception.Message)" }) }
+    return $out
+}
+
 function Get-PimManagerQueuedMailNote {
     # SECURE-WEB-1: the ONE sentence the GUI shows where it used to say "mail sent".
     param([int]$Recipients = 0)
@@ -21852,7 +21930,9 @@ function Handle-Request {
             # SEC-90: bind the new identities to their Entra object id now (best effort; never fails the save)
             try { [void](Invoke-PimManagerAccessObjectIdBackfill -Force) } catch { }
             $__pubEntries = @($arr | ForEach-Object { @{ identity = "$($_.identity)"; role = "$($_.role)" } })
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; store = 'sql'; entries = @($__pubEntries); you = (Get-PimManagerRole) })
+            # NEW-SUPERADMIN-SIGNIN: each NEW SuperAdmin -> the sign-in application, by the ENGINE (never fails the save)
+            $__signin = @(Invoke-PimManagerAccessSigninAssign -Before @($prevEntries) -Saved @($arr))
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; store = 'sql'; entries = @($__pubEntries); you = (Get-PimManagerRole); signinAssign = @($__signin) })
             return 200
         }
 

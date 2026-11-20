@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.53 -- 2026-11-20
+
+- Signed-request check judges derived changes by their signed rows; per-subscription Azure read; new SuperAdmins assigned to the sign-in app; docs-version in the heartbeat; docs brought up to date
+
 ## 3.1.52 -- 2026-11-19
 
 - Security: only the engine is set up to send mail -- the mail setup steps and the commands PIM Manager shows give the send right and the mail relay password to the engine only, never to the web app (which sends no mail)

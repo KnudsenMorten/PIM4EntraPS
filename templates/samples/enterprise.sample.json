@@ -6158,7 +6158,7 @@
         "RoleName": "PIM-Defender-XDR-SecurityOperations-Operator-Praktikant-L3-T1-MP-ID",
         "GroupTag": "Defender-XDR-SecurityOperations-Operator-L3-Praktikant",
         "Action": "Assign",
-        "Notes": "custom Defender XDR role named like the group",
+        "Notes": "existing Defender XDR role named like the group; PIM adds the group only, never creates or changes the role",
         "Permissions": "microsoft.xdr/secops/*/manage;microsoft.xdr/secops/rawdata/quarantineemailcontent/read"
       }
     ]

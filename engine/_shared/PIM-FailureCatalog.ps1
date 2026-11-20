@@ -908,11 +908,11 @@ function Get-PimFailureCodeTable {
         ,@('DEFENDER-ASSIGNMENT-SHARED',       'pim-def-0105',   'customer-config',   'customer', '',      '2.4.638')
         # whoActs 'nobody' (Invardia 2026-11-13): report-only, opensTicket FALSE -- repeating drift surfaces through Invardia's
         # REPORT-ONLY-DRIFT as one item, never a ticket per run (errors.json derives opensTicket from whoActs).
-        ,@('DEFENDER-DATASOURCES-CHANGED',     'pim-def-0106',   'not-converged',     'nobody',   '',      '3.1.21')
-        ,@('DEFENDER-DATASOURCES-WIDER',       'pim-def-0107',   'customer-config',   'customer', '',      '3.1.21')
-        ,@('DEFENDER-ROLE-MISSING',            'pim-def-0108',   'customer-config',   'customer', '',      '3.1.21')
-        ,@('DEFENDER-ROLE-DIFFERS',            'pim-def-0109',   'customer-config',   'customer', '',      '3.1.21')
-        ,@('DEFENDER-ROLE-WIDER',              'pim-def-0110',   'customer-config',   'customer', '',      '3.1.21')
+        ,@('DEFENDER-DATASOURCES-CHANGED',     'pim-def-0106',   'not-converged',     'nobody',   '',      '3.1.22')
+        ,@('DEFENDER-DATASOURCES-WIDER',       'pim-def-0107',   'customer-config',   'customer', '',      '3.1.22')
+        ,@('DEFENDER-ROLE-MISSING',            'pim-def-0108',   'customer-config',   'customer', '',      '3.1.22')
+        ,@('DEFENDER-ROLE-DIFFERS',            'pim-def-0109',   'customer-config',   'customer', '',      '3.1.22')
+        ,@('DEFENDER-ROLE-WIDER',              'pim-def-0110',   'customer-config',   'customer', '',      '3.1.22')
         ,@('DEFENDER-APPSCOPE-REQUIRED',       'pim-def-0111',   'upstream-error',    'product',  '3.1.27', '3.1.27')
         ,@('POWERBI-ENGINE-NOT-IN-WORKSPACE',  'pim-pbi-0101',   'permission',        'customer', '',      '2.4.638')
         ,@('POWERBI-ADMIN-NOT-GRANTED',        'pim-pbi-0102',   'permission',        'customer', '',      '2.4.638')
@@ -1479,9 +1479,18 @@ function Get-PimFailureItemLabel {
       AZ-POLICY-MFA item whose only identifier was '891857a0-…|/providers/…|rid:acdd72a7-…|active':
       "could be nice to see which role this is, so i can delete the policy". The row the item came from
       already names the group, role, scope and type; the key stays available as the technical id.
+      DRIFT-EXTRAS-PIM-ONLY (owner 2026-11-10): an ADMINISTRATIVE UNIT is labelled "administrative unit <name>" -- an AU row
+      (AUDisplayName, or a live row whose @odata.type is administrativeUnit), or any item of the AdministrativeUnits area
+      (-Scope, the engine scope the item came from). An AU named PIM-... read "PIM for Groups policy of group pim-..." from its key.
     #>
-    param([string]$Key, [AllowNull()][object]$Row)
+    param([string]$Key, [AllowNull()][object]$Row, [string]$Scope = '')
     $g = { param($n) if ($null -eq $Row) { return '' }; $v = if ($Row -is [System.Collections.IDictionary]) { $Row[$n] } else { $p = $Row.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } }; "$v".Trim() }
+    $auName = & $g 'AUDisplayName'
+    $auRow = ($auName -or ((& $g '@odata.type') -match '(?i)administrativeUnit$'))
+    if (("$Scope" -eq 'AdministrativeUnits' -or $auRow) -and -not (& $g 'RoleDefinitionName') -and -not (& $g 'GroupName') -and -not (& $g 'Username') -and -not (& $g 'GroupTag')) {
+        $auN = if ($auName) { $auName } elseif (& $g 'displayName') { & $g 'displayName' } else { "$Key".Trim() }
+        if ($auN) { return "administrative unit $auN" }
+    }
     $type = & $g 'AssignmentType'
     $t = if ($type) { " ($type)" } else { '' }
     $grp = { param($tag) if (-not $tag) { return '' }; if ($tag -match '(?i)^PIM-') { $tag } else { "PIM-$tag" } }
@@ -1553,7 +1562,7 @@ function New-PimEngineItemFailure {
     param([string]$Scope, [string]$Entity, [string]$Op, [string]$Key, [string]$Message, [AllowNull()][object]$Row)
     $c = Get-PimFailureClassification -Message $Message -Row $Row
     $label = ''
-    try { $label = Get-PimFailureItemLabel -Key $Key -Row $Row } catch { $label = '' }
+    try { $label = Get-PimFailureItemLabel -Key $Key -Row $Row -Scope "$Scope" } catch { $label = '' }
     [pscustomobject]@{
         scope = $Scope; entity = $Entity; op = $Op; key = $Key; label = $label
         code = $c.code; title = $c.title; cause = $c.cause; remedy = $c.remedy
