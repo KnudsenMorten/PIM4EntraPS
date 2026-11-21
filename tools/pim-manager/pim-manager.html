@@ -2148,8 +2148,7 @@
 
   <!-- =========== REQ-S: pages that used to be anchor links into Settings =========== -->
   <div id="manageraccessTab" class="tab-panel">
-    <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
-    <div class="pro-lic-banner" data-feature="access.delegated" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
+    <!-- G1 (2026-11-20): no Pro notice here -- delegated administration is core in both editions. -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="manageraccessBody">
       <div id="setAccessHost"><div style="color:#57606a;font-size:12px;">Loading access &amp; roles&hellip;</div></div>
       <div id="setApiAppsHost" style="margin-top:12px;"></div>
@@ -3678,14 +3677,14 @@
       '<b>Ignore</b> takes a gap you do not want off the list and out of the gap count. It is a decision about this list only &mdash; nothing changes in the tenant. Choose <b>Ignored</b> under Status to see the ignored ones and <b>Bring back</b>.',
       '<b>Orphan group</b> = a group PIM Manager defines that holds nothing; <b>Unmanaged binding</b> = a role bound to a group PIM Manager does not define; <b>Unmanaged privileged group</b> = a group in PIM for Groups that PIM Manager does not manage (it can gate any application). These are for review only &mdash; never staged, never taken over.',
       '<b>Not read</b> = a workload PIM Manager could not read. The page says which one, what is missing and the steps &mdash; it is never counted as covered.'] },
-    jobschedule: { title: 'What this is & how to use it', what: 'The job schedule &mdash; every scheduled job, the area it covers, whether it is on and how often it runs.', how: ['Change on/off or the interval and Save (SuperAdmin); it applies from the next scheduler tick.', 'Run history, failures and Run now are on the Jobs page.'] },
+    jobschedule: { title: 'What this is & how to use it', what: 'The job schedule &mdash; every scheduled job, the area it covers, whether it is on and how often it runs.', how: ['Change on/off or the interval and Save (SuperAdmin); it applies from the next scheduler run.', 'Run history, failures and Run now are on the Jobs page.'] },
     audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; the window defaults to the last 3 months &mdash; widen it to 12 months or the full history. Newest first.'] },
     reports:     { title: 'What this is & how to use it', what: '"Who can do what" (and the reverse) &mdash; pick a person to see everything they reach, or a role to see who can activate it.', how: ['Choose forward or reverse, run the report, then print or export.'], legend: true },
     conformance: { title: 'What this is & how to use it', what: 'Tenant Baseline &mdash; how far each tenant is behind the approved delegation templates, and roll updates forward.', how: ['Review the gap per tenant; rollout is ring-driven and approval-gated.'] },
     // REQ-N / REQ-O (managing tenant only)
     msptenants:  { title: 'What this is & how to use it', what: 'The managed tenants this managing tenant replicates to &mdash; name, tenant id, the managing tenant&rsquo;s copy of each tenant&rsquo;s ring, and the tags a replication Target names.', how: ['Edit a row or register a new tenant (SuperAdmin); every save is audited, read back and requests a publish.', 'The ring is only the managing tenant&rsquo;s copy: each managed tenant&rsquo;s own ring decides what its pull accepts.'] },
     replication: { title: 'What this is & how to use it', what: 'Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches &mdash; computed on the server by the same plan every tenant runs.', how: ['Pick a tenant to see what it gets, a kind to narrow the list, or show only rows that reach no tenant.', 'Change a row&rsquo;s Replicate / Ring / Target in its wizard or the records grid; Recompute runs the plan again.'] },
-    jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and its tick job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
+    jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and the engine job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
     settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
     envreport:   { title: 'What this is & how to use it', what: 'Environment report &mdash; the architecture and security report of THIS environment, read live: every identity by name and id, its permissions marked expected / missing / extra against what PIM Manager declares, the Azure resources and their network exposure, features, data flows, change history and findings with the fix.', how: ['Export PDF prints the report (choose Save as PDF, A4, background graphics on); Export JSON downloads the same data for an audit or a diff.', 'Whatever this Manager may not read is marked not readable, with the reason -- grant it read access and press Read again.', 'Confidential: names and ids only, never a secret value. Admin and SuperAdmin only.'] },
     apiref:      { title: 'What this is & how to use it', what: 'The API and MCP reference of the version that runs here &mdash; every API route and MCP tool your PIM Manager role may call, read from this version&rsquo;s own code.', how: ['Type in the filter to find a route or a tool; the role column says what each needs.', 'A route with no role check of its own is open to every signed-in role; the route still checks the item you ask about.', 'The routine part of this reference is published on invardia.com.'] },
@@ -8057,8 +8056,9 @@
   // pro-license with the word PRO dimmed on the menu item. if a user clicks a PRO item and they only have a free
   // license, it should show a page where people can see the differences between free and pro and they can buy pro").
   //   * PIM_PRO_PAGES -- the menu pages that ARE a Pro feature (the server gates their endpoints on that key). A page
-  //     that is free with ONE Pro function (Manager access: delegated profiles, Reports: tier impact) is not listed -- it
-  //     keeps its in-page notice. (The evidence export and the second approver are core in both editions since 2026-11-04.)
+  //     that is free with ONE Pro function (Reports: tier impact) is not listed -- it keeps its in-page notice. (The
+  //     evidence export and the second approver are core in both editions since 2026-11-04; delegated administration --
+  //     Manager access: Delegated users and their ceilings -- since 2026-11-20, G1.)
   //   * MSP ('msp') is Pro only -- there is no free MSP (operator 2026-09-26: "msp is always a paid solution").
   //   * Locked = /api/license says so. Unknown (not loaded yet, unreadable, the static build) = NOT locked: the page
   //     opens with its own notice and the server still refuses. The menu is rebuilt once the licence is read.
@@ -8070,45 +8070,9 @@
                         downlink: 'msp', msptenants: 'msp', replication: 'msp' };
   // The Free vs Pro page MIRRORS README.md 'Editions -- what is free and what is paid' word for word (operator 2026-09-26:
   // "free vs pro is already documented ... what goes where"). tests/Test-PimEditionPage.ps1 fails when they drift apart.
-  var PIM_EDITION_FREE = ["the full portal — model, review, commit, and see what changed",
-    "eligible, time-boxed access with approval and a complete audit trail",
-    "a second approver for sensitive changes (separation of duties)",
-    "the evidence export — who may hold what, who held it, and who approved",
-    "Entra ID roles, PIM for Groups, administrative units and Azure RBAC",
-    "Intune and Defender XDR role delegation, including Defender custom roles",
-    "delegation by group — permission groups and tiering, so access is granted by membership rather than by hand",
-    "policy templates — a Standard and a RequireApproval template per kind, renameable, with a default per kind",
-    "drift detection — what exists in the directory versus what your model says",
-    "reports, including standing access and expiring access, and the current delegations list",
-    "administrator accounts and first-time access passes, issued and tracked",
-    "permission templates imported in the portal (Templates > Workload templates)",
-    "updates itself each night to signed releases from Invardia's Community channel, checked and built in your own registry — or by one command you run, with the same checks",
-    "community support (GitHub issues on the public repository)"];
-  var PIM_EDITION_PRO_SINGLE = ["Discovery and gaps — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
-    "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
-    "revoking current delegations from the portal (the list itself is free)",
-    "access reviews — campaigns with decisions recorded and enforced",
-    "delegated administration — portal users limited to a tier, level, service or scope",
-    "the tier-impact report — everyone who can reach tier 0, including through nested groups",
-    "the management report — a PowerPoint for management under Reports > Management report: key figures with trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly report is off until you switch it on)",
-    "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up",
-    "the AI assistant (MCP) — an assistant reads every view of the portal and does routine work under the person's own role",
-    "the chat in the Manager — ask questions and have changes prepared, answered by your own Azure OpenAI deployment under the person's own role",
-    "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin, and a person saves every change they prepare",
-    "the API and MCP reference in the portal — every route and assistant tool of the version you run, for your role",
-    "PIM for on-premises Active Directory — admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups, applied by a small hybrid worker"];
-  var PIM_EDITION_PRO_MULTI = ["define once, target many — target tenants by tag and by rollout wave rather than editing each tenant",
-    "signed definition sets, verified on arrival — a tenant applies a definition set only if it verifies against a key that tenant trusts",
-    "see what reaches each tenant and what is held back, per definition",
-    "per-customer rules where one customer must differ",
-    "a read-only preview of exactly what a tenant would receive, before it does",
-    "fleet conformance — which tenants are on which version of which definition set",
-    "rollout waves — reach one wave of customers before the rest",
-    "central accounts whose lifecycle flows down to the tenants they belong to",
-    "removals remain the tenant's call — the provider proposes, the tenant disposes",
-    "controlled release rings for the software itself",
-    "the provider-hosted option — the provider runs the portal and database for the customer",
-    "support with an agreed response time, at portal.invardia.com"];
+  var PIM_EDITION_FREE = ["the full portal — model, review, commit, and see what changed", "eligible, time-boxed access with approval and a complete audit trail", "a second approver for sensitive changes (separation of duties)", "the evidence export — who may hold what, who held it, and who approved", "delegated administration — portal users limited to a tier, level, service or scope", "Entra ID roles, PIM for Groups, administrative units and Azure RBAC", "Intune and Defender XDR role delegation — PIM Manager adds your groups to Defender roles you create and keep; it never creates, changes or deletes a Defender role, and reports a role that is missing or grants more than defined", "delegation by group — permission groups and tiering, so access is granted by membership rather than by hand", "access packages — a Microsoft Entra access package decides who joins a delegation group, and PIM Manager decides how it is activated; each package gets new groups of its own (names ending in -AP), existing groups are never used or renamed, and nothing happens until you define a package (the tenant needs a Microsoft Entra ID Governance licence)", "existing accounts as administrators — an administrator of the type \"Existing account (office user)\" gets delegations only: PIM Manager never creates, changes, disables or deletes that account", "policy templates — a Standard and a RequireApproval template per kind, renameable, with a default per kind", "drift detection — what exists in the directory versus what your model says", "reports, including standing access and expiring access, and the current delegations list", "administrator accounts and first-time access passes, issued and tracked", "permission templates imported in the portal (Templates > Workload templates)", "updates itself each night to signed releases from Invardia's Community channel, checked and built in your own registry — or by one command you run, with the same checks", "community support (GitHub issues on the public repository)"];
+  var PIM_EDITION_PRO_SINGLE = ["Discovery and gaps — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources", "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform", "revoking current delegations from the portal (the list itself is free)", "access reviews — campaigns with decisions recorded and enforced", "the tier-impact report — everyone who can reach tier 0, including through nested groups", "the management report — a PowerPoint for management under Reports > Management report: key figures with trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly report is off until you switch it on)", "the access request API — a ticketing system such as ServiceNow switches a disabled admin account on for a set time, reads the request's status or cancels it, and PIM switches the account off again when the time is up", "the AI assistant connection — an AI assistant reads every view of the portal and does routine work under the person's own role; closed on every installation (it answers \"not found\") until it is opened for your installation through Invardia support, and then a SuperAdmin switches it on under Settings > Features", "the chat in the Manager — ask questions in plain words and have changes prepared, answered by your own Azure OpenAI deployment without a key, under the person's own role; a change is only prepared, and a person saves it. Off by default: it needs the AI assistant connection opened and switched on, and then its own switch", "API applications — scripts and services use the PIM Manager API with their own application, as Reader or Admin: they manage settings with code, and propose changes to admins and their roles that a person approves; closed on every installation (it answers \"not found\") until it is opened for your installation through Invardia support", "the API and MCP reference in the portal — every route and assistant tool of the version you run, for your role", "PIM for on-premises Active Directory — admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups, applied by a small hybrid worker"];
+  var PIM_EDITION_PRO_MULTI = ["define once, target many — target tenants by tag and by rollout wave rather than editing each tenant", "signed definition sets, verified on arrival — a tenant applies a definition set only if it verifies against a key that tenant trusts", "see what reaches each tenant and what is held back, per definition", "per-customer rules where one customer must differ", "a read-only preview of exactly what a tenant would receive, before it does", "fleet conformance — which tenants are on which version of which definition set", "rollout waves — reach one wave of customers before the rest", "central accounts whose lifecycle flows down to the tenants they belong to", "removals remain the tenant's call — the provider proposes, the tenant disposes", "controlled release rings for the software itself", "the provider-hosted option — the provider runs the portal and database for the customer", "support with an agreed response time, at portal.invardia.com"];
   var PIM_PRO_WANTED = '';
   function pimProPageLocked(tab) {
     const k = PIM_PRO_PAGES[tab];
@@ -13352,7 +13316,7 @@
         // the tick -- nothing is corrected when this returns, so it is shown as queued, never as "applied".
         const r = await api('POST', '/api/drift/remediate', { selectKeys: selectKeys, allowRemove: allowRemove });
         msg.textContent = ((r && r.queued)
-          ? ('QUEUED, not yet applied — ' + (r.detail || 'the engine reconciles on its next run') + (r.engineStarted ? '' : ' (the engine was not started now; it runs on its next tick)'))
+          ? ('QUEUED, not yet applied — ' + (r.detail || 'the engine reconciles on its next run') + (r.engineStarted ? '' : ' (the engine was not started now; it runs on its next scheduled run)'))
           : ('applied ' + (r.applied || 0) + (r.errors ? (', ' + r.errors + ' error(s)') : '') + ((r.refused && r.refused.length) ? (', ' + r.refused.length + ' refused (needs opt-in)') : ''))) +
           (extrasNote ? ' ' + extrasNote : '');
         msg.style.color = '#9a6700';
@@ -14278,7 +14242,7 @@
       '<div id="jobSchedMoreBox" style="display:none;margin-top:6px;">' +
         '<b>Job</b> &mdash; its name and what it does &middot; <b>Area</b> &mdash; the part of the tenant it covers &middot; ' +
         '<b>Enabled</b> &mdash; on or off &middot; <b>Every (min) after it finishes</b> &mdash; the rest between two runs: the next run starts this long after the previous one FINISHED, so a slow run is never followed straight away.<br>' +
-        'A commit starts the engine straight away, so a cadence is the safety net, not the delay. Changes apply from the next scheduler tick.' +
+        'A commit starts the engine straight away, so a cadence is the safety net, not the delay. Changes apply from the next scheduler run.' +
       '</div></div>');
     if (sched && sched.cadenceJob && sched.cadence) {
       const pub = (sched.cadenceJob === 'publish');
@@ -17292,12 +17256,46 @@
         '<label class="gs-l" for="' + p + 'User">User name (leave empty when the relay needs no sign-in)' + settingInfoBtn('Mail.SmtpCredentials') + '</label><input type="text" id="' + p + 'User" name="smtpUser" value="' + val(s.username) + '">' + gsErr('smtpUser') +
         '<label class="gs-l" for="' + p + 'Vault">Key Vault that keeps the password</label><input type="text" id="' + p + 'Vault" name="smtpVault" value="' + val(s.vaultName || ((m.setup || {}).vaultHint) || '') + '" placeholder="the environment\'s key vault">' + gsErr('smtpVault') +
         '<label class="gs-l" for="' + p + 'Secret">Secret name</label><input type="text" id="' + p + 'Secret" name="smtpSecret" value="' + val(s.secretName || 'PIM-SmtpRelayPassword') + '">' + gsErr('smtpSecret') +
-        '<div class="gs-hint">The password is kept only in that Key Vault (never in the settings, never shown) and the PIM engine reads it when it sends a mail. PIM Manager itself never reads or writes it: a person with rights on the vault runs this once (browser sign-in, it asks for the password), then presses Send a test mail -- the engine checks that it can read it:</div>' +
+        '<div class="gs-hint">The password is kept only in that Key Vault (never in the settings, never shown) and the PIM engine reads it when it sends a mail. PIM Manager never writes Key Vault: it seals the password to this installation and stores only the sealed copy; the installation\'s updater puts it in Key Vault on its next run (Update now starts it). Then press Send a test mail -- the engine checks that it can read it.</div>' +
+        mailRelayPwHtml(m, p) +
+        '<div class="gs-hint">Invardia support, or an installation older than 3.1.56, uses the published script instead:</div>' +
         gsCode(p + 'PwCmd', mailSetupCmdPassword(m, s)) +
         '<label class="gs-l" for="' + p + 'TestTo">Send the test mail to</label><input type="text" id="' + p + 'TestTo" name="mailTestTo" value="" placeholder="your own address (empty = you)">' + gsErr('to') +
         '<div class="gs-actions"><button type="button" class="gsAction mailTestBtn btn-sec" data-act="test">Save and send a test mail</button></div>' +
       '</div>' +
       '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
+  }
+  // SECRETS-WRITE (sealed hand-over): the relay password is typed here by a SuperAdmin only, sent once over the signed-in
+  // API (POST /api/settings/mail/relay-password), sealed by the server to this installation's key and stored only sealed;
+  // the field is emptied right after. The status comes from the updater's result (pim.Settings SecretHandoverResult).
+  function mailRelayPwStatus(rp) {
+    rp = rp || {};
+    return String(rp.line || 'The relay password has not been handed over from this page yet.');
+  }
+  function mailRelayPwHtml(m, p) {
+    const rp = (m && m.relayPassword) || {};
+    const st = '<div class="gs-facts relayPwStatus">' + escapeHtml(mailRelayPwStatus(rp)) + '</div>';
+    if (!rp.canSet) return st + '<div class="gs-hint">A SuperAdmin sets the relay password here.</div>';
+    return st +
+      '<label class="gs-l" for="' + p + 'RelayPw">Relay password (SuperAdmin; sealed at once, never stored or shown)</label>' +
+      '<input type="password" id="' + p + 'RelayPw" name="relayPwSeal" autocomplete="new-password" value="">' +
+      '<div class="gs-actions"><button type="button" class="gsAction btn-sec relayPwBtn">Set relay password</button> <span class="relayPwMsg"></span></div>';
+  }
+  function mailRelayPwWire(root) {
+    const b = root && root.querySelector('.relayPwBtn');
+    if (!b) return;
+    b.onclick = async () => {
+      const inp = root.querySelector('input[name="relayPwSeal"]'), msg = root.querySelector('.relayPwMsg');
+      const pw = inp ? String(inp.value || '') : '';
+      if (!pw) { if (msg) msg.textContent = 'Enter the password first.'; return; }
+      b.disabled = true;
+      try {
+        const r = await api('POST', '/api/settings/mail/relay-password', { password: pw });
+        const st = root.querySelector('.relayPwStatus'); if (st) st.textContent = mailRelayPwStatus(r && r.relayPassword);
+        if (msg) msg.textContent = (r && r.note) || 'Handed over sealed.';
+      } catch (e) { const eb = e && e.body; if (msg) msg.textContent = 'Not handed over: ' + ((eb && eb.error) || gsErrText(e)); }
+      finally { if (inp) inp.value = ''; if (b.isConnected) b.disabled = false; }
+    };
   }
   // MAIL-NAMING (100.14; owner 2026-10-09: "maybe 2 steps - create + validate would make sense as step 2 then knows the
   // name in step 1"): shared mailbox = TWO sub-steps. Step 1 names the mailbox (name, a verified domain, display name;
@@ -17419,6 +17417,7 @@
     };
     root.querySelectorAll('input[name="mailMode"]').forEach(r => r.addEventListener('change', show));
     show();
+    mailRelayPwWire(root);   // SECRETS-WRITE: the SuperAdmin's Set relay password
     // MAIL-NAMING: the command is rebuilt from step 1's fields as they are typed, and shown once a name is filled in
     const live = () => {
       const mb = mailboxCollect(root);
@@ -21620,13 +21619,13 @@
           : '';
         // 🔴 msp-pull IS A PLACEHOLDER, AND IT HAS TO SAY SO (operator, 2026-09-22: "i dont
         // understand what the purpose of this is on managing tenant and slave" / "where can i trigger the
-        // definitions sync under jobs ?"). The scheduler tick NEVER runs it: the managed tenant's
+        // definitions sync under jobs ?"). The scheduler run NEVER runs it: the managed tenant's
         // definitions pull is its own Container Apps job (ca-pim-downlink-s6, the Data Definition
         // Updater), and its cadence, last result and Run pull now live on the Job schedule page. On
         // a managing tenant it does nothing at all -- a managing tenant publishes, it never pulls. Shown off and
         // idle with no explanation, it read as a broken job on every environment.
         // 🔴 ...AND A ROW NOBODY CAN USE DOES NOT BELONG IN THE LIST AT ALL (operator, 2026-09-22:
-        // "why show this unedr jobs & engine, if it is not used"). The scheduler tick never runs
+        // "why show this unedr jobs & engine, if it is not used"). The scheduler run never runs
         // msp-pull anywhere -- on a managed tenant the pull is its own container job, and a managing tenant
         // never pulls -- so the row was pure noise on every environment. It is dropped from the
         // table; one line under it says where the pull really lives.
@@ -21835,7 +21834,7 @@
       }
       if (r.status === 'queued') {
         // §70.21: the Manager now also STARTS the tick job (r.started), so the run begins in about a minute.
-        jobsActionMsg((r.started ? 'Started the engine for ' : 'Queued ') + name + ' — ' + (r.detail || 'it runs on the next tick') + ' Watch Jobs / Engine runs for trigger:' + name + '.');
+        jobsActionMsg((r.started ? 'Started the engine for ' : 'Queued ') + name + ' — ' + (r.detail || 'it runs on the next scheduled run') + ' Watch Jobs / Engine runs for trigger:' + name + '.');
         if (btn) { btn.disabled = false; btn.textContent = 'Run now'; }
         await renderJobs();
         return;
@@ -30109,7 +30108,7 @@
     await openGrid(base);
     // BUG-199: the finding's Row is its position in what the validator read -- find the live row.
     const liveIdx = valRowIndex(base, rowIdx);
-    // Defer to next tick so the table is in the DOM.
+    // Defer to the next event-loop turn so the table is in the DOM.
     setTimeout(() => {
       const main = document.getElementById('gridMain');
       const tr = main && liveIdx >= 0 && main.querySelector('tr[data-idx="' + liveIdx + '"]');

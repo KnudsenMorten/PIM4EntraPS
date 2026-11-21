@@ -17,7 +17,7 @@
        [-PrivateDnsZonesResourceGroupId <id>] [-HubVnetId <id> [-PeerToHub] [-LinkZonesToHub]]
        [-InternalRanges <cidr,...> -FirewallIp <ip>] [-WebAppAccess internal]]
       [-Edition Community|Trial|Pro] [-UpdateRing 2|3] [-KeyVaultName <name>] [-EngineAzureRootUserAccessAdmin] [-InstallId <id>]
-      [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-Reporter <scriptblock>] [-StatePath <dir>]
+      [-SupportAppId <client id> [-SupportAccess troubleshoot|setup|asbuilt]] [-FirstSuperAdminUpn <upn>] [-Reporter <scriptblock>] [-StatePath <dir>]
       [-Resume] [-PreflightOnly] [-ViaSupportApp] [-WhatIf]
 
   INVARDIA SUPPORT ACCESS (INSTALL-1 ALIGN). The Invardia Support app gets 'troubleshoot' access (or the -SupportAccess
@@ -180,6 +180,11 @@ param(
     # the Invardia Support app's client id -- only when you want Invardia support to have access (nothing is granted otherwise)
     [string]$SupportAppId = '',
     [ValidateSet('', 'troubleshoot', 'setup', 'asbuilt')][string]$SupportAccess = '',
+    # FIRST-SUPERADMIN-1 (Support-app install, Invardia 2026-11-20): the CUSTOMER's named administrator -- a lookup KEY (the
+    # Invardia Support tooling passes it from the order / portal request / the install's admin contact), never the binding.
+    # Used ONLY when the installation runs as the Invardia Support app: looked up in this tenant (a Member, enabled account)
+    # and THAT object id becomes the first SuperAdmin. Not given = nobody is seeded (never taken from -SuperAdmins).
+    [string]$FirstSuperAdminUpn = '',
     [scriptblock]$Reporter,
     [string]$StatePath = '',
     [switch]$Resume,
@@ -540,7 +545,7 @@ Pre 'preflight-signin' {
     # The Invardia Support app is an application -- it must never be that admin. Refused before anything is written.
     # APP-IDENTITY INSTALL (owner via Invardia 2026-10-21): superAdmins / portalUsers come ONLY from the answers -- an
     # application is never "the signed-in admin". A bad ANSWER, so exit 3 (nothing was touched), with the line to add.
-    if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count) {
+    if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count -and -not "$FirstSuperAdminUpn".Trim()) {
         $script:appNoAdmins = $true
         return @{ state = 'failed'; message = 'the installation runs as an application (the Invardia Support app), so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = 'Name the administrator with -SuperAdmins, then start the installation again:'; actionCommand = '-SuperAdmins admin@contoso.com' }
     }
@@ -741,6 +746,16 @@ $env:PIM_GUIDED_INSTALL_RUN = '1'
 # ================================================================== 3. deploy
 # APP-IDENTITY INSTALL (2026-10-21): an application is never the default SuperAdmin / portal user -- only the answers name them.
 $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $(if ("$($who.supportAppId)".Trim()) { '' } else { $who.userName })
+# FIRST-SUPERADMIN-1 (Support-app install, Invardia 2026-11-20): the customer's named administrator reaches the deploy as a
+# lookup KEY (the deploy resolves it in the directory: a Member, enabled account, bound to ITS object id; else nobody, said).
+# A person's own install never passes one -- that person is the first SuperAdmin.
+# Invardia 2026-11-20: ONLY -FirstSuperAdminUpn names that person -- a -SuperAdmins list is never turned into the named admin.
+$script:firstAdminKey = ''
+if ("$($who.supportAppId)".Trim()) {
+    $script:firstAdminKey = "$FirstSuperAdminUpn".Trim()
+    if ($script:firstAdminKey) { $deployArgs['FirstSuperAdminUpn'] = $script:firstAdminKey; Write-Host "    first SuperAdmin: the administrator the customer named, $($script:firstAdminKey) -- looked up in the directory (a member account, enabled) and bound to its object id" -ForegroundColor DarkGray }
+    else { Write-Host "    first SuperAdmin: NOBODY is seeded -- the installation runs as the Invardia Support app and no administrator was named (-FirstSuperAdminUpn). The customer's administrator runs the installer themselves, or the Support app runs it again naming them." -ForegroundColor Yellow }
+}
 # ================================================================== 3a. PUBLIC -> PRIVATE (INSTALL-1 item 5, Invardia 2026-11-02)
 # "the SAME two lines + -PrivateNetwork on an existing PUBLIC PIM install converts it": the install reads its own Container
 # Apps environment; when it is EXTERNAL, Convert-PimToPrivate.ps1 runs underneath with the mapped values (the customer never
@@ -924,7 +939,10 @@ $mailEv = @($events | Where-Object { "$($_.step.id)" -eq 'mailsender' -and "$($_
 $vArgs = @{ Role = 'Single'; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServerFqdn = $names.sqlFqdn
             SqlDatabase = $names.sqlDatabase; ManagerApp = $names.managerApp; EnvName = $names.environment; AcrName = $names.acr
             TickJobName = $names.tickJob; UpdateJobName = $names.updateJob   # CR5: the names this install was made with
-            SuperAdmins = @("$($deployArgs['ManagerSuperAdmins'])" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            # FIRST-SUPERADMIN-1: the install seeds ONE SuperAdmin -- the person running it (their object id); the others named
+            # are added by that person in Settings, so the check looks for the installing person only (an app install: as named)
+            # a Support-app install: the ONE named administrator (the only one seeded), bound to its object id
+            SuperAdmins = $(if ("$($who.userName)".Trim() -and -not "$($who.supportAppId)".Trim()) { @("$($who.userName)".Trim()) } elseif ($script:firstAdminKey) { @($script:firstAdminKey) } else { @("$($deployArgs['ManagerSuperAdmins'])" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) })
             AlertRecipients = @($cfg.alertRecipients); LicenceExpected = $false; LicenceLater = $licenceLater; SetupHostRuleOwner = 'this'; UseSignedInAccount = $true; ResumeCommand = $resumeCmd
             OutFile = (Join-Path $StatePath 'verify-install.json') }
 if ($deployArgs.Contains('UpdateRing')) { $vArgs['UpdateRing'] = [int]$deployArgs['UpdateRing'] }
@@ -972,6 +990,13 @@ if ("$($script:who.objectId)".Trim() -and -not "$($script:who.supportAppId)".Tri
         }
     } catch { $relR = @{ ok = $false; reason = "$($_.Exception.Message)" } }
     if ($relR) { Write-Host "    SQL admin group: $($relR.reason)" -ForegroundColor $(if ($relR.ok) { 'DarkGray' } else { 'Yellow' }) }
+    # NO-PERSON-DB-ADMIN D1 (framework 12.23 / SEC-08): a removal that was refused, could not be checked or is not read back
+    # is a HARD STOP naming the step 'sql-admin-release' -- never a silent standing database admin. (Same rule as
+    # Invoke-PimDeployAll's own release: _PimDbAdminWindow.ps1 Get-PimDbAdminReleaseVerdict.)
+    if ($relR -and -not [bool]$relR.ok) {
+        Emit 'health-check' 'failed' "STOPPED at step 'sql-admin-release': your removal from the SQL admin group was not read back (you may still be a database admin) -- $($relR.reason)" 'An administrator who may change the SQL admin group''s members removes you there, then resume the installation:' $resumeCmd
+        Finish 1
+    }
 }
 
 Emit 'health-check' 'started'

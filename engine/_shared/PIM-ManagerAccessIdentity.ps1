@@ -41,7 +41,9 @@ function Test-PimManagerAccessEntryMatch {
       Returns @{ match; via ('objectId' | 'identity' | ''); conflict } -- conflict = the NAME matches but the entry is bound
       to a DIFFERENT object id (a re-used UPN): no match, and the caller says so in its log.
     #>
-    [CmdletBinding()] param([object]$Entry, [string]$Identity = '', [string]$ObjectId = '')
+    # -RequireObjectId (FIRST-SUPERADMIN-1 binding): a BOUND entry matches on the oid ONLY -- a request with no verified oid
+    # gets nothing from it (no name fallback). The hosted Manager passes it for the installer-seeded first SuperAdmin.
+    [CmdletBinding()] param([object]$Entry, [string]$Identity = '', [string]$ObjectId = '', [switch]$RequireObjectId)
     $eid  = "$(Get-PimAccessEntryField -Entry $Entry -Name 'identity')".Trim().ToLowerInvariant()
     $eoid = Get-PimAccessEntryObjectId -Entry $Entry
     $who  = "$Identity".Trim().ToLowerInvariant()
@@ -51,8 +53,18 @@ function Test-PimManagerAccessEntryMatch {
         if ($eoid -eq $oid) { return @{ match = $true; via = 'objectId'; conflict = $false } }
         return @{ match = $false; via = ''; conflict = $nameHit }
     }
+    if ($eoid -and $RequireObjectId) { return @{ match = $false; via = ''; conflict = $false; needsObjectId = $nameHit } }
     if ($nameHit) { return @{ match = $true; via = 'identity'; conflict = $false } }
     return @{ match = $false; via = ''; conflict = $false }
+}
+
+function Test-PimAccessEntryRequiresObjectId {
+    <#
+      PURE. FIRST-SUPERADMIN-1 (C): the entry the INSTALLER seeded (seededBy 'first-install', bound to the installing person's
+      object id) is matched on the token's oid only -- never on the sign-in name alone.
+    #>
+    [CmdletBinding()] param([object]$Entry)
+    return ([bool](Get-PimAccessEntryObjectId -Entry $Entry) -and "$(Get-PimAccessEntryField -Entry $Entry -Name 'seededBy')".Trim() -ceq 'first-install')
 }
 
 function ConvertTo-PimAccessEntryObject {
@@ -74,18 +86,26 @@ function Copy-PimManagerAccessObjectIds {
       Returns the -After entries (ordered dictionaries), same order.
     #>
     [CmdletBinding()] param([object[]]$Before = @(), [object[]]$After = @(), [switch]$DropUnknown)
-    $byId = @{}
+    $byId = @{}; $seedOf = @{}
     foreach ($b in @($Before)) {
         $k = "$(Get-PimAccessEntryField -Entry $b -Name 'identity')".Trim().ToLowerInvariant()
         $o = Get-PimAccessEntryObjectId -Entry $b
-        if ($k -and $o -and -not $byId.ContainsKey($k)) { $byId[$k] = $o }
+        if ($k -and $o -and -not $byId.ContainsKey($k)) {
+            $byId[$k] = $o
+            # FIRST-SUPERADMIN-1: the installer-seeded marker travels with the bound id (the oid-only match stays)
+            if (Test-PimAccessEntryRequiresObjectId -Entry $b) { $seedOf[$k] = @{ seededBy = 'first-install'; seededUtc = "$(Get-PimAccessEntryField -Entry $b -Name 'seededUtc')" } }
+        }
     }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($a in @($After)) {
         if ($null -eq $a) { continue }
         $e = ConvertTo-PimAccessEntryObject -Entry $a
         $k = "$($e['identity'])".Trim().ToLowerInvariant()
-        if ($k -and $byId.ContainsKey($k)) { $e['objectId'] = $byId[$k] }
+        if ($e.Contains('seededBy')) { $e.Remove('seededBy') }; if ($e.Contains('seededUtc')) { $e.Remove('seededUtc') }   # never from outside
+        if ($k -and $byId.ContainsKey($k)) {
+            $e['objectId'] = $byId[$k]
+            if ($seedOf.ContainsKey($k)) { $e['seededBy'] = $seedOf[$k].seededBy; if ("$($seedOf[$k].seededUtc)".Trim()) { $e['seededUtc'] = $seedOf[$k].seededUtc } }
+        }
         elseif ($DropUnknown -and $e.Contains('objectId')) { $e.Remove('objectId') }
         $out.Add($e)
     }

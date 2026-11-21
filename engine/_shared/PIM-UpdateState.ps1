@@ -216,10 +216,12 @@ function New-PimUpdateStateRecord {
     # SEC-LANE-1 / IMAGE-PRUNE point 5: written AFTER the outcome by the run that read them (read-modify-write of this record),
     # so every later record carries them on -- a 15-minute "nothing to do" run must not wipe what the heartbeat reports
     # (Update.runningImages / Update.imagePrune). Each says its own read time.
+    # ROLL-HUNG-1 (3.1.60): 'hungStops' -- the hung runs the updater stopped (or failed to stop), newest first
+    # (New-PimRollHungStopRecord), written by the quiesce right after the stop and carried the same way.
     if ($Previous) {
-        foreach ($ck in 'runningImages', 'imagePrune') {
+        foreach ($ck in 'runningImages', 'imagePrune', 'hungStops') {
             $cv = Get-PimUpdateStateField -Object $Previous -Key $ck
-            if ($null -ne $cv -and -not ($cv -is [string] -and -not $cv.Trim())) { $rec[$ck] = $(if ($ck -eq 'runningImages') { @($cv) } else { $cv }) }
+            if ($null -ne $cv -and -not ($cv -is [string] -and -not $cv.Trim())) { $rec[$ck] = $(if ($ck -in @('runningImages', 'hungStops')) { @($cv) } else { $cv }) }
         }
     }
     return $rec

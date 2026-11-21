@@ -1,5 +1,5 @@
 {"version":"3.1.24","date":"2026-11-14","type":"feature",
  "summary":"Security image updates install faster, and each install reports exactly which images it runs.",
- "new":[{"title":"Images reported by the install","text":"PIM Manager reports which images it runs and their .NET version, so a security update can be confirmed on every install."}],
+ "new":[{"title":"Images reported by the install","text":"PIM Manager reports which images it runs and their platform version, so a security update can be confirmed on every install."}],
  "fixes":[{"title":"Faster security image updates","text":"When a release only brings a patched image, PIM Manager swaps the image at once. It no longer waits for running jobs to finish, and your data is not touched."},
           {"title":"Old images removed","text":"Once the new image has run successfully, the old image is removed, so security scanners no longer report it."}]}

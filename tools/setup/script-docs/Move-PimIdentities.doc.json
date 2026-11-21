@@ -101,7 +101,7 @@
     {
       "target": "The PIM database",
       "action": "grant",
-      "object": "the contained database user id-pim-<role>, made by one run of the in-network database job (ca-pim-dbinit)",
+      "object": "the contained database user id-pim-<role>, made by one run of the in-network database job",
       "permission": "the role's database roles from the access catalog (for example pim_engine; the updater also db_ddladmin)",
       "scope": "the PIM database",
       "why": "The new identity signs in to the database with its own user.",

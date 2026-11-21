@@ -522,7 +522,7 @@ function Read-PimAsBuiltFacts {
     $bg = & $rd 'BreakGlassAccounts'; if ($null -ne $bg) { $f['breakGlassCount'] = [int](Get-PimAsBuiltField $bg 'count') }
     $ma = & $rd 'ManagerAccess'; if ($null -ne $ma) { $f['superAdminCount'] = [int](Get-PimAsBuiltField $ma 'superAdminCount') }
     $pro = { param($k) $o = & $fo $k; if ($null -eq $o) { return $null }; return ([bool]$o -and ($null -eq $ProHere -or [bool]$ProHere)) }
-    $f['delegatedAdmin'] = & $pro 'access.delegated'
+    $f['delegatedAdmin'] = & $fo 'access.delegated'   # G1 (2026-11-20): core in both editions -- not ANDed with Pro-here
     $f['makerChecker'] = & $pro 'makerchecker'
     $sa = & $rd 'PendingSecondApprover'
     $sav = "$sa".Trim().Trim('"').ToLowerInvariant()

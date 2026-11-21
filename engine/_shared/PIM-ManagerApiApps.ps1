@@ -393,6 +393,7 @@ function Get-PimManagerAppTierMap {
         (& $e 'PUT'    '^/api/settings/pending-second-approver$'   3 'security' '' 'second-person rule: a second administrator commits staged changes')
         (& $e 'PUT'    '^/api/settings/guard-release-second-person$' 3 'security' '' 'second-person rule: releasing a guard')
         (& $e 'PUT'    '^/api/settings/invardia-connect$'          3 'security' '' 'the support connection (who from outside may act)')
+        (& $e 'POST'   '^/api/settings/mail/relay-password$'       3 'security' '' 'a secret value: a SuperAdmin hands the relay password over sealed, never an application')
         (& $e 'PUT'    '^/api/settings/admin-domain$'              3 'security' '' 'the domain admin accounts sign in with')
         (& $e 'PUT'    '^/api/settings/department-owners-reader$'  3 'security' '' 'gives department owners sign-in to the Manager')
         (& $e 'PUT'    '^/api/settings/departments$'               3 'security' '' 'department owners approve and act as delegated administrators')

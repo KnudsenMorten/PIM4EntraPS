@@ -280,6 +280,9 @@ function New-PimStallRunReportRecord {
         if ($cls -eq 'sql-support-owner-removed') { $stxt = "legacy standing db_owner removed and a JIT add + take-back proved (SECAUDIT-1a 4a), read back: job $job, item $step. The Support app's read-only user stays; db_owner comes only inside a support session." }
         if ($cls -eq 'sql-support-owner-proof') { $stxt = "the Support app's legacy standing db_owner stays (SECAUDIT-1a 4a): job $job, item $step (p1 = the read-only user is not in pim_support_read, module = time-limited support access is not set up, consent = the recorded support consent is not setup, so the signed grant cannot prove an add + take-back)." }
         if ($cls -eq 'sql-support-owner-failed') { $stxt = "the removal of the Support app's legacy standing db_owner did not complete (SECAUDIT-1a 4a): job $job, item $step. Nothing else was changed; the update run lists why." }
+        # ROLL-HUNG-1 (3.1.60): the updater's quiesce found a run hung by the exact rule (Register-PimRollHungReport)
+        if ($cls -eq 'update-run-hung-stopped') { $stxt = "pipeline stuck: a job run sat Running more than 10x its usual length and at least 120 min with no log line since it started; the updater stopped that one run, read back Stopped and rolled: job $job, item $step (started $(Get-PimUplinkField $Entry 'sinceUtc')). Find out why the run hung." }
+        if ($cls -eq 'update-run-hung-stop-failed') { $stxt = "pipeline stuck: a job run is hung (more than 10x its usual length, at least 120 min, no log line since it started) and the updater could NOT stop it; the roll stays held: job $job, item $step (started $(Get-PimUplinkField $Entry 'sinceUtc')). Stop it through the Support app and check the updater's rights." }
         return (New-AitUplinkReport -Kind run @Common -Job $job -Outcome 'warning' -ErrorClass $cls -ErrorText $stxt -FailedStep $step)
     }
     if ($jn -notmatch '^[a-z0-9-]{1,60}$') { $jn = $job }
@@ -2252,7 +2255,8 @@ function Get-PimUplinkTenantCapabilities {
 # =====================================================================================================================
 function Get-PimUplinkStateFieldNames {
     <# PURE. The structured fields, in the order the heartbeat adds them (a literal: child-scope safe). #>
-    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool', 'Update', 'Database')
+    # FirstAdminSeed (FIRST-SUPERADMIN-1, Invardia's contract accepts it as a SOFT key, deployed 2026-11-20)
+    return @('Security', 'Collections', 'Jobs', 'Convergence', 'Mail', 'UpdatePending', 'SqlAccess', 'FeaturesChanged', 'SignIn', 'BuildPool', 'Update', 'Database', 'FirstAdminSeed')
 }
 
 function Get-PimUplinkStateFieldSwitch {
@@ -3008,6 +3012,21 @@ function Get-PimUplinkDatabaseKeys {
     return @('tier', 'dtu', 'maxSizeMb', 'usedMb', 'peakLogWritePct1h', 'minutesAtLimit1h', 'statsAsync', 'statsStalePct', 'statsRefreshedUtc')
 }
 
+function Get-PimUplinkDatabasePinned {
+    <#
+      PURE. OPEN-27 (Invardia 2026-11-20): Database.pinned from the updater's run record UpdateState.setupFacts.sqlTier
+      (Get-PimSqlTierFact): 'pinned-below' = $true; ok / raised / below = $false; anything else (n/a, unknown, not recorded)
+      = $null -- the key is left out (never a guessed value).
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    $sf = Get-PimUplinkField $us 'setupFacts'
+    $t = "$(Get-PimUplinkField $sf 'sqlTier')".Trim().ToLowerInvariant()
+    if ($t -eq 'pinned-below') { return $true }
+    if ($t -in @('ok', 'raised', 'below')) { return $false }
+    return $null
+}
+
 function Get-PimUplinkDatabaseProcSql { <# PURE. The one statement of the read (a literal). #> return 'EXEC pim.usp_DatabaseStats;' }
 
 function Get-PimUplinkDatabaseBaseSql {
@@ -3249,8 +3268,26 @@ function Get-PimUplinkStateFields {
         try {
             $__sfRef = $null; if ($GetSetting) { try { $__sfRef = & $GetSetting 'StatisticsRefreshedUtc' } catch { $__sfRef = $null } }
             $__sfV = New-PimUplinkDatabaseField -Facts (Get-PimUplinkDatabaseFacts -Query $Query) -RefreshedUtc $__sfRef
+            # OPEN-27 (Invardia 2026-11-20): pinned = the tier is held by a pim-sql-tier-pin tag below the product tier (the
+            # UPDATER's recorded fact; the heartbeat reads no ARM) -- Invardia's sizing check skips a pinned tier
+            if ($null -ne $__sfV) { $__sfPin = Get-PimUplinkDatabasePinned -UpdateState $UpdateState; if ($null -ne $__sfPin) { $__sfV | Add-Member -NotePropertyName 'pinned' -NotePropertyValue ([bool]$__sfPin) -Force } }
             if ($null -ne $__sfV) { $out['Database'] = $__sfV }
         } catch { Write-Warning "[uplink] Database could not be built: $($_.Exception.Message)" }
+    }
+    if ((& $__sfOn 'FirstAdminSeed') -and $GetSetting) {
+        # FIRST-SUPERADMIN-1: { state; atUtc } from pim.Settings FirstAdminSeed + ManagerAccess (no SuperAdmin = 'pending'); a read
+        # that fails leaves the key out (soft); PIM_UPLINK_FIRSTADMINSEED=0 switches it off. No name, no object id on the wire.
+        try {
+            # loaded HERE, in this function's scope, when the caller has not
+            if (-not (Get-Command Get-PimFirstAdminHeartbeatField -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-FirstAdminSeed.ps1') }
+            $__sfFaRecOk = $true; $__sfFaRec = $null; try { $__sfFaRec = & $GetSetting 'FirstAdminSeed' } catch { $__sfFaRecOk = $false }
+            $__sfFaAccOk = $true; $__sfFaAcc = $null; try { $__sfFaAcc = & $GetSetting 'ManagerAccess' } catch { $__sfFaAccOk = $false }
+            # the updater's leftover-grant finding (step 2h-ter, UpdateState.setupFacts.firstAdminGrant) -> the soft key
+            # leftoverGrant (true = reported, false = checked and none left, left out when not checked); state is untouched
+            $__sfFaGrant = ''; try { $__sfFaGrant = "$(Get-PimUplinkField (Get-PimUplinkField (ConvertFrom-PimUplinkStoredValue $UpdateState) 'setupFacts') 'firstAdminGrant')".Trim() } catch { $__sfFaGrant = '' }
+            $__sfV = Get-PimFirstAdminHeartbeatField -Record $__sfFaRec -Access $__sfFaAcc -RecordReadable $__sfFaRecOk -AccessReadable $__sfFaAccOk -LeftoverGrant $__sfFaGrant
+            if ($null -ne $__sfV) { $out['FirstAdminSeed'] = $__sfV }
+        } catch { Write-Warning "[uplink] FirstAdminSeed could not be built: $($_.Exception.Message)" }
     }
     return $out
 }

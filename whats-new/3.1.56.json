@@ -1,0 +1,4 @@
+{"version":"3.1.56","date":"2026-11-20","type":"feature",
+ "summary":"Set the mail relay password in PIM Manager, and a new install run needs fewer database rights.",
+ "new":[{"title":"Mail relay password set in PIM Manager","text":"A SuperAdmin sets the mail relay password under Settings > Mail & alerting. Nobody needs a Key Vault or database right for it: PIM Manager hands it over sealed, and the update stores it."}],
+ "fixes":[{"title":"Fewer database rights during setup","text":"Running the install again on an existing installation now also updates the database without making you a database administrator. Who is a SuperAdmin and which features are on are changed in Settings."}]}

@@ -79,12 +79,33 @@ function Get-PimManagerAccessGap {
       PURE. Which of the wanted SuperAdmins are NOT a SuperAdmin in pim.Settings['ManagerAccess'] (case-insensitive).
       -Stored: the managerAccess entries (@{ identity; role }). Returns the missing UPNs (empty = all present).
     #>
-    param([object[]]$Stored = @(), [string[]]$Want = @())
+    param([object[]]$Stored = @(), [string[]]$Want = @(), [switch]$BoundOnly)
+    # -BoundOnly (FIRST-SUPERADMIN-1, Invardia 2026-11-20): only a SuperAdmin BOUND to an object id counts; a name-only entry
+    # is never trusted as "the SuperAdmin is there" (Get-PimManagerAccessNameOnly reports it).
     $have = @{}
     foreach ($e in @($Stored | Where-Object { $_ })) {
-        if ("$(Get-PimFactValue $e 'role')".Trim() -eq 'SuperAdmin') { $have["$(Get-PimFactValue $e 'identity')".Trim().ToLowerInvariant()] = $true }
+        if ("$(Get-PimFactValue $e 'role')".Trim() -ne 'SuperAdmin') { continue }
+        if ($BoundOnly -and -not (Test-PimManagerAccessEntryBound $e)) { continue }
+        $have["$(Get-PimFactValue $e 'identity')".Trim().ToLowerInvariant()] = $true
     }
     return @(@($Want | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) | Where-Object { -not $have.ContainsKey($_.ToLowerInvariant()) })
+}
+
+function Test-PimManagerAccessEntryBound {
+    # PURE. Is this ManagerAccess entry bound to an Entra object id (a GUID objectId)?
+    param([AllowNull()]$Entry)
+    return ("$(Get-PimFactValue $Entry 'objectId')".Trim() -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')
+}
+
+function Get-PimManagerAccessNameOnly {
+    <#
+      PURE. FIRST-SUPERADMIN-1 (Invardia 2026-11-20, "the install check's repair by name goes"): the SuperAdmin entries of
+      pim.Settings['ManagerAccess'] that carry NO object id -- a name only. They are REPORTED (a finding with the name), never
+      trusted as an administrator by the install check and never rewritten by it. Returns their names.
+    #>
+    param([object[]]$Stored = @())
+    return @(@($Stored | Where-Object { $_ -and "$(Get-PimFactValue $_ 'role')".Trim() -eq 'SuperAdmin' -and -not (Test-PimManagerAccessEntryBound $_) }) |
+             ForEach-Object { "$(Get-PimFactValue $_ 'identity')".Trim() } | Where-Object { $_ })
 }
 
 function Resolve-PimAlertRecipientsPlan {
@@ -130,19 +151,33 @@ function ConvertTo-PimAlertingValue {
     $list = { param($v) @(@($v) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
     $ev = [ordered]@{}
     $curEv = Get-PimFactValue $cur 'events'
-    foreach ($e in $EventCatalog) {
-        $v = Get-PimFactValue $curEv $e
-        $ev[$e] = $(if ($null -ne $v) { [bool]$v } else { $true })
+    # 100.40 (f) / framework 12.16: a row in the person-set form (marker defaultsModel = 'person-set-1') holds ONLY the
+    # switches a person set -- they are kept exactly as stored (never filled in, which would freeze today's defaults) and
+    # the marker is kept. An older whole row keeps its shape (the readers' migration rule resolves it).
+    $personSet = ("$(Get-PimFactValue $cur 'defaultsModel')" -eq 'person-set-1')
+    if ($personSet) {
+        if ($curEv -is [System.Collections.IDictionary]) { foreach ($k in @($curEv.Keys)) { if ($null -ne $curEv[$k]) { $ev["$k"] = [bool]$curEv[$k] } } }
+        elseif ($null -ne $curEv) { foreach ($p in @($curEv.PSObject.Properties)) { if ($null -ne $p.Value) { $ev["$($p.Name)"] = [bool]$p.Value } } }
+    } else {
+        foreach ($e in $EventCatalog) {
+            $v = Get-PimFactValue $curEv $e
+            $ev[$e] = $(if ($null -ne $v) { [bool]$v } else { $true })
+        }
     }
     $kind = "$(Get-PimFactValue $cur 'webhookKind')".Trim().ToLowerInvariant(); if ($kind -notin 'teams', 'generic') { $kind = 'generic' }
-    [ordered]@{
-        recipients           = @(& $list $Recipients)
-        digestRecipients     = @(& $list (Get-PimFactValue $cur 'digestRecipients'))
-        tierReportRecipients = @(& $list (Get-PimFactValue $cur 'tierReportRecipients'))
-        events               = $ev
-        webhookUrl           = "$(Get-PimFactValue $cur 'webhookUrl')".Trim()
-        webhookKind          = $kind
-    }
+    $out = [ordered]@{}
+    if ($personSet) { $out['defaultsModel'] = 'person-set-1' }
+    $out['recipients']           = @(& $list $Recipients)
+    $out['digestRecipients']     = @(& $list (Get-PimFactValue $cur 'digestRecipients'))
+    $out['tierReportRecipients'] = @(& $list (Get-PimFactValue $cur 'tierReportRecipients'))
+    $out['events']               = $ev
+    $out['webhookUrl']           = "$(Get-PimFactValue $cur 'webhookUrl')".Trim()
+    $out['webhookKind']          = $kind
+    # a field this script does not know (e.g. throttledAfterRuns / throttledAfterHours) is KEPT, never dropped
+    $known = @('defaultsModel', 'recipients', 'digestRecipients', 'tierReportRecipients', 'events', 'webhookUrl', 'webhookKind')
+    if ($cur -is [System.Collections.IDictionary]) { foreach ($k in @($cur.Keys)) { if ("$k" -notin $known) { $out["$k"] = $cur[$k] } } }
+    elseif ($cur -is [System.Management.Automation.PSCustomObject]) { foreach ($p in @($cur.PSObject.Properties)) { if ("$($p.Name)" -notin $known) { $out["$($p.Name)"] = $p.Value } } }
+    $out
 }
 
 function Get-PimManagerSignInRegistration {
@@ -228,10 +263,21 @@ function Get-PimInstallVerifyRows {
         switch ($id) {
             'superadmins' {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
+                # FIRST-SUPERADMIN-1 (Invardia 2026-11-20): only a SuperAdmin BOUND to an object id counts; a name-only
+                # SuperAdmin entry is REPORTED by name (never trusted, never rewritten by the check)
                 $want = @(Get-PimFactValue $f 'want' | Where-Object { "$_".Trim() })
-                if (-not $want.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' 'no SuperAdmin was named for this install -- nobody can administer it' (& $fx $id))); break }
-                $miss = @(Get-PimManagerAccessGap -Stored @(Get-PimFactValue $f 'stored') -Want $want)
-                if ($miss.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' "NOT a SuperAdmin: $($miss -join ', ')" (& $fx $id))) }
+                $stAll = @(Get-PimFactValue $f 'stored')
+                $nameOnly = @(Get-PimManagerAccessNameOnly -Stored $stAll)
+                $noTxt = $(if ($nameOnly.Count) { "; name-only SuperAdmin entr$(if ($nameOnly.Count -eq 1) { 'y' } else { 'ies' }) (no object id -- NOT trusted and not repaired by this check): $($nameOnly -join ', ')" } else { '' })
+                $bound = @($stAll | Where-Object { $_ -and "$(Get-PimFactValue $_ 'role')".Trim() -eq 'SuperAdmin' -and (Test-PimManagerAccessEntryBound $_) })
+                if (-not $want.Count) {
+                    if ($bound.Count) { $rows.Add((New-PimInstallVerifyRow $id $(if ($nameOnly.Count) { 'warning' } else { $okState }) "SuperAdmin (bound to an object id): $(@($bound | ForEach-Object { "$(Get-PimFactValue $_ 'identity')" }) -join ', ')$noTxt" (& $fx $id))) }
+                    else { $rows.Add((New-PimInstallVerifyRow $id 'failed' "no SuperAdmin was named for this install -- nobody can administer it$noTxt" (& $fx $id))) }
+                    break
+                }
+                $miss = @(Get-PimManagerAccessGap -Stored $stAll -Want $want -BoundOnly)
+                if ($miss.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' "NOT a SuperAdmin bound to an object id: $($miss -join ', ')$noTxt" (& $fx $id))) }
+                elseif ($nameOnly.Count) { $rows.Add((New-PimInstallVerifyRow $id 'warning' "SuperAdmin: $($want -join ', ')$noTxt" (& $fx $id))) }
                 else { $rows.Add((New-PimInstallVerifyRow $id $okState "SuperAdmin: $($want -join ', ')$(if ($repaired) { ' (written by the verify)' })")) }
             }
             'updater' {

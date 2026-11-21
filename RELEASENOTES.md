@@ -13,6 +13,34 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.60 -- 2026-11-20
+
+- A job run that stopped working (far past its usual length, nothing in its log since it started) no longer holds an update back: the updater stops that one run, reads it back, reports it and rolls; a logging run is never stopped. The update log no longer says already on a version while the previous one runs.
+
+## 3.1.59 -- 2026-11-20
+
+- Who needs what shows the mail send right on the engine identity only; the install command takes -Source hosted (the old value keeps working); the ActiveAssignmentsTable gate check judged on correctness and the median request; What's new entries in plain words
+
+## 3.1.58 -- 2026-11-20
+
+- A Support-app install seeds the customer named administrator by Graph-resolved object id (member, enabled, audited), else nobody; the install check no longer repairs SuperAdmins by name; the heartbeat reports FirstAdminSeed.leftoverGrant
+
+## 3.1.57 -- 2026-11-20
+
+- The first SuperAdmin of a private-SQL first install is handed over once through the install Key Vault, bound to the installing person object id (nothing on the job definition); a seeded entry matches on the object id only; the heartbeat reports FirstAdminSeed
+
+## 3.1.56 -- 2026-11-20
+
+- A SuperAdmin sets the SMTP relay password in PIM Manager (sealed hand-over, the updater writes Key Vault); an existing install runs schema and code without the signed-in person as database admin; every database-job start has an empty body. Known limit of 3.1.55, fixed here: the attended installer re-run started the database job with settings in the start body
+
+## 3.1.55 -- 2026-11-20
+
+- Delegated administration ceilings open in Community; an existing install runs its database steps through the database job; the Free/Pro page mirrors the feature list
+
+## 3.1.54 -- 2026-11-20
+
+- Settings pages store only what a person set; stable codes for every run-report class; one naming table in the security pack; the SMTP password script never grants the writer; Database.pinned in the heartbeat
+
 ## 3.1.53 -- 2026-11-20
 
 - Signed-request check judges derived changes by their signed rows; per-subscription Azure read; new SuperAdmins assigned to the sign-in app; docs-version in the heartbeat; docs brought up to date

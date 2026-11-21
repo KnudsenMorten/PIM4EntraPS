@@ -1,0 +1,5 @@
+{"version":"3.1.59","date":"2026-11-20","type":"fix-only",
+ "summary":"Get Started shows exactly which identity holds the mail right, and the install command uses plain words.",
+ "new":[],
+ "fixes":[{"title":"Mail right shown for the right identity","text":"The Who needs what table on Engine permissions shows the mail send right only on the engine identity, the one that sends mail. The web app identity holds no mail right."},
+          {"title":"Plainer install command","text":"The install command now takes -Source hosted for a hosted installation. Commands you already use keep working unchanged."}]}

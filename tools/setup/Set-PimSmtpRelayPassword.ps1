@@ -3,7 +3,9 @@
 <#
 .SYNOPSIS
   Put the SMTP relay password of a PIM Manager environment into its Key Vault, and let the environment's ENGINE job
-  identity read that one secret. -WhatIf shows every change first and asks for no password.
+  identity read that one secret. A PERSON does not use this script: a SuperAdmin sets the password in PIM Manager >
+  Settings > Mail & alerting > SMTP relay > Set relay password (no Key Vault or SQL right). This script is for the Invardia
+  Support app (-SqlServerFqdn, sealed) and the fallback. -WhatIf shows every change first and asks for no password.
 
 .DESCRIPTION
   Owner 2026-10-08: "remember i need to have 2 options: shared mailbox or smtp relay solution" / "we dont use certificates
@@ -11,11 +13,29 @@
   and a password. 🔒 The password is NEVER in SQL, in the page or in a log: it is a secret in the environment's own Key
   Vault, read at send time by the engine job's managed identity ONLY. 🔒 SECURE-WEB-1 (PIM 3.1.26) / MAIL-WEB-RIGHTS-1:
   PIM Manager's web app sends no mail and holds no Key Vault right -- it never writes or reads this secret, and this
-  script never grants its identity anything. A person who may (or the Invardia Support app) runs this script:
+  script never grants its identity anything.
+
+  FOR A PERSON (PIM Manager 3.1.56 or later): PIM Manager > Settings > Mail & alerting > SMTP relay > Set relay password
+  (SuperAdmin). The page seals the password to this installation; its updater writes it into Key Vault. No Key Vault right,
+  no SQL right, no script.
+
+  THE SEALED HAND-OVER BY THE INVARDIA SUPPORT APP (-SqlServerFqdn with -AdminAppId + -AdminSecret; 3.1.56 or later): a
+  browser sign-in is refused on this path (a person uses the page). The installation's updater publishes a public key
+  (pim.Settings 'SecretHandoverPublicKey'; its private key stays a secret in the installation's own vault). This script
+  seals the password to that key (RSA-OAEP-256 + AES-256-GCM; the vault, the secret name and the key id are bound into the
+  seal) and stores ONLY the sealed copy in pim.Settings 'SecretHandoverPending' -- the same sealing the page uses. On its
+  next run (nightly, or Update now) the updater -- the only writer of the installation's secrets -- opens it, writes the
+  secret, reads it back, deletes the sealed copy and records the result (pim.Settings 'SecretHandoverResult', names
+  only). A changed copy, one sealed to another key or for another vault is refused and removed; a failed write keeps the
+  old secret. The updater never assigns a role: it reports whether the engine identity (-ManagedIdentityObjectId) may read
+  the secret. The vault must be the installation's own vault (the one the updater publishes its key for).
+
+  THE DIRECT PATH (no -SqlServerFqdn) is the documented FALLBACK only, for an installation whose updater is older than
+  3.1.56 (it has published no hand-over key), or for a vault that is not the installation's own. Whoever runs it:
 
     1. finds the vault in -SubscriptionId (or, with -CreateVault + -ResourceGroup, creates it: Azure RBAC authorisation);
-    2. writes the secret (-SecretName, default PIM-SmtpRelayPassword) -- when Key Vault refuses the writer, it grants the
-       writer 'Key Vault Secrets Officer' on THAT VAULT once and retries (the RBAC change can take a few minutes);
+    2. writes the secret (-SecretName, default PIM-SmtpRelayPassword). The person running it must ALREADY hold 'Key Vault
+       Secrets Officer' on that vault: the script never grants it (a refusal stops and names that step);
     3. grants -ManagedIdentityObjectId (the ENGINE job's identity) 'Key Vault Secrets User' on THAT SECRET only -- never
        the whole vault. With -ManagerAppName (+ -ResourceGroup) the web app's identities are read and REFUSED if given;
     4. reads the secret back and compares it (the value is never printed).
@@ -28,16 +48,25 @@
 
 .EXAMPLE
   .\Set-PimSmtpRelayPassword.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -VaultName <vault> `
+      -ManagedIdentityObjectId <engine job identity object id> -SqlServerFqdn <server>.database.windows.net `
+      -AdminAppId <Support app id> -AdminSecret <Support app secret> -WhatIf
+  The Invardia Support app's sealed hand-over: preview; then the same command without -WhatIf (it asks for the password
+  twice). The installation's updater writes it into the vault on its next run.
+
+.EXAMPLE
+  .\Set-PimSmtpRelayPassword.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -VaultName <vault> `
       -ManagedIdentityObjectId <engine job identity object id> -WhatIf
-  Preview; then the same command without -WhatIf (it asks for the password twice). Only the engine job's identity:
+  The direct path (fallback). Preview; then the same command without -WhatIf (it asks for the password twice). Only the engine job's identity:
   PIM Manager's web app never reads the password.
 
 .NOTES
   Requirements:
     PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
-    Role: Key Vault Secrets Officer and User Access Administrator (or Owner) on the environment's Key Vault; Reader on the
-          subscription; Contributor on the resource group only with -CreateVault (Azure).
-    Hosts: login.microsoftonline.com, management.azure.com, *.vault.azure.net
+    Role: a person: none here -- PIM Manager SuperAdmin, Settings > Mail & alerting > Set relay password. Sealed hand-over
+          (-SqlServerFqdn): the Invardia Support app only, with its access to the store -- no Key Vault or Azure role.
+          Direct path (fallback):Key Vault Secrets Officer and User Access Administrator (or Owner) on the environment's
+          Key Vault; Reader on the subscription; Contributor on the resource group only with -CreateVault (Azure).
+    Hosts: login.microsoftonline.com, management.azure.com, *.vault.azure.net, *.database.windows.net
 
 .LINK
   https://invardia.com/docs/pim/scripts/Set-PimSmtpRelayPassword/
@@ -58,11 +87,21 @@ param(
     [string]$ManagerAppName,
     [string]$AdminAppId,
     [string]$AdminSecret,
+    # The sealed hand-over: the environment's SQL server. Given = the password is SEALED to the
+    # installation and its updater writes it (no Key Vault right); not given = the direct path (the fallback).
+    [string]$SqlServerFqdn,
+    [string]$SqlDatabase = 'PimPlatform',
     [string]$OutFile
 )
 $ErrorActionPreference = 'Stop'
+# Published as ONE standalone file (Build-PimSupportScripts.ps1 inlines every helper below); the next line makes the build
+# leave out the optional loads the engine libraries end with and fail on any load left.
+# BUILD-NO-OPTIONAL-LOADS
 . (Join-Path $PSScriptRoot '_PimMailSetup.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SecretHandover.ps1')   # the sealed hand-over (SECRETS-WRITE)
 $null = Start-PimScriptRun -Script 'Set-PimSmtpRelayPassword'
 try {
 
@@ -75,7 +114,9 @@ if ($VaultName -notmatch '^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$') { throw "Set
 $miIds = @(@($ManagedIdentityObjectId) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($m in $miIds) { if ($m -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { throw "Set-PimSmtpRelayPassword: -ManagedIdentityObjectId '$m' is not an object id" } }
 
-$result = [ordered]@{ ok = $false; vault = $VaultName; secretName = $SecretName; vaultCreated = $false; secretWritten = $false; readBack = $false; grants = @(); reason = '' }
+$sealedMode = [bool]"$SqlServerFqdn".Trim()
+if ($sealedMode -and "$SqlServerFqdn".Trim() -notmatch '^[A-Za-z0-9.-]+$') { throw "Set-PimSmtpRelayPassword: not a SQL server name: $SqlServerFqdn" }
+$result = [ordered]@{ ok = $false; vault = $VaultName; secretName = $SecretName; mode = $(if ($sealedMode) { 'sealed' } else { 'direct' }); vaultCreated = $false; secretWritten = $false; readBack = $false; sealedWritten = $false; grants = @(); reason = '' }
 function Note($m, $c = 'Gray') { Write-Host "    $m" -ForegroundColor $c }
 function Step($m) { Write-Host "`n--- $m ---" -ForegroundColor Cyan }
 function Done {
@@ -120,6 +161,54 @@ elseif (-not $Password) {
     $Password = $p1
 }
 if (-not $WhatIfPreference -and $Password.Length -lt 1) { Fail 'the password is empty -- nothing was changed' }
+
+# --- SECRETS-WRITE (framework 12.25, decision Q2 a): THE SEALED HAND-OVER -- no Key Vault call, no Key Vault role -------
+# This branch reaches only the sign-in and the store (pim.Settings): it writes the SEALED copy and exits. The installation's
+# updater writes the secret (engine/_shared/PIM-SecretHandover.ps1 Invoke-PimShoUpdaterStep).
+if ($sealedMode) {
+    # a PERSON never takes this path (it would need the SQL admin right NO-PERSON-DB-ADMIN removes): the page does it
+    if ($authPlan.mode -ne 'secret') { Fail "-SqlServerFqdn is the Invardia Support app's path (-AdminAppId + -AdminSecret). A person sets the relay password in PIM Manager > Settings > Mail & alerting > SMTP relay > Set relay password (SuperAdmin) -- no Key Vault or SQL right needed" }
+    Step "[sealed] the installation's hand-over key (pim.Settings $(Get-PimShoPublicKeySetting)) on $SqlServerFqdn"
+    $shoCs = ''
+    try {
+        $global:PIM_SqlServer = "$SqlServerFqdn".Trim(); $global:PIM_SqlDatabase = "$SqlDatabase".Trim(); $global:PIM_TenantId = $TenantId
+        $global:PIM_ClientId = $null; $global:PIM_SqlClientId = $null; $global:PIM_CertThumbprint = $null; $global:PIM_SqlCertThumbprint = $null
+        $global:PIM_ClientSecret = $null; $global:PIM_SqlClientSecret = $null
+        $global:PIM_UseManagedIdentity = $false; $global:PIM_NoManagedIdentity = $true   # never this machine's identity
+        $global:PIM_SqlAccessToken = Get-Tok 'sql'
+        $shoCs = Get-PimSqlConnectionString -Server $global:PIM_SqlServer -Database $global:PIM_SqlDatabase
+    } catch { Fail "could not sign in to the store $SqlServerFqdn : $(ErrText $_)" }
+    $shoGet = { param($n) Get-PimSqlSettingRaw -ConnectionString $shoCs -Name $n }
+    $shoSet = { param($n, $j) Set-PimSqlSetting -ConnectionString $shoCs -Name $n -ValueJson $j }
+    $shoReader = "$(@($miIds) | Select-Object -First 1)"
+    $shoFallback = 'The fallback: the same command without -SqlServerFqdn (it needs Key Vault Secrets Officer on the vault).'
+    if ($WhatIfPreference) {
+        $plan = $null
+        try { $plan = Invoke-PimShoSubmit -GetSetting $shoGet -SetSetting $shoSet -Kind 'smtp-relay-password' -VaultName $VaultName -SecretName $SecretName -Reader $shoReader -PlanOnly }
+        catch { Fail "the store could not be read: $(ErrText $_)" }
+        if (-not $plan.ok) { Fail "$($plan.reason). $shoFallback" }
+        [void]$PSCmdlet.ShouldProcess("pim.Settings $(Get-PimShoPendingSetting) on $SqlServerFqdn", "store the SMTP relay password SEALED to the installation's key $($plan.keyId)$(if ($plan.replaced) { ' (replaces a hand-over still waiting)' }) -- its updater writes it into $VaultName/$SecretName on its next run; no Key Vault call from here")
+        $result.ok = $true; Done; exit 0
+    }
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+    $sub = $null
+    try {
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        try { $sub = Invoke-PimShoSubmit -GetSetting $shoGet -SetSetting $shoSet -Kind 'smtp-relay-password' -VaultName $VaultName -SecretName $SecretName -Value $plain -Reader $shoReader -By (Get-PimMsSignedInUpn) }
+        catch { $sub = @{ ok = $false; reason = "the store refused: $((ErrText $_).Replace($plain, '***'))" } }
+    } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); $plain = $null }
+    if (-not $sub.ok) { Fail "$($sub.reason). $shoFallback" }
+    $result.sealedWritten = $true; $result.ok = $true; Done
+    Write-Host ''
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    Write-Host ' SMTP RELAY PASSWORD HANDED OVER (SEALED)' -ForegroundColor Green
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    Write-Host "  sealed to : the installation's key $($sub.keyId) (the value was not printed and is not stored in the clear)"
+    Write-Host "  written by: the installation's updater, on its next run, into $VaultName / $SecretName"
+    Write-Host "  result    : pim.Settings $(Get-PimShoResultSetting) (names only); the sealed copy is deleted once written"
+    Write-Host '  NEXT      : Update now in PIM Manager (or wait for the nightly run), then Settings > Mail & alerting > Send a test mail.'
+    exit 0
+}
 
 # --- 1. the vault --------------------------------------------------------------------------------------------------------
 Step "[1] Key Vault $VaultName in subscription $SubscriptionId"
@@ -167,7 +256,6 @@ if ("$ManagerAppName".Trim()) {
 if ($WhatIfPreference) {
     # PowerShell's own "What if:" line for every change the run would make (ShouldProcess answers $false under -WhatIf).
     [void]$PSCmdlet.ShouldProcess("Key Vault $VaultName, secret $SecretName", 'write the SMTP relay password (Key Vault data plane; the value is never printed)')
-    [void]$PSCmdlet.ShouldProcess("Key Vault $VaultName ($($vault.id))", "ONLY IF Key Vault refuses the write: assign Azure role 'Key Vault Secrets Officer' on this vault to the signed-in account")
     $secScope = Get-PimKvSecretScope -VaultId "$($vault.id)" -SecretName $SecretName
     foreach ($oid in $miIds) { [void]$PSCmdlet.ShouldProcess("managed identity $oid", "assign Azure role 'Key Vault Secrets User' on the secret only ($secScope)") }
     if (-not $miIds.Count) { Note 'WhatIf: no -ManagedIdentityObjectId given -- nobody would be granted read access.' 'Yellow' }
@@ -180,27 +268,14 @@ $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 try {
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     $writeBody = @{ value = $plain; contentType = 'PIM Manager SMTP relay password' }
-    $written = $false; $granted = $false
-    $deadline = (Get-Date).AddMinutes(6)
-    while (-not $written) {
-        try { [void](Kv -Method PUT -Name $SecretName -Body $writeBody); $written = $true }
-        catch {
-            $t = (ErrText $_).Replace($plain, '***')
-            if ($t -notmatch '(?i)\b403\b|Forbidden') { Fail "Key Vault refused the write: $t" }
-            if (-not $granted) {
-                # the writer may manage the vault (Owner / User Access Administrator) but not its secrets: grant the data-plane
-                # right on THIS vault to the writer itself, once
-                $claims = ConvertFrom-PimMsJwtClaims -Token (Get-Tok 'keyvault')
-                $me = "$($claims.oid)"; $kind = if ("$($claims.idtyp)" -eq 'app' -or -not "$($claims.upn)$($claims.preferred_username)") { 'ServicePrincipal' } else { 'User' }
-                if (-not $me) { Fail "Key Vault refused the write and the signed-in identity could not be read: $t" }
-                $req = New-PimKvRoleAssignmentRequest -Scope "$($vault.id)" -SubscriptionId $SubscriptionId -RoleId (Get-PimKvRoleId -Role SecretsOfficer) -PrincipalId $me -PrincipalType $kind
-                try { [void](Arm -Method PUT -Path $req.path -Body $req.body); Note "granted 'Key Vault Secrets Officer' on $VaultName to the writer ($me) -- waiting for it to take effect" 'Yellow' }
-                catch { $g = ErrText $_; if ($g -notmatch 'RoleAssignmentExists') { Fail "Key Vault refused the write ($t), and the writer could not be given 'Key Vault Secrets Officer' on the vault: $g" } }
-                $granted = $true
-            }
-            if ((Get-Date) -ge $deadline) { Fail 'Key Vault still refuses the write 6 minutes after the grant -- re-run the script; the grant is in place' }
-            Start-Sleep -Seconds 20
-        }
+    # SECRETS-WRITE §12.25 / SEC-10 (decided 2026-11-20, option c): the script NEVER grants the writer a Key Vault right. The
+    # person running it must already hold 'Key Vault Secrets Officer' on this vault (or run it through the Invardia Support
+    # app); a refusal stops with that plain step. (Next: a sealed hand-over the updater writes -- option a.)
+    try { [void](Kv -Method PUT -Name $SecretName -Body $writeBody) }
+    catch {
+        $t = (ErrText $_).Replace($plain, '***')
+        if ($t -match '(?i)\b403\b|Forbidden') { Fail "Key Vault refused the write: you need 'Key Vault Secrets Officer' on the vault $VaultName (this script never grants it to you). Ask an Owner to give it to you for this step, or run it through Invardia support. ($t)" }
+        Fail "Key Vault refused the write: $t"
     }
     $result.secretWritten = $true
     Note 'written' 'Green'

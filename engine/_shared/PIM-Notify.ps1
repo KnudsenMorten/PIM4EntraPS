@@ -77,7 +77,12 @@ function Set-PimEmailControlsGlobals {
         return [bool]$obj.PSObject.Properties[$name]
     }
     $kill = & $get $rec 'killSwitch'
-    if ($null -ne $kill -and [bool]$kill) { $global:PIM_MailKillSwitch = $true }   # a hydrate only ever ARMS
+    # 100.40 (f) / framework 12.16: a row saved in the person-set form (marker defaultsModel) stores the kill switch only
+    # when a person set it -- absent there = the PRODUCT default (off today). An older row without the key is unchanged.
+    if ($null -eq $kill -and $null -ne $rec -and (Get-Command Test-PimSettingPersonSetRow -ErrorAction SilentlyContinue) -and (Test-PimSettingPersonSetRow -Stored $rec)) {
+        try { $kill = (Get-PimSettingEffective -Name 'EmailControls' -Stored $rec)['killSwitch'] } catch { $kill = $null }
+    }
+    if ($null -ne $kill -and [bool]$kill){ $global:PIM_MailKillSwitch = $true }   # a hydrate only ever ARMS
     elseif ($Authoritative -and $null -ne $kill) { $global:PIM_MailKillSwitch = $false }   # the operator's save disarms
     $redir = & $get $rec 'redirectAllTo'
     if ($null -ne $redir -and "$redir".Trim()) { $global:PIM_MailRedirectAllTo = "$redir".Trim() }

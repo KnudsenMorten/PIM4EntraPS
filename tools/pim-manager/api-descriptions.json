@@ -194,6 +194,7 @@
   "PUT /api/settings/mail/mailbox": "Save the shared mailbox mail is sent from.",
   "POST /api/settings/mail/mailbox/use": "Start sending mail from the saved shared mailbox.",
   "POST /api/settings/mail/test": "Send a test mail.",
+  "POST /api/settings/mail/relay-password": "Hand the SMTP relay password over sealed to this installation; its updater writes it into Key Vault (SuperAdmin).",
   "GET /api/settings/naming-catalog": "The naming settings the Get Started page asks for.",
   "GET /api/settings/operational-policy": "The default expiry and activation settings.",
   "PUT /api/settings/operational-policy": "Save the default expiry and activation settings.",

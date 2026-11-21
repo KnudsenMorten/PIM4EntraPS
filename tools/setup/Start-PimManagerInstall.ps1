@@ -125,6 +125,8 @@ param(
     [string]$InstallId = '',
     [string]$SupportAppId = '',
     [ValidateSet('', 'troubleshoot', 'setup', 'asbuilt')][string]$SupportAccess = '',
+    # FIRST-SUPERADMIN-1: the customer's named administrator for an Invardia Support-app install (a lookup key; passed through)
+    [string]$FirstSuperAdminUpn = '',
     [scriptblock]$Reporter,
     [string]$StatePath = '',
     [switch]$Resume,
@@ -334,7 +336,7 @@ try {
 
     # ---------------------------------------------------------------- 2. run the installer from the release, same parameters
     $pass = @{}
-    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp', 'ConnectToInvardia', 'NoConnectToInvardia')) {
+    foreach ($k in @('TenantId', 'SubscriptionId', 'Location', 'ResourceGroup', 'SuperAdmins', 'AlertRecipients', 'MailSender', 'PortalUsers', 'AllowAllMembers', 'VnetAddressPrefix', 'SubnetAddressPrefix', 'Exposure', 'Edition', 'UpdateRing', 'KeyVaultName', 'EngineAzureRootUserAccessAdmin', 'InstallId', 'SupportAppId', 'SupportAccess', 'FirstSuperAdminUpn', 'Reporter', 'StatePath', 'Resume', 'PreflightOnly', 'ViaSupportApp', 'ConnectToInvardia', 'NoConnectToInvardia')) {
         if ($PSBoundParameters.ContainsKey($k)) { $pass[$k] = $PSBoundParameters[$k] }
     }
     # PRIVATE NETWORK (INSTALL-1 item 5): the network parameters, passed through unchanged

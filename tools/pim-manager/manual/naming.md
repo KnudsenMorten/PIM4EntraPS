@@ -34,15 +34,28 @@ scopes. Role-assignable groups accept only **eligible** membership, so access is
 
 ## Azure resources an installation creates
 
-| Resource | Default name |
-|---|---|
-| Resource group | `rg-pim` (or a name you choose) |
-| Portal | `ca-pim-manager` |
-| Engine job | `ca-pim-tick` |
-| Update job | `ca-pim-update` |
-| As-built job | `caj-pim-asbuilt` |
-| SQL admin group | `grp-pim-sql-admins` |
-| SQL server, registry, image-pull identity | a name with the installation's own suffix, for example `sql-pim-` + suffix |
+The manual names every part by its role (the engine, the Manager, the updater, the database job ...). This one table
+maps each role to its resource and identity name: the standard name, and the earlier name an older installation may
+still carry.
+
+<!-- naming-table -->
+| Role | Standard name | Earlier name | Identity |
+|---|---|---|---|
+| The engine (scheduled job) | `caj-pim-engine` | `ca-pim-tick` (some installations: `ca-pim-engine`) | `id-pim-engine` (before the identity move: the job's system-assigned identity) |
+| The wake job (starts the engine on a queued request) | `caj-pim-wake` | -- | `id-pim-engine` (it runs as the engine) |
+| The Manager (web app) | `ca-pim-manager` | `ca-pim-web` (some installations) | `id-pim-web` (before the identity move: the app's system-assigned identity) |
+| The updater (update job) | `caj-pim-updater` | `ca-pim-update` | `id-pim-updater` (before the identity move: the job's system-assigned identity) |
+| The database job | `caj-pim-dbinit` | `ca-pim-dbinit` | `id-pim-dbinit` |
+| The installation documentation job | `caj-pim-docs` | `caj-pim-asbuilt` | `id-pim-docs` (earlier: `id-pim-asbuilt`) |
+| The access-request broker (RFA option) | `ca-pim-rfa` | `ca-pim-requests` (some installations) | `id-pim-requests` |
+| The baseline-publish job (MSP managing tenant) | `caj-pim-publish` | `ca-pim-publish` | `id-pim-publish` |
+| The downlink job (MSP managed tenant) | `caj-pim-downlink` | `ca-pim-downlink-s6` | `id-pim-downlink` |
+| The image-pull identity (shared) | -- | -- | `id-pim-<token>` (the installation's short token), until each part pulls with its own identity |
+| The private-SQL setup identity (private SQL only) | -- | -- | `id-pim-sql-<token>` |
+<!-- /naming-table -->
+
+Other names: the resource group is `rg-pim` (or a name you choose), the SQL admin group `grp-pim-sql-admins`; the SQL
+server and the registry carry the installation's own suffix, for example `sql-pim-` + suffix.
 
 Each installation **records the names it uses**, and every script and job reads them from that record. An
 installation with its own names keeps working through every update.

@@ -98,12 +98,14 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-GuardLimits.ps1')      # guard limits (owner 2026-11-09: Strict mode never blocks an update)
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaQuiesce.ps1')    # SCHEMA-QUIESCE-818 (framework 8.18): no database change under a running PIM job
 . (Join-Path $solRoot 'engine\_shared\PIM-SecretsToKeyVault.ps1') # the secrets into the install's own Key Vault (step 2f-ter; writes secrets, never a role)
+. (Join-Path $solRoot 'engine\_shared\PIM-SecretHandover.ps1')   # SECRETS-WRITE the sealed hand-over a person leaves for the updater (step 2f-ter-bis; writes secrets, never a role)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 . (Join-Path $solRoot 'engine\_shared\PIM-RunningImages.ps1')    # SEC-LANE-1: the images the install runs NOW (digest + .NET) -> heartbeat Update.runningImages
 . (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
 . (Join-Path $solRoot 'engine\_shared\PIM-RightsList.ps1')       # WEB-TRIM-1: the approved rights list (the web identity's approved set, step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobLanes.ps1')         # WEB-TRIM-1: Register-PimTrustStaleReport -- ONE fix request per reported item (step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-WebIdentityTrim.ps1')  # WEB-TRIM-1: id-pim-web trimmed to its approved set, removals only (step 2h)
+. (Join-Path $solRoot 'engine\_shared\PIM-FirstAdminSeed.ps1')    # FIRST-SUPERADMIN-1 (A): the job identity's grant on the used first-SuperAdmin secret removed (step 2h-ter)
 . (Join-Path $solRoot 'engine\_shared\PIM-SupportLegacyOwner.ps1') # SECAUDIT-1a 4a: the Support app's legacy standing db_owner -- the database job removes it after both proofs (step 2h-bis)
 . (Join-Path $solRoot 'engine\_shared\PIM-ManagerApiApps.ps1')   # SUPPORT-FIX-API-1 (framework 12.30 / 12.31): enrol the tagged support app (role Support) + READ the API app hardening (step 2d-api)
 
@@ -596,6 +598,32 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($script:PimSkvResult.lines)) { Say ("secrets to Key Vault: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         foreach ($rb in @($script:PimSkvResult.rollback)) { Say ("secrets to Key Vault: rollback record (no values) " + ($rb | ConvertTo-Json -Depth 6 -Compress)) 'DarkGray' }
     } catch { Say "  secrets to Key Vault not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-ter-bis. SECRETS-WRITE (framework 12.25 / SEC-10, decision Q2 a) -- THE SEALED HAND-OVER ----------------------
+    # A person never writes Key Vault: Set-PimSmtpRelayPassword.ps1 -SqlServerFqdn seals the value to this install's public
+    # key and leaves ONLY the sealed copy in pim.Settings 'SecretHandoverPending'. Here this job (the only writer of the
+    # install's secrets, its Key Vault Secrets Officer from the Support app) keeps the install's hand-over key (private part a
+    # secret in the install's own vault, public part published to pim.Settings), opens a waiting copy, refuses a changed /
+    # foreign one, writes the secret, reads it back (the old value put back on a failed read-back), deletes the sealed copy and
+    # records 'SecretHandoverResult' (names only). It never assigns a role (P9): the engine's read right is REPORTED.
+    # Values never reach a log line (engine/_shared/PIM-SecretHandover.ps1 Invoke-PimShoUpdaterStep). Never fails the update.
+    $script:PimShoResult = $null
+    try {
+        if ("$csSize".Trim()) {
+            $shoInst = Read-PimSkvInstall -Arm $armSeam -SubscriptionId $sub -ResourceGroup $rg
+            $shoVault = Get-PimSkvVaultChoice -Vaults @($shoInst.vaults)
+            if ($shoVault.ok) {
+                $shoCs = "$csSize"
+                $shoGet = { param($n) Get-PimSqlSettingRaw -ConnectionString $shoCs -Name $n }
+                $shoSet = { param($n, $j) Set-PimSqlSetting -ConnectionString $shoCs -Name $n -ValueJson $j }
+                $shoDel = { param($n, $raw) Invoke-PimSqlNonQuery -ConnectionString $shoCs -Sql 'DELETE FROM pim.Settings WHERE Name=@n AND CAST(ValueJson AS varbinary(max)) = CAST(@v AS varbinary(max))' -Parameters @{ n = $n; v = $raw } }
+                $shoVid = "$($shoVault.id)"
+                $shoRead = { param($oid, $secName) Test-PimShoReaderHolds -Assignments @(Read-PimSkvVaultAssignments -Arm $armSeam -Scope "$shoVid/secrets/$secName") -PrincipalId $oid }
+                $script:PimShoResult = Invoke-PimShoUpdaterStep -Kv $skvKv -GetSetting $shoGet -SetSetting $shoSet -RemoveSettingIf $shoDel -VaultName $shoVault.name -VaultUri $shoVault.uri -ReaderCheck $shoRead `
+                                           -GrantCommand (Get-PimSkvGrantCommand -TenantId ("$(if ("$($env:PIM_TenantId)".Trim()) { $env:PIM_TenantId } else { $global:PIM_TenantId })".Trim()) -SubscriptionId $sub -ResourceGroup $rg)
+                foreach ($l in @($script:PimShoResult.lines)) { Say ("secret hand-over: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+            } else { Say "  secret hand-over: not run -- $($shoVault.reason)" 'DarkGray' }
+        } else { Say '  secret hand-over: not run -- no store connection on this job' 'DarkGray' }
+    } catch { Say "  secret hand-over not checked: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f-auth. AUTH-CONVERGE-1 (3.1.27, rule "five years, no contact: updates via the updater alone") -- THE STANDARD APPLIED ----
     # An install ALREADY on the built-in sign-in is brought to the current standard by this job's own identity
     # (engine/_shared/PIM-BuiltinAuth.ps1 Invoke-PimBuiltinAuthConverge): the API scope user_impersonation exposed + the Azure
@@ -736,6 +764,27 @@ function Invoke-PimUpdaterConvergeStep {
 # it off; dryrun = read and classify only. A trim problem is a warning, never a failed update.
 $script:PimWebTrimRan = $false
 $script:PimWebTrimResult = $null
+# ---- 2h-ter. FIRST-SUPERADMIN-1 (A) -- NOTHING STANDING LEFT AFTER THE FIRST SUPERADMIN ------------------------------------
+# The database job's identity held Key Vault Secrets Officer on the ONE secret 'pim-first-superadmin' (the install's own vault,
+# named on the job as PIM_KeyVaultId). Once that secret is gone (used or refused), every role assignment on it is removed and
+# read back -- where this updater's own rights allow; else REPORTED (a line; the installer's next run removes it). While the
+# secret is still there it stays (the job needs it). REMOVALS ONLY; a problem is a line, never a failed update.
+function Invoke-PimUpdaterFirstAdminTrimStep {
+    try {
+        $faCs = ''; try { $faCs = "$(Get-PimSqlConnectionString)" } catch { $faCs = '' }
+        $faRec = $null; try { if ($faCs.Trim()) { $faRec = Get-PimSqlSetting -ConnectionString $faCs -Name 'InstallNames' } } catch { $faRec = $null }
+        $faJobName = Get-PimDbInitJobName -ManagerApp $managerApp -Record $faRec
+        $faArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+        $faJob = Invoke-PimFirstAdminArmGet -Arm $faArm -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$faJobName`?api-version=2024-03-01"
+        $faVault = ''
+        if ($faJob) { $faVault = "$(@(@(@($faJob.properties.template.containers)[0].env) | Where-Object { $_ -and "$($_.name)" -ceq (Get-PimFirstAdminVaultEnvName) }) | Select-Object -First 1 | ForEach-Object { $_.value })".Trim() }
+        if ($faVault) {
+            $faT = Invoke-PimFirstAdminGrantTrim -Arm $faArm -VaultId $faVault
+            foreach ($l in @($faT.lines)) { Say ("converge: " + $l) $(if ($faT.removed) { 'Cyan' } elseif ($faT.ok) { 'DarkGray' } else { 'Yellow' }) }
+            if ($script:PimSetupFacts -is [System.Collections.IDictionary]) { $script:PimSetupFacts['firstAdminGrant'] = $(if ($faT.secretPresent) { 'secret-pending' } elseif ($faT.reported) { 'reported' } elseif ($faT.removed) { 'removed' } else { 'none' }) }
+        }
+    } catch { Say "  the first-SuperAdmin secret's role was not checked (the update is unaffected): $($_.Exception.Message)" 'Yellow' }
+}
 function Invoke-PimUpdaterWebTrimStep {
     param([string]$When = 'update')
     if ($script:PimWebTrimRan) { return }
@@ -794,6 +843,8 @@ function Invoke-PimUpdaterWebTrimStep {
             $script:PimSetupFacts['webIdentityTrimDetail'] = ("$($r.detail)" + $(if (@($r.removed).Count) { '; removed: ' + (@($r.removed | ForEach-Object { $_.text }) -join ' | ') }) + $(if (@($r.reported).Count) { '; reported: ' + (@($r.reported | ForEach-Object { $_.text }) -join ' | ') }))
         }
     } catch { Say "  web identity not trimmed (the update is unaffected): $($_.Exception.Message)" 'Yellow' }
+    # ---- 2h-ter. FIRST-SUPERADMIN-1 (A): the role on the used first-SuperAdmin secret (removals only; its own function below)
+    Invoke-PimUpdaterFirstAdminTrimStep
     # ---- 2h-bis. SECAUDIT-1a 4a (framework, owner-decided; REQUIREMENTS 104.8) -- THE SUPPORT APP'S LEGACY STANDING db_owner ----
     # Right after the trim found it ('held': db_owner outside any open support session): the DATABASE JOB removes it, as its
     # own identity (the SQL admin group) -- this updater cannot (pim_updater + db_ddladmin) and sends no security statement.
@@ -1130,6 +1181,64 @@ function Get-PimUpdaterRunLastLogUtc {
         if ("$v".Trim()) { return (ConvertTo-PimSchemaQuiesceUtc $v) } else { return $null }
     } catch { return $null }
 }
+# ROLL-HUNG-1 (framework, Invardia 2026-11-20): the COUNT of a candidate run's log lines since its start, from the same
+# workspace. READ ONLY (the same two ARM GETs + one Log Analytics query). THROWS when the log cannot be read, so "could not
+# read" is never taken for "zero lines": no workspace, a query error, no row, a non-number -- and also when the workspace
+# holds NO line of this job's other runs in the last 2 days (then the query cannot prove silence: a wrong table or column
+# would otherwise read as zero lines and stop a live run).
+function Get-PimUpdaterRunLogLines {
+    param([string]$Job, [string]$Execution, [AllowNull()][object]$StartUtc)
+    if (-not $script:PimSqLogCid) {
+        $llJ = Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$Job" -ApiVersion $script:PimAcaApi
+        $llE = Invoke-PimArm -Method GET -Path "$($llJ.properties.environmentId)" -ApiVersion $script:PimAcaApi
+        $script:PimSqLogCid = "$($llE.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim()
+    }
+    if (-not $script:PimSqLogCid) { throw "the job environment sends its logs to no Log Analytics workspace" }
+    $llStart = ConvertTo-PimSchemaQuiesceUtc $StartUtc
+    if ($null -eq $llStart) { throw "the run has no start time" }
+    $llX = "$Execution".Replace("'", "''"); $llJn = "$Job".Replace("'", "''")
+    $llQ = "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(2d) | summarize lines = countif(ContainerGroupName_s startswith '$llX' and TimeGenerated >= datetime($($llStart.AddMinutes(-5).ToString("yyyy-MM-ddTHH:mm:ssZ")))), jobLines = countif(ContainerGroupName_s startswith '$llJn-')"
+    $llR = Invoke-PimRest -Method POST -Url "https://api.loganalytics.io/v1/workspaces/$($script:PimSqLogCid)/query" -Resource 'https://api.loganalytics.io' -Body @{ query = $llQ; timespan = 'P2D' }
+    $llRow = @(@(@($llR.tables)[0].rows)[0])
+    if ($llRow.Count -lt 2) { throw "the log query returned no row" }
+    $llN = [long]-1; $llJl = [long]-1
+    if (-not [long]::TryParse("$($llRow[0])", [ref]$llN) -or -not [long]::TryParse("$($llRow[1])", [ref]$llJl)) { throw "the log query returned no count" }
+    if ($llN -eq 0 -and $llJl -eq 0) { throw "the workspace holds no log line of $Job in the last 2 days, so silence cannot be proven" }
+    return @{ lines = $llN }
+}
+# ROLL-HUNG-1: stop ONE hung execution and read its state back. The ONLY ARM write of the quiesce: POST .../executions/<x>/stop
+# (Contributor on the install resource group, which the updater holds -- Microsoft.App/jobs/stop/action), then up to 12 reads
+# 10 s apart until it is no longer Running. Returns the status read back ('Stopped' = stopped); throws when the call fails.
+function Stop-PimUpdaterHungExecution {
+    param([string]$Job, [string]$Execution)
+    $shBase = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$Job"
+    $null = Invoke-PimArm -Method POST -Path "$shBase/executions/$Execution/stop" -ApiVersion '2024-03-01'
+    $shSt = ''
+    for ($shI = 0; $shI -lt 12; $shI++) {
+        Start-Sleep -Seconds 10
+        try {
+            $shList = Invoke-PimArm -Method GET -Path "$shBase/executions" -ApiVersion $script:PimAcaApi
+            $shSt = "$(@(@($shList.value) | Where-Object { $_ -and "$($_.name)" -eq $Execution })[0].properties.status)".Trim()
+        } catch { $shSt = '' }
+        if ($shSt -and $shSt -ine 'Running') { break }
+    }
+    return $shSt
+}
+# ROLL-HUNG-1: each stop (or failed stop) in UpdateState 'hungStops' (read-modify-write; the outcome record carries it on), so
+# the Jobs page and the heartbeat can show it. Best effort: never changes the update.
+function Save-PimUpdaterHungStops {
+    param([AllowEmptyString()][string]$Cs, [AllowNull()][object[]]$Entries)
+    if (-not "$Cs".Trim() -or -not @($Entries | Where-Object { $_ }).Count) { return }
+    try {
+        $hsUs = Read-PimUpdateState -ConnectionString $Cs
+        $hsH = [ordered]@{}; if ($hsUs -and $hsUs -isnot [string]) { foreach ($pp in $hsUs.PSObject.Properties) { $hsH[$pp.Name] = $pp.Value } }
+        $hsList = @(Get-PimUpdateStateField -Object $hsUs -Key 'hungStops' | Where-Object { $_ })
+        foreach ($e in @($Entries | Where-Object { $_ })) { $hsList = @(New-PimRollHungStopRecord -Previous $hsList -Entry $e) }
+        $hsH['hungStops'] = @($hsList)
+        $hsSaved = Save-PimUpdateState -ConnectionString $Cs -Record ([pscustomobject]$hsH)
+        Say "schema quiesce: $(@($Entries).Count) hung run record(s) $(if ($hsSaved.ok) { 'kept in the update state' } else { "NOT kept ($($hsSaved.reason))" })" 'DarkGray'
+    } catch { Say "schema quiesce: the hung run record was not kept ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
+}
 function Invoke-PimUpdaterSchemaQuiesce {
     <# -Once: ONE read, no wait, no hold (the as-built converge on a run that did not quiesce): go only when nothing runs. #>
     param([AllowEmptyString()][string]$Cs = '', [switch]$Once)
@@ -1146,7 +1255,23 @@ function Invoke-PimUpdaterSchemaQuiesce {
     $sqRetry = [bool]($null -ne $script:PimUpdateRollRetry -and $script:PimUpdateRollRetry.retry)
     $sqMax = $(if ($Once) { 0 } elseif ($sqRetry) { (Get-PimUpdateRetryQuiesceWaitMinutes) * 60 } else { (Get-PimSchemaQuiesceWaitMinutes) * 60 })
     $sqLastLog = { param($j, $x) Get-PimUpdaterRunLastLogUtc -Job $j -Execution $x }   # SCHEMA-QUIESCE-LONG-SNAPSHOT (3): read only
-    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -NoLongWait:($Once -or $sqRetry) -LastLog $sqLastLog -Log { param($l) Say $l 'DarkGray' }
+    # ROLL-HUNG-1: the waiting quiesce (never the one-read -Once check) may stop ONE execution that is hung by the exact rule
+    # (engine/_shared/PIM-SchemaQuiesce.ps1 Get-PimRollHungVerdict); one fix request each (register-once), no mail.
+    $sqReadLog = $null; $sqStop = $null; $sqReport = $null
+    if (-not $Once) {
+        $sqReadLog = { param($j, $x, $s) Get-PimUpdaterRunLogLines -Job $j -Execution $x -StartUtc $s }
+        $sqStop = { param($j, $x) Stop-PimUpdaterHungExecution -Job $j -Execution $x }
+        if ("$Cs".Trim()) {
+            $sqRepCs = "$Cs"
+            $sqReport = { param($e) Register-PimRollHungReport -Entry $e -GetSetting { param($n) Get-PimSqlSettingRaw -ConnectionString $sqRepCs -Name $n } -SetSetting { param($n, $v) Set-PimSqlSetting -ConnectionString $sqRepCs -Name $n -ValueJson (ConvertTo-Json -InputObject $v -Depth 6 -Compress) } }
+        }
+    }
+    $q = Invoke-PimSchemaQuiesce -Jobs $sqJobs -ReadExecutions $sqRead -SetHold $sqHold -By $selfJob -NoHold:$Once -MaxWaitSeconds $sqMax -NoLongWait:($Once -or $sqRetry) -LastLog $sqLastLog -ReadLog $sqReadLog -StopExecution $sqStop -ReportHung $sqReport -Log { param($l) Say $l 'DarkGray' }
+    $sqHungAll = @(@($q.stopped) + @($q.stopFailed) | Where-Object { $_ })
+    if ($sqHungAll.Count) {
+        Save-PimUpdaterHungStops -Cs "$Cs" -Entries $sqHungAll
+        foreach ($rp in @($q.reports | Where-Object { $_ })) { Say "schema quiesce: the stuck run fix request $(if ($rp.registered) { "is filed ($($rp.id))" } else { "was not filed: $($rp.reason)" })" 'DarkGray' }
+    }
     if ($q.held) { $script:PimSchemaHoldCs = "$Cs" }
     if ($q.go -and -not $Once) { $script:PimSchemaQuiet = $true }
     if (-not $Once) { Say "$($q.line) [$($sqJobs.Count) job(s) read$(if ($null -eq $sqExisting) { ', the job list was not readable: every resolved name read' })]" $(if ($q.go) { 'DarkGray' } else { 'Yellow' }) }

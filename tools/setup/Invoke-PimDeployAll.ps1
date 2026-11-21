@@ -50,8 +50,8 @@
     this script delivers the orchestration -- it does not claim live-verified by itself.
 
 .PARAMETER Source
-    'sync-automateit' (hosted: ACA + Azure SQL) or 'git-pull' (community/VM/local). Drives whether
-    INFRA is Setup-PimContainers (hosted) or Setup-PimVM (community).
+    'hosted' (the default: Container Apps + Azure SQL) or 'git-pull' (a VM / local install). Drives whether
+    INFRA is Setup-PimContainers (hosted) or Setup-PimVM (VM / local).
 
 .PARAMETER TenantId / SubscriptionId
     Target tenant + subscription (no defaults -- pass your own, per CLAUDE.md).
@@ -94,19 +94,19 @@
     (masked), logged or saved in the deploy profile. Without it the plan and every step's arguments are unchanged.
 
 .EXAMPLE
-    .\Invoke-PimDeployAll.ps1 -Source sync-automateit -TenantId <tid> -SubscriptionId <sub> `
+    .\Invoke-PimDeployAll.ps1 -Source hosted -TenantId <tid> -SubscriptionId <sub> `
         -ResourceGroup rg-pim -VnetName vnet -VnetResourceGroup rg-net -AcrName myacr `
         -SqlServerFqdn my.database.windows.net
     Plan-only (default -WhatIf): print the ordered deploy-everything plan; make no changes.
 
 .EXAMPLE
-    .\Invoke-PimDeployAll.ps1 -Source sync-automateit -TenantId <tid> -SubscriptionId <sub> `
+    .\Invoke-PimDeployAll.ps1 -Source hosted -TenantId <tid> -SubscriptionId <sub> `
         -ResourceGroup rg-pim -VnetName vnet -VnetResourceGroup rg-net -AcrName myacr `
         -SqlServerFqdn my.database.windows.net -SqlConnectionString '<conn>' -Apply
     Stand up / update the whole solution, then verify; auto-rollback the code on a verify failure.
 
 .EXAMPLE
-    .\Invoke-PimDeployAll.ps1 -Source sync-automateit -TenantId <tid> -ResourceGroup rg-pim `
+    .\Invoke-PimDeployAll.ps1 -Source hosted -TenantId <tid> -ResourceGroup rg-pim `
         -SqlDatabase PimPlatform -EngineClientId <cid> -EngineCertThumbprint <thumb> -ValidateOnly
     Run ONLY the test-tenant validation against an already-deployed environment.
 
@@ -136,7 +136,11 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('git-pull','sync-automateit')][string]$Source = 'sync-automateit',
+    # 'hosted' (Container Apps + Azure SQL, the default) or 'git-pull' (a VM / local install). The older spelling of
+    # 'hosted' is still accepted, unlisted, so every existing command line and deploy profile keeps working.
+    [ArgumentCompleter({ param($c, $p, $w) @('hosted', 'git-pull') | Where-Object { $_ -like "$w*" } })]
+    [ValidateScript({ if (@('hosted', 'git-pull', 'sync-automateit') -contains "$_") { $true } else { throw "-Source is 'hosted' or 'git-pull' (got '$_')." } })]
+    [string]$Source = 'hosted',
     # s31: stand up the right TOPOLOGY for a deployment SCENARIO (S1..S6). When set, the scenario's
     # resolved update source + managed hosting drive the deploy path (overrides -Source); it is also
     # passed through to Invoke-PimUpdate so the from-master (S5/S6) downlink is honoured end-to-end.
@@ -249,8 +253,8 @@ param(
     # half-configured deploy.
     [string]$AdminCertPem,
     # --- BUG-68: the PREREQ step's inputs -------------------------------------------------
-    # New-PimHostingPrerequisites DERIVES every name from the estate token (rg-automateit-<t>,
-    # vnet-pim-<t>, acrpim<t>, sql-ait-<t>, id-pim-<t>) while this orchestrator RECEIVES names
+    # New-PimHostingPrerequisites DERIVES every name from the estate token (the resource group,
+    # vnet-pim-<t>, acrpim<t>, the SQL server, id-pim-<t>) while this orchestrator RECEIVES names
     # explicitly. That mismatch is dangerous, not cosmetic: a token whose derived names disagree
     # with -ResourceGroup/-AcrName would provision a COMPLETE set of resources that `infra` then
     # never looks at -- a silent split-brain deploy, and the most expensive kind of "success".
@@ -429,6 +433,15 @@ param(
     # 🔒 Written to SQL, so it survives a CSV import: the import writes pim.Rows, and its only
     # touch on Settings adds keys that are not already there.
     [string]$ManagerSuperAdmins = "$($env:PIM_MANAGER_SUPERADMINS)",
+    # FIRST-SUPERADMIN-1 (Support-app install, Invardia 2026-11-20): the CUSTOMER's named administrator -- a lookup KEY, never
+    # the binding. Used ONLY when this deploy runs as the Invardia Support app (no person): resolved in this tenant's
+    # directory (Member + enabled) and THAT object id becomes the first SuperAdmin through the same one-time hand-over.
+    # A person's own deploy ignores it (said); a failed lookup seeds nobody (said).
+    [string]$FirstSuperAdminUpn = '',
+    # FIRST-SUPERADMIN-1 (Invardia 2026-11-20): the install's OWN Key Vault, where a private install's first-SuperAdmin secret
+    # goes (forwarded to Setup-PimContainers; blank = kv-pim-<token>). The first SuperAdmin is the person who RUNS this deploy
+    # (the oid of its own sign-in token); -ManagerSuperAdmins names others, who are added by that person in Manager > Settings.
+    [string]$KeyVaultName = '',
     [string]$EngineClientId,
     [string]$EngineCertThumbprint,
     [string]$EngineClientSecret,
@@ -575,6 +588,15 @@ param(
     [scriptblock]$EnrollmentSleep,
     [int]$EnrollmentTimeoutSeconds = 900
 )
+# BRAND-SOURCE-1: -Source normalised ONCE, here, before anything reads it. The customer-facing value is 'hosted'; the
+# internal libraries (Get-PimDeployAllPlan, Get-PimUpdateSourceProfile, Invoke-PimUpdate, Build-PimManagerImage) know the
+# hosted path by its internal value 'sync-automateit', which also stays accepted on the command line as a silent synonym.
+# Everything below compares the internal value; $script:PimDeploySourceLabel is what the run prints. The bound value is
+# rewritten too, so the deploy profile (taken from $PSBoundParameters below) holds the internal value an older release
+# replaying that profile still binds.
+$script:PimDeploySourceLabel = if (@('hosted', 'sync-automateit') -contains "$Source") { 'hosted' } else { "$Source" }
+if ("$Source" -eq 'hosted') { $Source = 'sync-automateit' }
+if ($PSBoundParameters.ContainsKey('Source')) { $PSBoundParameters['Source'] = $Source }
 # customer installs (no -RunDevGates) never run the dev-only GUI smoke in the code step (Update-PimContainers reads this)
 $env:PIM_DEPLOY_DEV_GATES = $(if ($RunDevGates) { '1' } else { '0' })
 
@@ -744,6 +766,12 @@ function Get-PimDeployJobEnvValue {
 . (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
 . (Join-Path $here '_PimRegions.ps1')                                # 100.62: region name check + live capability preflight (below)
 . (Join-Path $solRoot 'engine\_shared\PIM-InstallNames.ps1')         # CR5 step 2: the name set (today's / new) + display-name forms
+# NO-PERSON-DB-ADMIN D1: the SQL-admin-group decision for a signed-in person + the run through the database job (its gate is
+# the database job's own membership read back, engine/_shared/PIM-DbInitMembership.ps1 -- the same one setup uses)
+. (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1')
+. (Join-Path $here '_PimDbAdminWindow.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-FirstAdminSeed.ps1')   # FIRST-SUPERADMIN-1: the first SuperAdmin bound to the installer's oid
 
 # ---- the registry SKU follows the EXPOSURE unless the caller said otherwise -------------------
 # Stated rather than silent: this is a cost difference (~10x) and a security posture, so a deploy
@@ -864,6 +892,17 @@ if ($script:PimEnrolling) {
 $script:PimSignedInOid = ''
 $script:PimSignedInAppId = ''
 $script:PimSignedInSqlChecked = $false
+# NO-PERSON-DB-ADMIN D1: the decision (set after the plan), the database job this install has, and its one run of this deploy
+$script:PimDbAdminPlan = $null
+$script:PimDbJobName = "$DbInitJobName".Trim()
+$script:PimDbJobRun = $null
+$script:PimDbAdminRelease = $null
+$script:PimDbCodeStore = $null   # D2: Get-PimDbAdminCodeNeedsStore's answer (may 'code' roll without the store?)
+$script:PimDbSchemaFit = $null   # D2 (decision A): Get-PimDbAdminSchemaJobFit's answer (does the job's own image carry this deploy's schema?)
+$script:PimFirstAdminByInfra = $false   # FIRST-SUPERADMIN-1: infra handed the first SuperAdmin to the database job in this run
+$script:PimDeployFirstAdminSubject = $null   # FIRST-SUPERADMIN-1: who the first SuperAdmin is (one directory lookup per run)
+# decision A: the gates count as ASKED on a re-run only when the caller passed them (the defaults are not a request)
+$script:PimGatesBound = ($PSBoundParameters.ContainsKey('FeatureGates') -or $PSBoundParameters.ContainsKey('FeatureGatesDisable'))
 if ($UseSignedInAccount) {
     # 71.33 -- one identity per deploy: a signed-in deploy never also carries an application credential.
     $mixed = @('AdminAppId', 'AdminSecret', 'AdminCertPem', 'SqlAdminClientId', 'SqlAdminClientSecret', 'SqlAdminCertThumbprint') | Where-Object { "$((Get-Variable -Name $_ -ValueOnly))".Trim() }
@@ -911,9 +950,17 @@ function Confirm-PimSignedInSqlAccess {
     # 71.33 -- before the FIRST step that connects to SQL as the signed-in user: make that user a member of the SQL admin
     # group (members-only). Returns '' when fine, else the reason the step must fail. Once per run.
     # PIM 100.156 B: an SQL admin APPLICATION is made a member again here too (Confirm-PimSetupAppSqlAdminMember, never fatal).
+    param([string]$Step = '')
     if (-not $UseSignedInAccount) { Confirm-PimSetupAppSqlAdminMember }
     if (-not $UseSignedInAccount -or $StepRunner -or $script:PimSignedInSqlChecked) { return '' }
     if (-not "$SqlServerFqdn".Trim() -or $SqlPrivateEndpoint) { return '' }
+    # NO-PERSON-DB-ADMIN D1 (framework 12.23 / SEC-08): on an EXISTING install (the database job exists, or could not be read)
+    # the person is added ONLY for a step that still connects as the person (D2 open: infra / schema / code / licence) and
+    # really runs -- never for a step that goes through the database job. A refusal here is the guard: those steps branch to
+    # the job before they ever get here.
+    if (-not (Test-PimDbAdminAddAllowed -Plan $script:PimDbAdminPlan -Step $Step)) {
+        return "NO-PERSON-DB-ADMIN: the signed-in person is not added to the SQL admin group for step '$Step' on this install ($($script:PimDbAdminPlan.mode)) -- its database work runs through the database job '$($script:PimDbJobName)'"
+    }
     $script:PimSignedInSqlChecked = $true
     try {
         $m = Invoke-PimSignedInSqlAdminMembership -SubscriptionId $(if ("$SqlSubscriptionId".Trim()) { $SqlSubscriptionId } else { $SubscriptionId }) -TenantId $TenantId `
@@ -1057,9 +1104,12 @@ if ($Scenario) {
     $planSource = if ($sPlan.updateSource -eq 'from-master') { if ($sPlan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
                   elseif ($sPlan.updateSource -eq 'sync-automateit') { 'sync-automateit' } else { 'git-pull' }
     $Source = $planSource
+    # BRAND-SOURCE-1: the run prints the customer-facing name of the internal value
+    $script:PimDeploySourceLabel = if ($planSource -eq 'sync-automateit') { 'hosted' } else { "$planSource" }
     $scenarioArgs['Scenario'] = $Scenario
     Write-Host ("[scenario] {0} ({1}) -> updateSource={2} managedHosting={3} planSource={4} hosting={5} spn={6} edition={7}" -f `
-        $sPlan.id, $sPlan.role, $sPlan.updateSource, $sPlan.managedHosting, $planSource, $sPlan.hostingLocation, $sPlan.spnModel, $sPlan.activeEdition) -ForegroundColor Cyan
+        $sPlan.id, $sPlan.role, $(if ($sPlan.updateSource -eq 'sync-automateit') { 'hosted' } else { $sPlan.updateSource }), $sPlan.managedHosting,
+        $script:PimDeploySourceLabel, $sPlan.hostingLocation, $sPlan.spnModel, $sPlan.activeEdition) -ForegroundColor Cyan
 }
 $srcProfile = Get-PimUpdateSourceProfile -Source $Source
 $hosted  = [bool]$srcProfile.isHosted
@@ -1084,7 +1134,7 @@ if ($Scenario -and -not $hosted -and -not $NotHosted) {
     # 🪤 -f binds TIGHTER than +, so a format string split across a concatenation only formats the
     # LAST fragment -- the first one printed a literal "{0}". Parenthesise the whole string.
     Write-Host (("[scenario] hosting: False -> True (-Scenario {0} is a Container Apps deployment; " +
-                 "the update source '{1}' describes where UPDATES come from, not what compute runs them)") -f $Scenario, $Source) -ForegroundColor Yellow
+                 "the update source '{1}' describes where UPDATES come from, not what compute runs them)") -f $Scenario, $script:PimDeploySourceLabel) -ForegroundColor Yellow
     $hosted = $true
 }
 if ($NotHosted) { $hosted = $false }
@@ -1117,7 +1167,7 @@ if ($Descriptor) {
     $aitDeploy = Join-Path (Split-Path -Parent (Split-Path -Parent $solRoot)) 'sync\_AitPlatformDeploy.ps1'
     # BUG-157: the descriptor reader is part of the AutomateIT framework, which the public community
     # edition does not include. Say that, instead of naming a path that can never exist there.
-    if (-not (Test-Path -LiteralPath $aitDeploy)) { throw "-Descriptor needs the AutomateIT framework reader ($aitDeploy), which the public community edition does not include. Omit -Descriptor and pass the deployment values as parameters." }
+    if (-not (Test-Path -LiteralPath $aitDeploy)) { throw "-Descriptor needs the framework's descriptor reader ($aitDeploy), which the public community edition does not include. Omit -Descriptor and pass the deployment values as parameters." }
     . $aitDeploy
     $descriptorDoc = Get-AitPlatformDeploy -Path $Descriptor
     if (-not $descriptorDoc) { throw "-Descriptor '$Descriptor' is missing or empty. Refusing to deploy against a descriptor that says nothing -- that is indistinguishable from deploying with no configuration at all." }
@@ -1242,7 +1292,7 @@ if ($hosted) {
     }
 }
 
-Write-Host "=== PIM Manager DEPLOY-ALL ($Source;$(if($ValidateOnly){'VALIDATE-ONLY'}elseif($Apply){'APPLY'}else{'WHATIF / PLAN-ONLY'})) ===" -ForegroundColor Cyan
+Write-Host "=== PIM Manager DEPLOY-ALL ($($script:PimDeploySourceLabel);$(if($ValidateOnly){'VALIDATE-ONLY'}elseif($Apply){'APPLY'}else{'WHATIF / PLAN-ONLY'})) ===" -ForegroundColor Cyan
 Info "hosted=$hosted; tenant=$(if($TenantId){'set'}else{'(not set)'}); sub=$(if($SubscriptionId){'set'}else{'(not set)'})"
 
 # =============================================================================
@@ -1484,19 +1534,9 @@ function Test-AcaEnvPresent {
         # 🪤 Being wrong here costs one idempotent re-run of infra. Being wrong the other way costs
         # the environment its administrators, silently -- the same asymmetry as the BUG-49/51 checks
         # above, which is why this belongs in the probe and not in a warning.
-        if ($SqlPrivateEndpoint -and "$ManagerSuperAdmins".Trim()) {
-            $wantSa = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-            $jobEnv = Get-PimDeployJobEnvValue -Job $DbInitJobName -Name 'PIM_DBINIT_MANAGER_ACCESS'
-            $haveSa = @()
-            if ("$jobEnv".Trim()) {
-                try { $haveSa = @(("$jobEnv".Trim() | ConvertFrom-Json) | ForEach-Object { "$($_.identity)".Trim().ToLowerInvariant() }) } catch { $haveSa = @() }
-            }
-            $missSa = @($wantSa | Where-Object { $haveSa -notcontains $_ })
-            if ($missSa.Count) {
-                Write-Host "  infra: the bootstrap job '$DbInitJobName' does not carry $($missSa.Count) of the requested SuperAdmin(s) -- nobody could administer this environment; re-running INFRA." -ForegroundColor Yellow
-                return $false
-            }
-        }
+        # FIRST-SUPERADMIN-1 (Invardia 2026-11-20): the job carries NO SuperAdmin any more (framework SEC-08 point 8), so a
+        # missing PIM_DBINIT_MANAGER_ACCESS is no reason to re-run INFRA. The first SuperAdmin reaches a private store through
+        # ONE Key Vault secret; a lost / refused one is re-issued by the 'access' step for the same installing person.
         # 🔴 THE SAME LESSON AGAIN, ONE ARTEFACT FURTHER OUT (BUG-49/BUG-51).
         # The INFRA step now also peers the spoke VNet, publishes the environment's default
         # domain, and grants the workload identities their ARM role. If this probe does not test
@@ -1687,6 +1727,214 @@ $i = 0
 foreach ($s in $plan.steps) { $i++; Write-Host ("    {0}. {1,-8} [{2,-20}] {3}" -f $i, $s.key, $s.action, $s.reason) }
 Write-Host ""
 
+# =================================================================================================
+# NO-PERSON-DB-ADMIN D1 (framework 12.23 / SEC-08, owner 2026-11-03 "make it the rule") -- WHO IS A DATABASE ADMIN THIS RUN.
+# A signed-in person against public SQL: the database job decides. It EXISTS (an existing install) -> the steps that need a
+# database admin run through it and the person is added only for a step that still connects as the person (D2 open) and
+# really runs. It does NOT exist (a brand-new install) -> the time-boxed window: added, removed at the end, read back. A read
+# that failed is never taken as "absent". Pure decision: _PimDbAdminWindow.ps1 (Get-PimDeployDbAdminPlan).
+# =================================================================================================
+if ($UseSignedInAccount -and -not $StepRunner -and -not $ValidateOnly -and "$SqlServerFqdn".Trim() -and -not $SqlPrivateEndpoint) {
+    $dbState = 'unknown'
+    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and (Test-PimDeployRest)) {
+        $dbCands = @("$DbInitJobName".Trim())
+        try { $dbNew = Get-PimInstallNameNewDefaults; if ($dbNew.Contains('dbinit')) { $dbCands += "$($dbNew['dbinit'])" } } catch { }
+        $dbStates = @(); $dbPresentJob = $null
+        foreach ($dbn in @($dbCands | Where-Object { $_ } | Select-Object -Unique)) {
+            $dbJob = $null; $dbErr = ''
+            try { $dbJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $dbn } catch { $dbErr = "$($_.Exception.Message)"; if (-not $dbErr) { $dbErr = 'read failed' } }
+            $st1 = ConvertTo-PimDbJobState -Job $dbJob -ReadError $dbErr
+            $dbStates += $st1
+            if ($st1 -eq 'present') { $script:PimDbJobName = $dbn; $dbPresentJob = $dbJob; break }
+        }
+        $dbState = $(if ($dbStates -contains 'present') { 'present' } elseif ($dbStates -contains 'unknown' -or -not $dbStates.Count) { 'unknown' } else { 'absent' })
+    }
+    $dbRun = @($plan.steps | Where-Object { $_.do -or "$($_.action)" -notmatch '^(?i)skip' } | ForEach-Object { "$($_.key)" })
+    # NO-PERSON-DB-ADMIN D2: may the 'code' step roll WITHOUT the store? Only when an update ring governs the roll (the updater
+    # carries PIM_UPDATE_RING, or this run installs one) -- with no ring the roll's ring gate reads the edition from the store.
+    # An updater that could not be read = the safe side (the code step keeps the window, named in the plan).
+    $dbUpdRing = ''; $dbUpdReadable = $false
+    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$UpdateJobName".Trim() -and (Test-PimDeployRest)) {
+        try {
+            $dbUpdJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name "$UpdateJobName".Trim()
+            $dbUpdReadable = $true
+            if ($dbUpdJob) { $dbUpdRing = "$((@(@(@($dbUpdJob.properties.template.containers) | Select-Object -First 1).env) | Where-Object { $_ -and "$($_.name)" -ceq 'PIM_UPDATE_RING' } | Select-Object -First 1).value)".Trim() }
+        } catch { $dbUpdReadable = $false }
+    }
+    $dbPendDec = Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource"
+    $dbPendRing = $(if ($script:PimDeployRingExplicit -and @($plan.steps | Where-Object { "$($_.key)" -eq 'updater' -and $_.do }).Count -and $dbPendDec -in @('install', 'install-community')) { [int]$UpdateRing } else { -1 })
+    $script:PimDbCodeStore = Get-PimDbAdminCodeNeedsStore -UpdaterRing $dbUpdRing -PendingRing $dbPendRing -UpdaterReadable $dbUpdReadable
+    # D2 (decision A): the schema goes through the job only when the job's OWN image is this deploy's version (nothing may be
+    # written on the job, so it can only apply its own version's schema)
+    $script:PimDbSchemaFit = Get-PimDbAdminSchemaJobFit -Job $dbPresentJob -DeployTag "$(Get-EffectiveImageTag)"
+    $script:PimDbAdminPlan = Get-PimDeployDbAdminPlan -SignedIn $true -PublicSql $true -DbJobState $dbState -RunSteps $dbRun `
+                                 -CallerOwnsWindow ([bool]($KeepSetupIdentityInSqlAdminGroup -or $SkipInstallVerify)) -DbJobName $script:PimDbJobName `
+                                 -CodeNeedsStore ([bool]$script:PimDbCodeStore.needsStore) -SchemaViaJob ([bool]$script:PimDbSchemaFit.viaJob)
+    foreach ($l in @($script:PimDbAdminPlan.lines)) { Write-Host "  $l" -ForegroundColor $(if ($script:PimDbAdminPlan.addPerson) { 'Yellow' } else { 'DarkGray' }) }
+    if ("$($script:PimDbAdminPlan.mode)" -eq 'database-job' -and @($dbRun) -contains 'code') { Write-Host "    (code: $($script:PimDbCodeStore.reason))" -ForegroundColor DarkGray }
+    if ("$($script:PimDbAdminPlan.mode)" -eq 'database-job' -and @($dbRun) -contains 'schema') { Write-Host "    (schema: $($script:PimDbSchemaFit.reason))" -ForegroundColor DarkGray }
+    Write-Host ""
+}
+
+function Invoke-PimDeployDbJobStep {
+    # NO-PERSON-DB-ADMIN D2 (Invardia decision A, 2026-11-20): ONE execution of this install's EXISTING database job for the
+    # deploy's SCHEMA step -- started with the EMPTY body and nothing written on the job (no setting rides a start or the
+    # definition; ACA-START-OVERRIDE + point 8). The job runs what its OWN definition says (its schema switch = the schema
+    # upgrade of an existing store) on its OWN image -- the plan routes schema here only when that image carries this deploy's
+    # version (Get-PimDbAdminSchemaJobFit). The job's identity is read back in the SQL admin group first; the person is never
+    # added. _PimDbAdminWindow.ps1 Invoke-PimDeployDbJobRun.
+    try {
+        if (-not (Get-Command New-PimSqlAdminGroupInvokers -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSqlAdminGroup.ps1') }
+        $subJ = "$SubscriptionId".Trim()
+        $subS = $(if ("$SqlSubscriptionId".Trim()) { "$SqlSubscriptionId".Trim() } else { $subJ })
+        $invJ = New-PimSqlAdminGroupInvokers -SubscriptionId $subJ -TenantId $TenantId
+        $sqlRgJ = $ResourceGroup
+        try { $resJ = Resolve-PimSqlServerFromFqdn -Arm $invJ.Arm -SubscriptionId $subS -Server (("$SqlServerFqdn".Trim() -split '\.')[0]); if ($resJ) { $sqlRgJ = $resJ.resourceGroup } } catch { }
+        $r = Invoke-PimDeployDbJobRun -Arm $invJ.Arm -Graph $invJ.Graph -SubscriptionId $subJ -ResourceGroup $ResourceGroup -JobName $script:PimDbJobName `
+                 -SqlServerFqdn $SqlServerFqdn -SqlResourceGroupId "/subscriptions/$subS/resourceGroups/$sqlRgJ" -MaxPolls 90
+    } catch { $r = [pscustomobject]@{ ok = $false; execution = ''; status = ''; reason = "the database job could not be run: $($_.Exception.Message)" } }
+    $script:PimDbJobRun = @{ result = $r }
+    Info "  database job: $($r.reason)"
+    return $r
+}
+
+function Read-PimDeployStoreSetting {
+    # NO-PERSON-DB-ADMIN decision A: ONE pim.Settings value READ ONLY, as whoever this deploy is (the signed-in person is NOT
+    # added to anything for it). A refused / failed read is $null-with-a-reason -- the comparison then says it could not
+    # compare, never that nothing changed. Returns @{ ok; value; reason }.
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not "$SqlConnectionString".Trim()) { return @{ ok = $false; value = $null; reason = 'no -SqlConnectionString' } }
+    try {
+        if (-not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            if (-not (Get-Command Get-PimChangeQueueDdl -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ChangeQueue.ps1') }
+            . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')
+        }
+        # the gates compare against the catalog's defaults too (a gate never stored rides its default)
+        if ($Name -eq 'FeatureGates' -and -not (Get-Command Resolve-PimFeatureGate -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-FeatureCatalog.ps1') }
+        $v = Get-PimSqlSetting -ConnectionString $SqlConnectionString -Name $Name
+        # resolved HERE (the catalog is loaded in this function's scope only): the effective gates, defaults included
+        if ($Name -eq 'FeatureGates') { $v = [pscustomobject]@{ gates = (Resolve-PimFeatureGate -Raw $v).gates } }
+        return @{ ok = $true; value = $v; reason = '' }
+    } catch { return @{ ok = $false; value = $null; reason = "$((("$($_.Exception.Message)") -split "`n")[0])" } }
+}
+
+function Get-PimDeployFirstAdminInstaller {
+    # FIRST-SUPERADMIN-1: WHO runs this deploy -- the oid / sign-in name of THIS process's own ARM sign-in token (never a
+    # parameter). An application sign-in = no person (ok = $false, said).
+    $tok = ''
+    try { $tok = "$(if ($global:PIM_SetupRestStub) { $global:PIM_SetupTokenStub } else { Get-PimRestToken -Resource 'arm' -TenantId $TenantId })" } catch { $tok = '' }
+    # Support-app install: ONLY the customer's named administrator (-FirstSuperAdminUpn), looked up in THIS tenant's directory
+    # (Member + enabled) -- else nobody, said (Resolve-PimFirstAdminSubjectLive / Get-PimFirstAdminSubject)
+    $faGraph = { param($m, $p, $b) if ($global:PIM_SetupGraphStub) { & $global:PIM_SetupGraphStub $m $p $b } elseif ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+    # ONE lookup per run (the 'access' step and the end-of-install check ask the same question)
+    if ($script:PimDeployFirstAdminSubject) { return $script:PimDeployFirstAdminSubject }
+    $s = Resolve-PimFirstAdminSubjectLive -Token $tok -TenantId $TenantId -NamedUpn $FirstSuperAdminUpn -Graph $faGraph -SupportState $global:InvardiaSupportState
+    foreach ($n in @($s.notes)) { if ($n) { Warn "  first SuperAdmin: $n" } }
+    if ($s.ok -and $s.namedBy) { Info "  first SuperAdmin: $($s.reason)" }
+    if ("$tok".Trim()) { $script:PimDeployFirstAdminSubject = $s }
+    return $s
+}
+
+function Get-PimDeployFirstAdminVaultId {
+    # FIRST-SUPERADMIN-1: the install's own vault -- -KeyVaultName, else kv-pim-<token> (-PrereqToken, else the SQL server's
+    # sql-pim-<token>). '' when no name can be had.
+    $tok = "$PrereqToken".Trim(); if (-not $tok -and "$SqlServerFqdn" -match '^(?i)sql-pim-([a-z0-9]+)\.') { $tok = $Matches[1] }
+    $n = "$KeyVaultName".Trim().ToLowerInvariant()
+    if (-not $n -and $tok) { $n = "kv-pim-$(("$tok".ToLowerInvariant()) -replace '[^a-z0-9]', '')"; if ($n.Length -gt 24) { $n = $n.Substring(0, 24).TrimEnd('-') } }
+    if (-not $n -or -not "$SubscriptionId".Trim() -or -not "$ResourceGroup".Trim()) { return '' }
+    return "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$("$ResourceGroup".Trim())/providers/Microsoft.KeyVault/vaults/$n"
+}
+
+function Invoke-PimDeployFirstAdminPublic {
+    <#
+      FIRST-SUPERADMIN-1 item 7: a PUBLIC-SQL install -- the installer writes the store directly (the person's SQL window), with
+      the SAME binding as the private path: the installing person's oid, seededBy first-install, ONLY when ManagerAccess holds no
+      SuperAdmin (never overwritten), read back, FirstAdminSeed recorded. Returns @{ ok; ran; detail }.
+    #>
+    param([Parameter(Mandatory)][object]$Installer)
+    try {
+        if (-not (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) {
+            if (-not (Get-Command Get-PimChangeQueueDdl -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ChangeQueue.ps1') }
+            . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')
+        }
+        if ($UseSignedInAccount -and (Get-Command Connect-PimSignedInSql -ErrorAction SilentlyContinue)) { [void](Connect-PimSignedInSql -TenantId $TenantId) }
+        $cs = $(if ("$SqlConnectionString".Trim()) { "$SqlConnectionString" } else { Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $SqlDatabase })
+        $entries = $null
+        try { $entries = @(ConvertTo-PimFirstAdminAccessEntries -Raw (Get-PimSqlSettingRaw -ConnectionString $cs -Name 'ManagerAccess')) }
+        catch { return @{ ok = $false; ran = $true; detail = "first SuperAdmin: the access model could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- refusing to write an unread access model" } }
+        $seed = @{ objectId = "$($Installer.objectId)"; userPrincipalName = "$($Installer.userPrincipalName)" }
+        $plan = Get-PimFirstAdminSeedPlan -Entries $entries -Seed $seed
+        if (-not $plan.seed) { return @{ ok = $true; ran = $false; detail = "first SuperAdmin: $($plan.reason) -- nothing written (others are added in PIM Manager > Settings > Manager access & roles)" } }
+        Set-PimSqlSetting -ConnectionString $cs -Name 'ManagerAccess' -ValueJson (ConvertTo-Json -InputObject ([ordered]@{ managerAccess = @($plan.entries) }) -Depth 8 -Compress)
+        $back = @(ConvertTo-PimFirstAdminAccessEntries -Raw (Get-PimSqlSettingRaw -ConnectionString $cs -Name 'ManagerAccess'))
+        if (-not (Test-PimFirstAdminSeedLanded -Entries $back -ObjectId "$($Installer.objectId)")) { return @{ ok = $false; ran = $true; detail = 'first SuperAdmin: written but NOT read back -- nobody can administer this environment yet' } }
+        try {
+            $rec = New-PimFirstAdminSeedRecord -State 'used' -ObjectId "$($Installer.objectId)" -Reason 'written by the installer (public SQL)' `
+                       -NamedBy $Installer['namedBy'] -Named "$($Installer.userPrincipalName)"
+            Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimFirstAdminSettingName) -ValueJson (ConvertTo-Json -InputObject $rec -Depth 6 -Compress)
+            # the install's audit: who became the first SuperAdmin -- for a Support-app install who was named, by which Support
+            # app, with its session's reason / ticket, and the object id (-After = the record)
+            $nbA = $Installer['namedBy']
+            $aActor = $(if ($nbA) { "support-app:$($nbA.appId)" } else { "installer:$($Installer.objectId)" })
+            $aTarget = $(if ($nbA) { "used; $($Installer.userPrincipalName) named by the Invardia Support app $($nbA.appId)" } else { 'used' })
+            if (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue) {
+                try { Write-PimSqlAuditEvent -ConnectionString $cs -Actor $aActor -ActorSource 'installer' -Action 'first-superadmin' -Target $aTarget -After $rec -Result 'used' } catch { Warn "  first SuperAdmin: not audited ($($_.Exception.Message))" }
+            }
+        } catch { Warn "  first SuperAdmin: the answer could not be recorded ($($_.Exception.Message))" }
+        return @{ ok = $true; ran = $true; detail = "first SuperAdmin: $($Installer.userPrincipalName) (bound to its object id), read back" }
+    } catch { return @{ ok = $false; ran = $true; detail = "first SuperAdmin: not written ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
+}
+
+function Invoke-PimDeployFirstAdminRecovery {
+    <#
+      FIRST-SUPERADMIN-1 (B): a PRIVATE install re-run. A SuperAdmin KNOWN to exist (the store was readable) = nothing. Else, by
+      Get-PimFirstAdminIssueDecision: the SAME installing person (the vault's issuer tag) writes a FRESH secret (new nonce, new
+      48 h) + the job identity's grant, starts the database job with the EMPTY body (it reads the secret; never overwrites a
+      SuperAdmin), then removes the grant once the secret is gone (read back). A DIFFERENT person writes nothing. The job must
+      know the vault (PIM_KeyVaultId on its definition -- an install set up before this release does not; said, nothing
+      written). -Store = Read-PimDeployStoreSetting's answer. Returns @{ ok; ran; detail }.
+    #>
+    param([Parameter(Mandatory)][object]$Installer, [AllowNull()][object]$Store = $null)
+    $readable = [bool]($Store -and $Store.ok); $has = $false
+    if ($readable) { try { $has = Test-PimFirstAdminHasSuperAdmin -Entries @(ConvertTo-PimFirstAdminAccessEntries -Raw $Store.value) } catch { $readable = $false } }
+    if ($readable -and $has) { return @{ ok = $true; ran = $false; detail = 'first SuperAdmin: a SuperAdmin exists -- nothing written' } }
+    if (-not $SqlPrivateEndpoint) {
+        if ($readable) { return @{ ok = $false; ran = $false; detail = 'first SuperAdmin: the store holds NO SuperAdmin -- NOBODY can administer this environment yet. The installing person re-runs the installer, or an operator grants one with tools/setup/Set-PimManagerAccess.ps1' } }
+        return @{ ok = $true; ran = $false; detail = 'first SuperAdmin: the store could not be read from here -- nothing written' }
+    }
+    if ($script:PimFirstAdminByInfra) { return @{ ok = $true; ran = $false; detail = 'first SuperAdmin: handed to the database job by infra in this run' } }
+    $vid = Get-PimDeployFirstAdminVaultId
+    if (-not $vid) { return @{ ok = $true; ran = $false; detail = 'first SuperAdmin: the install''s Key Vault is not known (-KeyVaultName) -- nothing written' } }
+    try {
+        if (-not (Get-Command New-PimSqlAdminGroupInvokers -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSqlAdminGroup.ps1') }
+        $inv = New-PimSqlAdminGroupInvokers -SubscriptionId "$SubscriptionId".Trim() -TenantId $TenantId
+        $job = Invoke-PimFirstAdminArmGet -Arm $inv.Arm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$DbInitJobName`?api-version=$(Get-PimDbAdminJobApi)"
+        if (-not $job) { return @{ ok = $true; ran = $false; detail = "first SuperAdmin: no database job '$DbInitJobName' -- nothing written" } }
+        $jEnv = @(@($job.properties.template.containers)[0].env)
+        $jVault = "$(@($jEnv | Where-Object { "$($_.name)" -ceq (Get-PimFirstAdminVaultEnvName) }) | Select-Object -First 1 | ForEach-Object { $_.value })".Trim()
+        if ($jVault -ine $vid) { return @{ ok = $true; ran = $false; detail = "first SuperAdmin: the database job does not name the install's vault ($(Get-PimFirstAdminVaultEnvName)) -- nothing written (an install set up before this release keeps its SuperAdmins in the store)" } }
+        $rec = ''
+        $v = Invoke-PimFirstAdminArmGet -Arm $inv.Arm -Path "$vid`?api-version=$(Get-PimFirstAdminKvArmApi)"
+        if (-not $v) { return @{ ok = $true; ran = $false; detail = 'first SuperAdmin: the install''s Key Vault was not found -- nothing written' } }
+        if ($v.tags) { $rec = "$($v.tags.(Get-PimFirstAdminIssuerTag))" }
+        $dec = Get-PimFirstAdminIssueDecision -Installer $Installer -StoreReadable $readable -StoreHasSuperAdmin $has -RecordedIssuerOid $rec
+        if (-not $dec.write) { return @{ ok = $true; ran = $false; detail = "first SuperAdmin: $($dec.reason)" } }
+        $idp = Get-PimDbJobIdentityPrincipal -Job $job
+        if (-not $idp.ok) { return @{ ok = $false; ran = $false; detail = "first SuperAdmin: $($idp.reason) -- nothing written" } }
+        if ($WhatIfPreference -or ($PSCmdlet -and -not $PSCmdlet.ShouldProcess($vid, 'write a fresh first-SuperAdmin secret and run the database job'))) { return @{ ok = $true; ran = $false; detail = 'skipped by ShouldProcess' } }
+        $iss = Invoke-PimFirstAdminSecretIssue -Arm $inv.Arm -VaultId $vid -Installer $Installer -JobPrincipalId "$($idp.principalId)"
+        foreach ($l in @($iss.lines)) { Info "  $l" }
+        if (-not $iss.ok) { return @{ ok = $false; ran = $true; detail = "first SuperAdmin: $($iss.reason)" } }
+        $script:PimDbJobName = $DbInitJobName
+        $run = Invoke-PimDeployDbJobStep
+        $trim = Invoke-PimFirstAdminGrantTrim -Arm $inv.Arm -VaultId $vid
+        foreach ($l in @($trim.lines)) { if ($trim.ok -and -not $trim.secretPresent) { Info "  $l" } else { Warn "  $l" } }
+        if (-not $run.ok) { return @{ ok = $false; ran = $true; detail = "first SuperAdmin: a fresh secret was written ($($dec.reason)) but the database job did not run: $($run.reason)" } }
+        if ($trim.secretPresent) { return @{ ok = $false; ran = $true; detail = 'first SuperAdmin: the database job ran but did NOT use the secret -- its log names why' } }
+        return @{ ok = $true; ran = $true; detail = "first SuperAdmin: $($dec.reason); the database job used it" }
+    } catch { return @{ ok = $false; ran = $true; detail = "first SuperAdmin: not done ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
+}
+
 function Get-PimDeployAllStepChanges {
     # framework 12.7 -- PURE given the script's parameters: what ONE step would create / grant, as lines "object -- permission
     # @ scope". Printed under the plan in plan-only mode, so a preview names every change, not only the step. The full
@@ -1719,7 +1967,8 @@ function Get-PimDeployAllStepChanges {
         'code'       { @("Azure: roll $ManagerApp (and the jobs) to image $(Get-EffectiveImageTag)") }
         # the ring the step really writes: a Community install without an explicit ring goes on ring 3 (the step's own rule)
         'updater'    { @("Azure: job $UpdateJobName ($UpdateCron, ring $(if (-not $script:PimDeployRingExplicit -and (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -eq 'install-community') { '3' } else { $UpdateRing })) with Contributor -> its identity @ $rg (and the registry), AcrPull @ registry, membership of $SqlAdminGroupName") }
-        'access'     { @("Azure SQL: pim.Settings ManagerAccess SuperAdmin: $(if ("$ManagerSuperAdmins".Trim()) { $ManagerSuperAdmins } else { '(none named)' })") }
+        'access'     { @("Azure SQL: pim.Settings ManagerAccess SuperAdmin: the person running this deploy, bound to their object id$(if ("$FirstSuperAdminUpn".Trim()) { " (an Invardia Support-app deploy: the named administrator $("$FirstSuperAdminUpn".Trim()), looked up in the directory -- a Member, enabled account -- and bound to ITS object id)" }) (only when no SuperAdmin exists$(if ("$ManagerSuperAdmins".Trim()) { "; named, NOT seeded here: $ManagerSuperAdmins" }))",
+                         "Key Vault (private SQL): ONE secret pim-first-superadmin (48 h) + Key Vault Secrets Officer on that secret -> the database job's identity, both removed after the job used it") }
         'alerting'   { @("Azure SQL: pim.Settings Alerting recipients (only when the stored list is empty)") }
         'licence'    { @("Azure SQL: pim.Settings License + InvardiaInstallKey (from the enrollment)") }
         'verify'     { @("reads only: hosted smoke + deploy-validation tests") }
@@ -2085,7 +2334,7 @@ function Invoke-DefaultStepRunner {
             $sqlAdminCred = @{}
             if ($UseSignedInAccount) {
                 $sqlAdminCred['UseSignedInAccount'] = $true
-                $why = Confirm-PimSignedInSqlAccess
+                $why = Confirm-PimSignedInSqlAccess -Step 'infra'
                 if ($why) { return @{ ok=$false; ran=$true; detail="INFRA: $why" } }
             }
             elseif ($SqlAdminCertThumbprint) { $sqlAdminCred['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
@@ -2215,8 +2464,13 @@ function Invoke-DefaultStepRunner {
                         if (@($FeatureGates).Count)        { $dbInit['FeatureGates']        = @($FeatureGates) }
                         if (@($FeatureGatesDisable).Count) { $dbInit['FeatureGatesDisable'] = @($FeatureGatesDisable) }
                         # Same list the host-side `access` step would have written.
+                        # FIRST-SUPERADMIN-1: the names only feed the "not seeded" line -- the job never carries them; the
+                        # first SuperAdmin is the person running this (ONE secret in the install's own vault).
                         $saList = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
                         if ($saList.Count) { $dbInit['ManagerSuperAdmins'] = $saList }
+                        # Support-app install: the customer's named administrator (a lookup key; setup resolves it)
+                        if ("$FirstSuperAdminUpn".Trim()) { $dbInit['FirstSuperAdminUpn'] = "$FirstSuperAdminUpn".Trim() }
+                        if ("$KeyVaultName".Trim()) { $dbInit['KeyVaultName'] = "$KeyVaultName".Trim() }
                         if ("$($global:PIM_SqlAdminIdentityResourceId)".Trim()) { $dbInit['SqlAdminIdentityResourceId'] = "$($global:PIM_SqlAdminIdentityResourceId)".Trim() }
                         if ("$($global:PIM_SqlAdminIdentityClientId)".Trim())   { $dbInit['SqlAdminIdentityClientId']   = "$($global:PIM_SqlAdminIdentityClientId)".Trim() }
                         # 🔴 PUBLISHED *OR* RESOLVED -- AND "PREREQ IS CURRENT" IS THE COMMON CASE.
@@ -2261,6 +2515,9 @@ function Invoke-DefaultStepRunner {
                     if ($TenantObjectCounts) { $tickSizing['TenantObjectCounts'] = $TenantObjectCounts }   # 100.31
                     # CR5 step 2: the new-install names (decided above) reach the Manager entry and the env of both workloads
                     if ($script:PimUseNewNames) { $tickSizing['ManagerApp'] = $ManagerApp; $tickSizing['NewInstallNames'] = $true }
+                    # FIRST-SUPERADMIN-1: infra hands the first SuperAdmin to the database job itself (the secret + one run) --
+                    # the 'access' step of THIS run then does not issue a second one
+                    if ($dbInit.ContainsKey('UseInCloudDbInit')) { $script:PimFirstAdminByInfra = $true }
                     try {
                     & $setup @deployId @tickSizing -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location `
                         -ResourceGroup $ResourceGroup -VnetName $VnetName -VnetResourceGroup $VnetResourceGroup `
@@ -2497,6 +2754,16 @@ function Invoke-DefaultStepRunner {
                     'feature gates applied IN-CLOUD by the bootstrap job (private SQL -- this host has no route). ' +
                     'The job merged them over what was persisted and read them back before the deploy continued.') }
             }
+            # NO-PERSON-DB-ADMIN (Invardia decision A, 2026-11-20): an EXISTING install -- the gates live in the install's
+            # store and are changed in PIM Manager > Settings > Features. Nothing is written from here and no job is started
+            # for them. A re-run that ASKS for different gates says so plainly (read-only comparison, never a silent drop).
+            if (Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'features') {
+                $fgAsk = @(if ($script:PimGatesBound) { @($FeatureGates) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } })
+                $fgDis = @(if ($script:PimGatesBound) { @($FeatureGatesDisable) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } })
+                $fgCmp = Get-PimDbAdminSettingsChange -Kind 'features' -Asked $fgAsk -AskedDisable $fgDis -Store $(if ($fgAsk.Count -or $fgDis.Count) { Read-PimDeployStoreSetting -Name 'FeatureGates' } else { $null })
+                foreach ($l in @($fgCmp.lines)) { Warn "  $l" }
+                return @{ ok=$true; ran=$false; detail="features: $($fgCmp.detail)" }
+            }
             if ($PSCmdlet.ShouldProcess($SqlDatabase, 'turn the shipped feature gates ON')) {
                 $global:LASTEXITCODE = 0
                 if (-not $storeAdminArgs.Count) {
@@ -2505,7 +2772,7 @@ function Invoke-DefaultStepRunner {
                         "Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret). Refusing " +
                         "rather than running a step that can only answer 'supply -AdminSecret or -AdminCertThumbprint'.") }
                 }
-                $why = Confirm-PimSignedInSqlAccess
+                $why = Confirm-PimSignedInSqlAccess -Step 'features'
                 if ($why) { return @{ ok=$false; ran=$true; detail="features: $why" } }
                 $fbGates = @{}
                 if (@($FeatureGates).Count)        { $fbGates['Gates']   = @($FeatureGates) }
@@ -2613,6 +2880,15 @@ function Invoke-DefaultStepRunner {
                         'schema applied IN-CLOUD by the bootstrap job (private SQL -- this host has no route). ' +
                         'The job verified the pim schema before the deploy was allowed to continue.') }
                 }
+                # NO-PERSON-DB-ADMIN D2 (framework 12.23 / SEC-08): an EXISTING install (the database job exists, or could not
+                # be read) whose job runs THIS deploy's version -- ONE execution of the database job, EMPTY start body, nothing
+                # written on the job (decision A): its own definition (PIM_DBINIT_SCHEMA) upgrades the store (the access model is
+                # converged by the updater's next run, as on every update), as its own identity. The signed-in person is NOT made a database admin for it; a failed run halts
+                # the deploy here, before 'code' (nothing rolled).
+                if (Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'schema') {
+                    $jrS = Invoke-PimDeployDbJobStep
+                    return @{ ok=[bool]$jrS.ok; ran=$true; detail=$(if ($jrS.ok) { "schema upgraded through the database job: $($jrS.reason)" } else { "schema: the database job did not upgrade the store -- $($jrS.reason). You were NOT made a database admin; fix the job run (its log is named above) and run the deploy again." }) }
+                }
                 if (-not "$SqlConnectionString".Trim()) {
                     if ($hosted) {
                         return @{ ok=$false; ran=$true; detail=(
@@ -2637,7 +2913,7 @@ function Invoke-DefaultStepRunner {
                 # TWO rolls of the same version -- about four minutes wasted on every deploy,
                 # measured at a live customer 2026-09-09. -AcrName/-Apps stay because the updater
                 # still validates them, but they are no longer feeding a build that should not run.
-                $why = Confirm-PimSignedInSqlAccess
+                $why = Confirm-PimSignedInSqlAccess -Step 'schema'
                 if ($why) { return @{ ok=$false; ran=$true; detail="schema: $why" } }
                 & $upd -Source $Source @scenarioArgs -Apply -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag (Get-EffectiveImageTag) `
@@ -2715,9 +2991,17 @@ function Invoke-DefaultStepRunner {
                 # 🪤 THE AGENT POOL, or this rebuild is refused by the registry's own firewall while
                 # the deploy's `image` step (which DOES pass it) succeeded minutes earlier on the
                 # very same source. Splatted so an environment without a pool is unaffected.
-                $whyC = Confirm-PimSignedInSqlAccess
-                if ($whyC) { return @{ ok=$false; ran=$true; detail="code: $whyC" } }
+                # NO-PERSON-DB-ADMIN D2: an EXISTING install whose roll is governed by an update ring -- the schema step owns the
+                # database work (the database job, or its own window), so this roll opens NO store connection (-StoreViaDatabaseJob) and the
+                # signed-in person is not added. With no ring the plan kept 'code' in the window (the edition read).
+                $codeNoStore = (Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'code')
+                if (-not $codeNoStore) {
+                    $whyC = Confirm-PimSignedInSqlAccess -Step 'code'
+                    if ($whyC) { return @{ ok=$false; ran=$true; detail="code: $whyC" } }
+                }
                 $updPool = @{}
+                $codeStore = @{ SqlConnectionString = $SqlConnectionString }
+                if ($codeNoStore) { $codeStore = @{ StoreViaDatabaseJob = $true } }
                 if ("$AcrAgentPoolName".Trim()) { $updPool['AcrAgentPool'] = "$AcrAgentPoolName".Trim() }
                 # Invoke-PimUpdate expresses the gate opt-out as -SkipVerify (it maps it onto the
                 # roller's -SkipSmoke). Say it loudly here too: the deploy summary is what an
@@ -2733,9 +3017,9 @@ function Invoke-DefaultStepRunner {
                 }
                 & $upd -Source $Source @scenarioArgs -Apply -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ManagerApp $ManagerApp -Apps $Apps -ImageTag (Get-EffectiveImageTag) -TickJobName $TickJobName `
-                    -SqlConnectionString $SqlConnectionString @sqlAuthArgs @updPool @ringGateArgs @pendingRingArgs -UpdateJobName $UpdateJobName -SkipNotify | Out-Host
+                    @codeStore @sqlAuthArgs @updPool @ringGateArgs @pendingRingArgs -UpdateJobName $UpdateJobName -SkipNotify | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
-                return @{ ok=$ok; ran=$true; detail='code built + deployed' }
+                return @{ ok=$ok; ran=$true; detail=$(if ($codeNoStore) { 'code built + deployed (no store connection: the update ring governs the roll; no database admin needed for it)' } else { 'code built + deployed' }) }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -2796,13 +3080,18 @@ function Invoke-DefaultStepRunner {
                 if ("$SqlAdminClientId".Trim())       { $upArgs['SqlAdminClientId']       = "$SqlAdminClientId".Trim() }
                 if ("$SqlAdminCertThumbprint".Trim()) { $upArgs['SqlAdminCertThumbprint'] = "$SqlAdminCertThumbprint".Trim() }
                 elseif ("$SqlAdminClientSecret".Trim()) { $upArgs['SqlAdminClientSecret'] = $SqlAdminClientSecret }
+                # NO-PERSON-DB-ADMIN D1: on an EXISTING install the updater's database user is made by the database job --
+                # Deploy-PimUpdateJob's database-job route (-SqlPrivate = "this host runs no SQL"), the person is not added.
+                $updViaJob = (Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'updater')
                 if ($UseSignedInAccount) {
                     $upArgs['UseSignedInAccount'] = $true
-                    $why = Confirm-PimSignedInSqlAccess
-                    if ($why) { return @{ ok=$false; ran=$true; detail="updater: $why" } }
+                    if (-not $updViaJob) {
+                        $why = Confirm-PimSignedInSqlAccess -Step 'updater'
+                        if ($why) { return @{ ok=$false; ran=$true; detail="updater: $why" } }
+                    }
                 }
-                if ($SqlPrivateEndpoint)              { $upArgs['SqlPrivate']             = $true }
-                if ("$DbInitJobName".Trim())          { $upArgs['DbInitJobName']          = "$DbInitJobName".Trim() }
+                if ($SqlPrivateEndpoint -or $updViaJob) { $upArgs['SqlPrivate']             = $true }
+                if ("$script:PimDbJobName".Trim())    { $upArgs['DbInitJobName']          = "$script:PimDbJobName".Trim() }
                 try { & $upj @upArgs | Out-Host }
                 catch { return @{ ok=$false; ran=$true; detail="nightly updater NOT installed: $($_.Exception.Message)" } }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
@@ -2817,7 +3106,7 @@ function Invoke-DefaultStepRunner {
                     $abArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo
                                  ImageTag = $tag; ManagerApp = $ManagerApp; SqlServerFqdn = "$SqlServerFqdn".Trim(); SqlDatabase = $SqlDatabase }
                     if ("$RegistryIdentityResourceId".Trim()) { $abArgs['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
-                    if ($SqlPrivateEndpoint) { $abArgs['SkipSqlGrant'] = $true }
+                    if ($SqlPrivateEndpoint -or $updViaJob) { $abArgs['SkipSqlGrant'] = $true }   # D1: no person SQL on an existing install
                     $global:LASTEXITCODE = 0
                     try { & $abj @abArgs | Out-Host; $abDetail = "; as-built job caj-pim-asbuilt installed$(if ($SqlPrivateEndpoint) { ' (private SQL: the in-cloud updater creates its view + database user on its next run -- it is inside the network)' })" }
                     catch { $abDetail = "; as-built job NOT installed: $($_.Exception.Message) (re-run tools/setup/Deploy-PimAsBuiltJob.ps1)" }
@@ -2829,7 +3118,7 @@ function Invoke-DefaultStepRunner {
                 $wkj = Join-Path $here 'Deploy-PimWakeJob.ps1'
                 if ($ok -and (Test-Path -LiteralPath $wkj)) {
                     $wkArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; TickJobName = $TickJobName; ManagerApp = $ManagerApp }
-                    if ("$SqlServerFqdn".Trim() -and "$TenantId".Trim() -and -not $SqlPrivateEndpoint) {
+                    if ("$SqlServerFqdn".Trim() -and "$TenantId".Trim() -and -not $SqlPrivateEndpoint -and -not $updViaJob) {
                         $wkArgs['SqlServerFqdn'] = "$SqlServerFqdn".Trim(); $wkArgs['SqlDatabase'] = $SqlDatabase; $wkArgs['TenantId'] = $TenantId
                         if ($UseSignedInAccount) { $wkArgs['UseSignedInAccount'] = $true }
                     }
@@ -2847,80 +3136,54 @@ function Invoke-DefaultStepRunner {
             $acc = Join-Path $here 'Set-PimManagerAccess.ps1'
             if (-not (Test-Path $acc)) { return @{ ok=$false; ran=$true; detail="manager-access tool not found: $acc" } }
             $who = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            if (-not $who.Count) {
-                # 🪤 NOT AN ERROR, AND NOT SILENCE. An operator who did not name one gets an
-                # environment that fails closed -- which is correct security and a terrible
-                # surprise. Say exactly what to run, rather than leaving it to be discovered as a
-                # 403 in the GUI later.
-                return @{ ok=$true; ran=$false; detail=("no -ManagerSuperAdmins given -- NOBODY can administer this environment yet. " +
-                          "Grant one with tools/setup/Set-PimManagerAccess.ps1 -AccessJson '{`"managerAccess`":[{`"identity`":`"<upn>`",`"role`":`"SuperAdmin`"}]}'") }
+            # FIRST-SUPERADMIN-1 (Invardia approved 2026-11-20): the FIRST SuperAdmin is the person RUNNING this deploy -- the
+            # oid of its own sign-in token, never a name or an id from the command line. -ManagerSuperAdmins naming others:
+            # they are NOT seeded here (said); the first SuperAdmin adds them in PIM Manager > Settings > Manager access & roles.
+            $faMe = Get-PimDeployFirstAdminInstaller
+            $faOther = Get-PimFirstAdminOtherSuperAdminsNote -Named $who -InstallerUpn "$($faMe.userPrincipalName)"
+            if ($faOther) { Warn "  $faOther" }
+            # NO-PERSON-DB-ADMIN (Invardia decision A, 2026-11-20): an EXISTING install -- the SuperAdmins live in the
+            # install's store and are changed in PIM Manager > Settings > Manager access & roles. Nothing about a person is
+            # written on the job or rides a start (point 8). A re-run that ASKS for SuperAdmins the store does not hold says so
+            # plainly (read-only, never a silent drop). FIRST-SUPERADMIN-1 (B): an install with NO SuperAdmin is recovered by
+            # the same installing person (a fresh secret, the job started with the EMPTY body) -- never locked with no way in.
+            if (Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'access') {
+                $saStore = Read-PimDeployStoreSetting -Name 'ManagerAccess'
+                $saCmp = Get-PimDbAdminSettingsChange -Kind 'access' -Asked $who -Store $(if ($who.Count) { $saStore } else { $null })
+                foreach ($l in @($saCmp.lines)) { Warn "  $l" }
+                $faR = Invoke-PimDeployFirstAdminRecovery -Installer $faMe -Store $saStore
+                return @{ ok=$faR.ok; ran=$faR.ran; detail="access: $($saCmp.detail); $($faR.detail)" }
+            }
+            if (-not [bool]$faMe.ok) {
+                # 🪤 NOT AN ERROR, AND NOT SILENCE. No person runs this deploy (an application sign-in), so nobody is seeded --
+                # an environment that fails closed is correct security and a terrible surprise. Say exactly what to do.
+                # FIRST-SUPERADMIN-1 (Support-app install): never a name-only SuperAdmin as the way out -- the reason says who
+                # can become the first one (the customer's administrator through their own run, or the named-person lookup)
+                return @{ ok=$true; ran=$false; detail=("no first SuperAdmin written: $($faMe.reason)" +
+                          $(if ("$($faMe.reason)" -notmatch 'NOBODY') { '. Unless one exists, NOBODY can administer this environment yet: the customer''s administrator runs the installer themselves, or the Invardia Support app runs it again naming them (-FirstSuperAdminUpn)' } else { '' })) }
             }
             if (-not "$SqlServerFqdn".Trim()) { return @{ ok=$true; ran=$false; detail='no -SqlServerFqdn -- manager access not written' } }
-            # 🔴 PRIVATE SQL -- THIS HOST HAS NO ROUTE, and "not applied" here means nobody can
-            # administer the environment at all. Fourth step in this deploy to need moving inside,
-            # after the users, the schema and the feature gates; the bootstrap job wrote it on the
-            # connection it already holds, refused to leave the model without a SuperAdmin, and read
-            # it back before the deploy was allowed past infra.
-            # 🔴 AND IT MUST VERIFY THAT, NOT ASSERT IT. This used to return "applied IN-CLOUD by the
-            # bootstrap job" unconditionally -- a claim about a DIFFERENT component, made without
-            # looking. The bootstrap job only runs inside INFRA, and INFRA is correctly skipped the
-            # moment an environment is converged, so on every re-run this step reported success while
-            # nothing wrote anything. Measured at a customer 2026-09-12: the deploy said
-            #     -> ok=True ran=False Manager SuperAdmin applied IN-CLOUD by the bootstrap job
-            # and the job did not even CARRY the list (PIM_DBINIT_MANAGER_ACCESS was unset, last run
-            # predating the feature). The operator signed in and had no SuperAdmin -- on an
-            # environment whose deploy had just reported success end to end.
-            # 🔑 "Another component did it" is the one claim a step can never make from the outside.
-            # Read the job back: if it carries the CURRENT list, say so; if it does not, say plainly
-            # that access has NOT been applied and how to apply it, rather than reporting success.
+            # 🔴 PRIVATE SQL -- THIS HOST HAS NO ROUTE. FIRST-SUPERADMIN-1: on a first install INFRA (Setup-PimContainers)
+            # wrote the installing person's ONE secret in the install's vault, granted the database job's identity Secrets
+            # Officer on it and ran the job (which seeded, deleted the secret and recorded FirstAdminSeed). A RE-RUN here is
+            # the recovery (B): the same installing person gets a fresh secret + one empty-body job run; anyone else nothing.
+            # 🔑 "Another component did it" is still never claimed from the outside: the vault is READ back (secret gone =
+            # used; still there = not used, said).
             if ($SqlPrivateEndpoint) {
-                $jobHasIt = $false
-                if ((Test-PimDeployRest) -and "$ResourceGroup".Trim()) {
-                    $jobEnv = Get-PimDeployJobEnvValue -Job $DbInitJobName -Name 'PIM_DBINIT_MANAGER_ACCESS'
-                    if ("$jobEnv".Trim()) {
-                        $parsed = $null
-                        try { $parsed = "$jobEnv".Trim() | ConvertFrom-Json } catch { }
-                        # 🪤 PARSE IT. A value mangled by cmd.exe quote-stripping is present and
-                        # useless -- the job dies in ConvertFrom-Json and the deploy would still have
-                        # called it applied. Measured the same day, twice.
-                        if ($parsed) {
-                            $have = @(@($parsed) | ForEach-Object { "$($_.identity)".Trim().ToLowerInvariant() } | Where-Object { $_ })
-                            $want = @($who | ForEach-Object { "$_".Trim().ToLowerInvariant() })
-                            $missing = @($want | Where-Object { $have -notcontains $_ })
-                            $jobHasIt = (-not $missing.Count)
-                        }
-                    }
-                }
-                if ($jobHasIt) {
-                    return @{ ok=$true; ran=$false; detail=(
-                        "Manager SuperAdmin applied IN-CLOUD by the bootstrap job, verified on the job (private SQL -- this host has no route): " +
-                        ($who -join ', ')) }
-                }
-                return @{ ok=$false; ran=$true; detail=(
-                    "Manager access has NOT been applied. SQL is private so this host cannot write it, and the " +
-                    "bootstrap job '$DbInitJobName' does not carry the current SuperAdmin list -- so NOBODY can " +
-                    "administer this environment. Re-run with the INFRA step (it stamps the list onto the job and " +
-                    "runs it), or set PIM_DBINIT_MANAGER_ACCESS on that job and start it.") }
+                $faR = Invoke-PimDeployFirstAdminRecovery -Installer $faMe -Store (Read-PimDeployStoreSetting -Name 'ManagerAccess')
+                return @{ ok=$faR.ok; ran=$faR.ran; detail=$faR.detail }
             }
+            # PUBLIC SQL (item 7): the installer writes the store directly through the person's SQL window -- the same oid
+            # binding, only when no SuperAdmin exists (never overwritten), read back, FirstAdminSeed recorded.
             if (-not "$SqlAdminClientId".Trim() -and -not $UseSignedInAccount) {
                 return @{ ok=$true; ran=$false; detail='no -SqlAdminClientId -- cannot write pim.Settings ManagerAccess; grant it by hand' }
             }
-            $json = '{"managerAccess":[' + (($who | ForEach-Object { '{"identity":"' + $_ + '","role":"SuperAdmin"}' }) -join ',') + ']}'
-            if ($PSCmdlet.ShouldProcess(($who -join ', '), 'grant Manager SuperAdmin')) {
-                $global:LASTEXITCODE = 0
+            if ($PSCmdlet.ShouldProcess("$($faMe.userPrincipalName)", 'seed the first Manager SuperAdmin (bound to the object id)')) {
                 if ($UseSignedInAccount) {
-                    $whyA = Confirm-PimSignedInSqlAccess
+                    $whyA = Confirm-PimSignedInSqlAccess -Step 'access'
                     if ($whyA) { return @{ ok=$false; ran=$true; detail="access: $whyA" } }
-                    $accArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; UseSignedInAccount = $true; AccessJson = $json }
-                } else {
-                $accArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase
-                              AdminAppId = $SqlAdminClientId; AccessJson = $json }
-                if ("$SqlAdminCertThumbprint".Trim()) { $accArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint }
-                elseif ("$SqlAdminClientSecret".Trim()) { $accArgs['AdminSecret'] = $SqlAdminClientSecret }
                 }
-                & $acc @accArgs | Out-Host
-                $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
-                return @{ ok=$ok; ran=$true; detail="Manager SuperAdmin: $($who -join ', ')" }
+                return (Invoke-PimDeployFirstAdminPublic -Installer $faMe)
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -2933,7 +3196,7 @@ function Invoke-DefaultStepRunner {
             $sl = Join-Path $here 'Set-PimLicense.ps1'
             $slArgs = @{ LicensePath = $lp; InstallKeyPath = $kp; SqlServer = $SqlServerFqdn; Database = $SqlDatabase; TenantId = $TenantId }
             if ($UseSignedInAccount) {
-                $whyL = Confirm-PimSignedInSqlAccess
+                $whyL = Confirm-PimSignedInSqlAccess -Step 'licence'
                 if ($whyL) { return @{ ok=$false; ran=$true; detail="licence: $whyL" } }
                 $slArgs['UseSignedInAccount'] = $true
             } elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
@@ -2953,10 +3216,13 @@ function Invoke-DefaultStepRunner {
             $ar = Join-Path $here 'Set-PimAlertRecipients.ps1'
             if (-not "$SqlServerFqdn".Trim()) { return @{ ok=$true; ran=$false; detail='WARNING: no -SqlServerFqdn -- alert recipients not set' } }
             if ($SqlPrivateEndpoint) { return @{ ok=$true; ran=$false; detail='WARNING: private SQL -- this host has no route; set them in PIM Manager > Settings > Alerting' } }
+            # NO-PERSON-DB-ADMIN D1: an EXISTING install -- the person is not made a database admin to write one settings row
+            # (when a D2 step of this run already opened the window, the step runs as before -- the person is a member anyway)
+            if ((Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'alerting') -and -not $script:PimSignedInSqlChecked) { return @{ ok=$true; ran=$false; detail='an existing install: alert recipients are not written from here (no database admin rights for the signed-in person) -- an existing list is kept; change it in PIM Manager > Settings > Alerting' } }
             $arArgs = @{ SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId; SubscriptionId = $SubscriptionId
                          AlertRecipients = @($AlertRecipients); SuperAdmins = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
             if ($UseSignedInAccount) {
-                $whyR = Confirm-PimSignedInSqlAccess
+                $whyR = Confirm-PimSignedInSqlAccess -Step 'alerting'
                 if ($whyR) { return @{ ok=$true; ran=$false; detail="WARNING: alert recipients not set: $whyR" } }
                 $arArgs['UseSignedInAccount'] = $true
             } elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
@@ -2977,9 +3243,15 @@ function Invoke-DefaultStepRunner {
             # 'SQL setup host rule closed' line is a fact, not a promise.
             $cv = Join-Path $here 'Confirm-PimInstall.ps1'
             if ($SqlPrivateEndpoint) { return @{ ok=$true; ran=$false; detail='WARNING: private SQL -- this host has no route to the store; run tools\setup\Confirm-PimInstall.ps1 from inside the network' } }
+            # NO-PERSON-DB-ADMIN D1: an EXISTING install -- the check reads the store, and the person is not made a database admin for it
+            if ((Test-PimDbAdminJobRoute -Plan $script:PimDbAdminPlan -Step 'verify-install') -and -not $script:PimSignedInSqlChecked) { return @{ ok=$true; ran=$false; detail='WARNING: an existing install -- the end-of-install check reads the store and the signed-in person is not made a database admin for it; run tools\setup\Confirm-PimInstall.ps1 through the Invardia Support app' } }
             $cvArgs = @{ Role = 'Single'; TenantId = $TenantId; SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase
                          ManagerApp = $ManagerApp; TickJobName = $TickJobName; UpdateJobName = $UpdateJobName; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo
                          SuperAdmins = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }); AlertRecipients = @($AlertRecipients) }
+            # FIRST-SUPERADMIN-1: a person's install seeds ONE SuperAdmin (that person, by object id) -- the check looks for
+            # that one, so its repair never writes the other named people by name (they are added in Manager > Settings)
+            $cvMe = Get-PimDeployFirstAdminInstaller
+            if ($cvMe.ok) { $cvArgs['SuperAdmins'] = @("$($cvMe.userPrincipalName)") }
             $wt = $script:PimSetupHostWindow
             if ($wt -and $wt.target -and "$($wt.target.rg)".Trim()) { $cvArgs['SqlResourceGroup'] = "$($wt.target.rg)".Trim() }
             if ("$AcrAgentPoolName".Trim()) { $cvArgs['AcrAgentPoolName'] = "$AcrAgentPoolName".Trim() }
@@ -3543,8 +3815,20 @@ if ($Apply -and -not $StepRunner -and $hosted -and -not $KeepSetupIdentityInSqlA
         $rel = Invoke-PimSqlAdminGroupSetupRelease -Graph $invR.Graph -Arm $invR.Arm -SubscriptionId $subR -SqlResourceGroup $sqlRgR -SqlServerName $srvR `
                    -MemberObjectId $relOid -GroupName $SqlAdminGroupName -Label $(if ($UseSignedInAccount) { 'the signed-in administrator' } else { "the SQL admin application $SqlAdminClientId" })
         Step "SQL admin group: $($rel.reason)"
-        if (-not $rel.ok) { Warn "  the setup identity could not be released -- the install itself is fine; remove it from '$SqlAdminGroupName' as described above." }
-    } catch { Warn "SQL admin group: the setup identity was not released ($($_.Exception.Message)) -- remove it from '$SqlAdminGroupName' as a Privileged Role Administrator." }
+        # a PERSON (not an Invardia Support-app session -- an application, 100.116): a failed removal is a hard stop
+        $relPerson = [bool]($UseSignedInAccount -and -not "$script:PimSignedInAppId".Trim())
+        if ($relPerson) { $script:PimDbAdminRelease = Get-PimDbAdminReleaseVerdict -Release $rel }
+        elseif (-not $rel.ok) { Warn "  the setup identity could not be released -- the install itself is fine; remove it from '$SqlAdminGroupName' as described above." }
+    } catch {
+        if ($UseSignedInAccount -and -not "$script:PimSignedInAppId".Trim()) { $script:PimDbAdminRelease = Get-PimDbAdminReleaseVerdict -Release $null -ErrorText "$($_.Exception.Message)" }
+        else { Warn "SQL admin group: the setup identity was not released ($($_.Exception.Message)) -- remove it from '$SqlAdminGroupName' as a Privileged Role Administrator." }
+    }
+}
+# NO-PERSON-DB-ADMIN D1: the SIGNED-IN PERSON's removal is never a warning -- refused, not checked or not read back = the run
+# STOPS here, named by its step ('sql-admin-release'), so no person is left a standing database admin in silence.
+if ($script:PimDbAdminRelease -and $script:PimDbAdminRelease.stop) {
+    Write-Host "  [$($script:PimDbAdminRelease.step)] $($script:PimDbAdminRelease.message)" -ForegroundColor Red
+    $outcomes.Add([pscustomobject]@{ key = "$($script:PimDbAdminRelease.step)"; ran = $true; ok = $false }) | Out-Null
 }
 
 # =============================================================================

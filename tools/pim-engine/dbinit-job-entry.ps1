@@ -54,6 +54,17 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 # support-legacy-owner, a REMOVAL: never in a grants-only run). The rules first, then the job-only statements.
 . (Join-Path $solRoot 'engine/_shared/PIM-SupportLegacyOwner.ps1')
 . (Join-Path $solRoot 'engine/_shared/PIM-SupportLegacyOwnerSql.ps1')
+# NO-PERSON-DB-ADMIN D2 (framework 12.23 / SEC-08): the SCHEMA UPGRADE of an existing store (PIM_DBINIT_SCHEMA_UPGRADE), asked by
+# the deploy's 'schema' step on an existing install instead of connecting as the signed-in person. The same guard + conformance
+# builder the updater uses; Initialize-PimSqlStore calls Get-PimChangeQueueDdl.
+. (Join-Path $solRoot 'engine/_shared/PIM-ChangeQueue.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-SchemaConformance.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-UpdateLifecycle.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-UpdateSource.ps1')
+. (Join-Path $solRoot 'engine/_shared/PIM-DbInitSchemaUpgrade.ps1')
+# FIRST-SUPERADMIN-1 (Invardia 2026-11-20): the first SuperAdmin of a private first install comes from ONE Key Vault secret in
+# the install's own vault (PIM_KeyVaultId names the vault -- nothing about a person rides the definition or the start).
+. (Join-Path $solRoot 'engine/_shared/PIM-FirstAdminSeed.ps1')
 
 # PIM_DBINIT_STEPS (per execution): unset / 'all' = every step, as before; 'grants' = ONLY the part that may run BESIDE a running
 # PIM job (users, role membership, the access roles + grants; a re-sign of the access procedure only while no Support session is
@@ -96,7 +107,7 @@ if (@($plan.problems).Count) {
 # OPEN-06: the updater writes this job on EVERY install with PIM_DBINIT_PRINCIPALS = [] (no user to create). An EMPTY list
 # skips only the user step; the schema, the access model, the feature gates, the Manager access and the update record still
 # run when they are asked for. Nothing at all asked for = exit 0. (An UNSET list is still a configuration error, exit 2.)
-$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_DROP_USERS', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED', 'PIM_DBINIT_SUPPORT_LEGACY_OWNER') |
+$otherWork = @('PIM_DBINIT_SCHEMA', 'PIM_DBINIT_SCHEMA_UPGRADE', 'PIM_DBINIT_DROP_USERS', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED', 'PIM_DBINIT_SUPPORT_LEGACY_OWNER', (Get-PimFirstAdminVaultEnvName)) |
              Where-Object { $v = "$([Environment]::GetEnvironmentVariable($_))".Trim(); $v -and ($_ -ne 'PIM_DBINIT_SCHEMA' -or $v -in @('1', 'true', 'yes', 'TRUE', 'Yes')) }
 if (-not @($plan.users).Count) {
     if (-not @($otherWork).Count) { Say 'no principals to create and nothing else asked for.' 'Yellow'; exit 0 }
@@ -114,6 +125,13 @@ if (@($plan.users).Count) { [void]$askedSteps.Add('users') }
 if ("$($env:PIM_DBINIT_DROP_USERS)".Trim()) { [void]$askedSteps.Add('drop-old-users'); [void]$explicitSteps.Add('drop-old-users') }
 
 if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in $djTrue) { [void]$askedSteps.Add('schema') }
+# NO-PERSON-DB-ADMIN D2 (decision A: no setting rides a start): the schema upgrade of an EXISTING store is a DEFAULT step of
+# the job's own definition (PIM_DBINIT_SCHEMA, which every database job carries) -- held, never refused, beside a run. Asked
+# on purpose with PIM_DBINIT_SCHEMA_UPGRADE (an operator's setting) it is explicit (refused beside a run, never dropped).
+$djUpgExplicit = Test-PimDbInitSchemaUpgradeAsked -Value "$([Environment]::GetEnvironmentVariable((Get-PimDbInitSchemaUpgradeSetting)))"
+$djUpg = ($djUpgExplicit -or ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in $djTrue))
+if ($djUpg) { [void]$askedSteps.Add((Get-PimDbInitSchemaUpgradeStepId)) }
+if ($djUpgExplicit) { [void]$explicitSteps.Add((Get-PimDbInitSchemaUpgradeStepId)) }
 [void]$askedSteps.Add('statistics')
 if ("$($env:PIM_DBINIT_SQL_ACCESS)".Trim()) {
     foreach ($s in @('access-prerequisites', 'access', 'access-facts')) { [void]$askedSteps.Add($s) }
@@ -307,7 +325,7 @@ try {
         $existing = [int]$c.ExecuteScalar()
         if ($existing -gt 0) {
             Say "store already has $existing table(s) -- NOT re-applying the shipped schema." 'Yellow'
-            Say 'Schema drift on an existing store is the updater''s job; this bootstrap only creates.' 'DarkGray'
+            Say 'An existing store is brought up to date by the schema upgrade step below (guarded, never destructive).' 'DarkGray'
             $schemaFiles = @()
         }
     }
@@ -342,6 +360,25 @@ try {
                 Say "verified: $tables table(s) in schema 'pim'" 'Green'
             }
         }
+    }
+    # ---- SCHEMA UPGRADE (NO-PERSON-DB-ADMIN D2, framework 12.23 / SEC-08) ------------------------------------------------
+    # The deploy's 'schema' step on an EXISTING install starts this job with the EMPTY body (decision A): its own definition
+    # (PIM_DBINIT_SCHEMA), its own identity, its own image apply the upgrade the deploy used to apply AS THE SIGNED-IN PERSON --
+    # core tables, the shipped file behind the store-aware guard, the conformance
+    # DDL (never a drop), re-preflight (engine/_shared/PIM-DbInitSchemaUpgrade.ps1). BEFORE statistics and the access model, so
+    # the converge grants the views this step creates. A failure FAILS the job (the deploy then stops before 'code').
+    if (-not $failed -and $djUpg -and (& $runStep (Get-PimDbInitSchemaUpgradeStepId))) {   # DBINIT-STEP-FILTER: never under 'grants'
+        Step 'schema upgrade'
+        $suQ = { param([string]$sql, [hashtable]$prm) $c6 = $conn.CreateCommand(); $c6.CommandText = $sql; $c6.CommandTimeout = 120
+                 if ($prm) { foreach ($k in @($prm.Keys)) { [void]$c6.Parameters.AddWithValue("@$k", $(if ($null -eq $prm[$k]) { [DBNull]::Value } else { $prm[$k] })) } }
+                 $rd6 = $c6.ExecuteReader(); $rows6 = New-Object System.Collections.Generic.List[object]
+                 while ($rd6.Read()) { $o6 = [ordered]@{}; for ($i6 = 0; $i6 -lt $rd6.FieldCount; $i6++) { $o6[$rd6.GetName($i6)] = $(if ($rd6.IsDBNull($i6)) { $null } else { $rd6.GetValue($i6) }) }; $rows6.Add([pscustomobject]$o6) }
+                 $rd6.Close(); $rows6.ToArray() }
+        $suX = { param([string]$sql) $c6 = $conn.CreateCommand(); $c6.CommandText = $sql; $c6.CommandTimeout = 300; [void]$c6.ExecuteNonQuery() }
+        $suI = { Initialize-PimSqlStore -ConnectionString $cs }
+        $su = Invoke-PimDbInitSchemaUpgrade -Query $suQ -Exec $suX -InitStore $suI -SolutionRoot $solRoot -LockedSchema (Get-PimLockedSqlSchema)
+        foreach ($l in @($su.lines)) { Say $l 'DarkGray' }
+        if ($su.ok) { Say "schema upgrade: $($su.reason)" 'Green' } else { Say "FAILED schema upgrade: $($su.reason)" 'Red'; $failed++ }
     }
     # ---- STATISTICS (framework 12.27 SQL-STATS) ----------------------------------------------------
     # AUTO_UPDATE_STATISTICS_ASYNC ON + pim.usp_RefreshStatistics (WITH EXECUTE AS OWNER), as the server's admin: real SQL
@@ -558,6 +595,56 @@ try {
         } catch {
             Say "FAILED manager access: $($_.Exception.Message)" 'Red'; $failed++
         }
+    }
+    # ---- FIRST SUPERADMIN (FIRST-SUPERADMIN-1, Invardia approved 2026-11-20) -------------------------------------------
+    # The installer wrote ONE secret 'pim-first-superadmin' in the install's own vault (PIM_KeyVaultId) and gave THIS job's
+    # identity Key Vault Secrets Officer on that one secret. Read it, check it (own tenant from this identity's own token,
+    # not expired, the oid a GUID), seed ManagerAccess ONLY when it holds no SuperAdmin (never overwritten), DELETE the
+    # secret + read back 404, remove this identity's grant when it may (else the installer / the updater does), and record
+    # pim.Settings FirstAdminSeed. Full runs only (never under 'grants'). No secret = nothing to do.
+    $faVaultId = "$([Environment]::GetEnvironmentVariable((Get-PimFirstAdminVaultEnvName)))".Trim()
+    if (-not $failed -and -not $grantsOnly -and $faVaultId) {
+        Step 'first superadmin'
+        try {
+            $faVaultName = ($faVaultId.TrimEnd('/') -split '/')[-1]
+            $faTok = "$(Get-PimRestToken -Resource 'https://vault.azure.net')".Trim()
+            $faClaims = ConvertFrom-PimFirstAdminJwtPayload -Token $faTok
+            $faTid = "$($faClaims.tid)".Trim(); $faMe = "$($faClaims.oid)".Trim()
+            $faKv = { param([string]$Method, [string]$Name)
+                $hc = [System.Net.Http.HttpClient]::new(); $hc.Timeout = [TimeSpan]::FromSeconds(30)
+                try {
+                    $rq = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($Method), "https://$faVaultName.vault.azure.net/secrets/$Name`?api-version=7.4")
+                    $rq.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $faTok)
+                    $rs = $hc.SendAsync($rq).GetAwaiter().GetResult()
+                    @{ status = [int]$rs.StatusCode; body = $rs.Content.ReadAsStringAsync().GetAwaiter().GetResult() }
+                }
+                finally { $hc.Dispose() }
+            }
+            $faScope = Get-PimFirstAdminSecretScope -VaultId $faVaultId
+            $faUngrant = {
+                if (-not (Test-PimFirstAdminGuid $faMe)) { return @{ removed = $false; reason = 'this identity''s object id is not in its token' } }
+                $raPath = "$faScope/providers/Microsoft.Authorization/roleAssignments/$(Get-PimFirstAdminRoleAssignmentName -Scope $faScope -PrincipalId $faMe)"
+                try { [void](Invoke-PimArm -Method DELETE -Path $raPath -ApiVersion (Get-PimFirstAdminAuthzApi)) } catch { if (-not (Test-PimFirstAdminNotFound $_)) { return @{ removed = $false; reason = "this identity may not remove it: $((("$($_.Exception.Message)") -split "`n")[0])" } } }
+                try { [void](Invoke-PimArm -Method GET -Path $raPath -ApiVersion (Get-PimFirstAdminAuthzApi)); return @{ removed = $false; reason = 'still there after the removal' } }
+                catch { if (Test-PimFirstAdminNotFound $_) { return @{ removed = $true; reason = 'read back 404' } }; return @{ removed = $false; reason = "not read back: $((("$($_.Exception.Message)") -split "`n")[0])" } }
+            }
+            $fa = Invoke-PimFirstAdminSeedJob -TenantId $faTid `
+                      -KvGet { param($n) & $faKv 'GET' $n } -KvDelete { param($n) & $faKv 'DELETE' $n } `
+                      -ReadAccess { Get-PimSqlSettingRaw -ConnectionString $cs -Name 'ManagerAccess' } `
+                      -WriteAccess { param($v) Set-PimSqlSetting -ConnectionString $cs -Name 'ManagerAccess' -ValueJson (ConvertTo-Json -InputObject $v -Depth 8 -Compress) } `
+                      -ReadRecord { Get-PimSqlSettingRaw -ConnectionString $cs -Name (Get-PimFirstAdminSettingName) } `
+                      -WriteRecord { param($v) Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimFirstAdminSettingName) -ValueJson (ConvertTo-Json -InputObject $v -Depth 6 -Compress) } `
+                      -RemoveGrant $faUngrant
+            foreach ($l in @($fa.lines)) { Say $l $(if ($fa.failed) { 'Red' } elseif ($fa.state -in @('used', '')) { 'Green' } else { 'Yellow' }) }
+            if ($fa.state) {
+                # FIRST-SUPERADMIN-1 (Support-app install): the audit row names who was named, by which Support app, with the
+                # reason / ticket its session carried, and the object id (all in -After = the FirstAdminSeed record)
+                $faTarget = "$($fa.state)"
+                if ($fa.namedBy) { $faTarget = "$($fa.state); $($fa.named) named by the Invardia Support app $($fa.namedBy.appId)" }
+                try { Write-PimSqlAuditEvent -ConnectionString $cs -Actor 'job:dbinit' -ActorSource 'job' -Action 'first-superadmin' -Target $faTarget -After $fa.record -Result "$($fa.state)" } catch { Say "first superadmin: not audited ($($_.Exception.Message))" 'Yellow' }
+            }
+            if ($fa.failed) { $failed++ }
+        } catch { Say "first superadmin: not done ($($_.Exception.Message)) -- the secret stays; the next run reads it again" 'Yellow' }
     }
     # ---- THE UPDATE RING THE DEPLOY SET, same route, same reason (2026-10-08) --------------------
     # Deploy-PimUpdateJob records the ring it wrote onto the update job in pim.Settings['UpdateState'] (kind

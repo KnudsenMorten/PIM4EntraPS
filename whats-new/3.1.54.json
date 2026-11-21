@@ -1,0 +1,6 @@
+{"version":"3.1.54","date":"2026-11-20","type":"feature",
+ "summary":"Your saved settings keep up with improved defaults, and every reported problem now has its own support code.",
+ "new":[{"title":"Settings follow improved defaults","text":"Alerting and mail settings now keep only what you changed. When PIM Manager improves a default later, you get it automatically, and every choice you made stays as you set it."}],
+ "fixes":[{"title":"A support code for every problem","text":"Each problem PIM Manager reports now carries its own support code, so support finds the cause and the fix at once."},
+          {"title":"Clearer names in the security pack","text":"The security pack names each part by what it does, with one table that lists every name."},
+          {"title":"Mail password set safely","text":"Setting the mail relay password no longer gives the person running it extra rights in Key Vault. The step names the right it needs."}]}

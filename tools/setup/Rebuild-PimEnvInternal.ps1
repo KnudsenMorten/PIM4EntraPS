@@ -26,7 +26,7 @@
 
 .EXAMPLE
     # 1. plan (writes a capture, changes nothing)
-    ./Rebuild-PimEnvInternal.ps1 -Tag ab123 -SubscriptionId <sub> -ResourceGroup rg-automateit-ab123 `
+    ./Rebuild-PimEnvInternal.ps1 -Tag ab123 -SubscriptionId <sub> -ResourceGroup rg-pim-ab123 `
         -HubVnetId /subscriptions/<hubsub>/resourceGroups/<hubrg>/providers/Microsoft.Network/virtualNetworks/<hub>
 
     # 2. do it

@@ -40,7 +40,13 @@
       wl     workload connectors (custom workloads)           0101..
       tap    accounts and Temporary Access Pass               0101..
       ad     hybrid Active Directory (the hybrid worker)      0101..
-      upd    the in-cloud updater (ca-pim-update)             0101..
+      upd    the in-cloud updater                             0101..
+      web    the internet-facing web identity's rights        0101..
+             (the updater's least-privilege trim)
+      sql    the Support app's database access (standing      0101..
+             db_owner and its removal by the database job)
+      src    a report job's data source not read: stale for   0101..
+             a week (framework TRUST-1 point 8) or a right missing
       gen    the GENERIC code of each CauseClass: a failure    0001..
              that has no own class yet (UNCLASSIFIED = 0001)
 #>
@@ -936,6 +942,25 @@ function Get-PimFailureCodeTable {
         ,@('UPDATE-INVARDIA-UNREACHABLE',      'pim-upd-0104',   'upstream-error',    'nobody',   '',      '3.0.35')
         ,@('UPDATE-HEALTH-UNREAD',             'pim-upd-0105',   'upstream-error',    'nobody',   '',      '3.0.45')
         ,@('UPDATE-ROLLED-BACK',               'pim-upd-0106',   'unclassified',      'product',  '',      '3.0.45')
+        # 3.1.54 (Invardia board, "a run report with no stable error code"): the classes the register-once run report
+        # (New-PimStallRunReportRecord, PIM-Uplink.ps1) sends besides run-stalled. No engine rule matches them: only the
+        # updater's web-identity trim (PIM-WebIdentityTrim.ps1), the database job's legacy-owner step
+        # (PIM-SupportLegacyOwner.ps1) and the TRUST-1 point 8 stale check (Register-PimTrustStaleReport) send them.
+        # Every one is internal (a fix request to Invardia, never a customer mail); the removed note opens no ticket.
+        ,@('WEB-IDENTITY-EXCESS',              'pim-web-0101',   'not-converged',     'support',  '',      '3.1.54')
+        ,@('SQL-SUPPORT-OWNER',                'pim-sql-0101',   'not-converged',     'support',  '',      '3.1.54')
+        ,@('SQL-SUPPORT-OWNER-PROOF',          'pim-sql-0102',   'not-converged',     'support',  '',      '3.1.54')
+        ,@('SQL-SUPPORT-OWNER-FAILED',         'pim-sql-0103',   'not-converged',     'support',  '',      '3.1.54')
+        ,@('SQL-SUPPORT-OWNER-REMOVED',        'pim-sql-0104',   'not-converged',     'nobody',   '',      '3.1.54')
+        ,@('AA-SOURCE-STALE',                  'pim-src-0101',   'upstream-error',    'support',  '',      '3.1.54')
+        ,@('DRIFT-SOURCE-STALE',               'pim-src-0102',   'upstream-error',    'support',  '',      '3.1.54')
+        ,@('COVERAGE-SOURCE-STALE',            'pim-src-0103',   'upstream-error',    'support',  '',      '3.1.54')
+        ,@('COVERAGE-RIGHT-MISSING',           'pim-src-0104',   'permission',        'support',  '',      '3.1.54')
+        # 3.1.60 (framework ROLL-HUNG-1, Invardia 2026-11-20): the updater's quiesce stopped ONE run that was hung by the exact
+        # rule (10x its usual length, at least 120 min, no log line since its start) -- or could not stop it and keeps holding.
+        # A fix request to Invardia through the register-once run report (Register-PimRollHungReport); never a customer mail.
+        ,@('UPDATE-RUN-HUNG-STOPPED',          'pim-upd-0107',   'platform-timeout',  'support',  '',      '3.1.60')
+        ,@('UPDATE-RUN-HUNG-STOP-FAILED',      'pim-upd-0108',   'platform-timeout',  'support',  '',      '3.1.60')
         # the generic code of each CauseClass (framework 8.16: "an unknown failure gets the generic code of its CauseClass")
         ,@('UNCLASSIFIED',                     'pim-gen-0001',   'unclassified',      'product',  '',      '2.4.638')
         ,@('GENERIC:customer-config',          'pim-gen-0002',   'customer-config',   'customer', '',      '2.4.638')
@@ -1013,6 +1038,29 @@ function Get-PimFailureClassOwnText {
                                  'Nothing to do. PIM Manager compares again on every run.') }
         'WORKLOAD-ROLE-GONE' { return @('A role that a workload row binds was deleted in the workload after PIM Manager had assigned it, so there is nothing to assign. Nothing failed; everything else is applied.',
                                  'Nothing has to be done. To stop the warning, delete the row in Advanced View (grid) and commit, or recreate the role in the workload.') }
+        # 3.1.54: the register-once run report's own classes (internal fix requests to Invardia; never a customer mail)
+        'WEB-IDENTITY-EXCESS' { return @('The update found a right on the web app''s identity that is outside its approved set and that the update may not remove by itself. Nothing was changed; Invardia support has been told.',
+                                 'Nothing to do for you: Invardia support removes the right with you.') }
+        'SQL-SUPPORT-OWNER' { return @('Invardia support''s database access holds full rights outside an open support session. Nothing was changed; the database job removes the standing rights once its checks pass.',
+                                 'Nothing to do for you: Invardia support looks at it.') }
+        'SQL-SUPPORT-OWNER-PROOF' { return @('Invardia support''s standing database rights stay for now, because a check the database job needs before it removes them is not in place yet. Nothing was changed.',
+                                 'Nothing to do for you: Invardia support looks at it. The database job tries again after a day.') }
+        'SQL-SUPPORT-OWNER-FAILED' { return @('The database job could not finish removing Invardia support''s standing database rights. It put back exactly what it had removed; nothing else was changed.',
+                                 'Nothing to do for you: Invardia support looks at it.') }
+        'SQL-SUPPORT-OWNER-REMOVED' { return @('The database job removed Invardia support''s standing database rights and read the result back. Support now gets these rights only inside a support session you open.',
+                                 'Nothing to do.') }
+        'AA-SOURCE-STALE' { return @('Part of the active-assignments view has not been read for more than a week. Its last result stays listed with its date; nothing was changed.',
+                                 'Nothing to do for you: Invardia support looks at it.') }
+        'DRIFT-SOURCE-STALE' { return @('Part of the drift view has not been read for more than a week. Its last findings stay listed with their date; nothing was changed.',
+                                 'Nothing to do for you: Invardia support looks at it.') }
+        'COVERAGE-RIGHT-MISSING' { return @('The engine is missing a right it needs to read one part of the coverage view (for example the Fabric Administrator role while Power BI is on). That part is not read; nothing was changed. Invardia support has been told.',
+                                 'Nothing to do for you: Invardia support looks at it with you.') }
+        'COVERAGE-SOURCE-STALE' { return @('Part of the coverage view has not been read for more than a week. Its last findings stay listed with their date; nothing was changed.',
+                                 'Nothing to do for you: Invardia support looks at it.') }
+        'UPDATE-RUN-HUNG-STOPPED' { return @('One PIM Manager job run had stopped working: it ran far longer than usual and wrote nothing since it started. The update stopped that one run and then went ahead. Invardia support has been told.',
+                                 'Nothing to do for you: the job runs again on its next schedule, and Invardia support looks at why it stopped working.') }
+        'UPDATE-RUN-HUNG-STOP-FAILED' { return @('One PIM Manager job run had stopped working, and the update could not stop it. The update waits and nothing was changed. Invardia support has been told.',
+                                 'Nothing to do for you: Invardia support looks at it, and the update tries again by itself.') }
     }
     return $null
 }

@@ -178,7 +178,7 @@ PIM Manager, the engine and the database run in your subscription on managed ide
 | Health reports and "Update now" | Only if you say yes to connecting to Invardia | ✅ |
 | Second approver (four-eyes) and the evidence / audit export | ✅ | ✅ |
 | Access reviews enforced by the engine | | ✅ |
-| Delegated administration | | ✅ |
+| Delegated administration (portal users limited to a tier, level, service or scope) | ✅ | ✅ |
 | Access request portal and API | | ✅ |
 | Coverage, gaps and the discovery inbox | | ✅ |
 | Management report as a PowerPoint, on demand or mailed monthly | | ✅ |

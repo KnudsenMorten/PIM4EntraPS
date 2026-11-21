@@ -21,17 +21,17 @@ This pack is for the CISO and the security team who must approve PIM Manager bef
 <a id="architecture"></a>
 ## 1. Architecture
 
-PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with a desired state that your administrators manage. It runs entirely in **your own Azure subscription**, in a resource group you choose (default name `rg-pim`). Invardia does not host the product, your data or its runtime.
+PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with a desired state that your administrators manage. It runs entirely in **your own Azure subscription**, in a resource group you choose (default name `rg-pim`). Invardia does not host the product, your data or its runtime. This pack names every part by its role (the engine, the Manager, the updater, the database job ...); each role's standard resource name, the earlier name an older installation may still carry and the identity it signs in as are in one table in chapter 2.
 
 ### Components (all in your subscription)
-- **Engine job** `ca-pim-tick` -- an Azure Container Apps job on a schedule. It reads the desired state from SQL and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR role management through REST calls with its managed identity.
-- **Manager** `ca-pim-manager` -- the web GUI (Container App). Administrators sign in with Entra ID through Microsoft's built-in sign-in on the Container App (OpenID Connect code flow with PKCE, no client secret); the Manager verifies every request's signed token itself. (The earlier sign-in front is retired.) Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.
-- **Updater job** `ca-pim-update` -- builds the new version from source inside your own container registry and rolls the Manager and jobs (chapter 6).
+- **The engine** -- an Azure Container Apps job on a schedule. It reads the desired state from SQL and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR role management through REST calls with its managed identity.
+- **The Manager (web app)** -- the web GUI (Container App). Administrators sign in with Entra ID through Microsoft's built-in sign-in on the Container App (OpenID Connect code flow with PKCE, no client secret); the Manager verifies every request's signed token itself. (The earlier sign-in front is retired.) Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.
+- **The updater** -- an Azure Container Apps job that builds the new version from source inside your own container registry and rolls the Manager and jobs (chapter 6).
 - **Azure SQL Database** -- the desired state, settings, audit log and commit journal. Entra-only authentication. The installer creates it on the Standard tier, S0 at minimum (never Basic, never serverless), with a 250 GB maximum size; a higher tier you set is kept, and a `pim-sql-tier-pin` tag stops the product changing its tier.
 - **Azure Container Registry** -- holds the images built in your subscription (Premium for private network setups, Basic otherwise).
 - **Log Analytics workspace** -- receives the Container Apps logs.
 - **Key Vault** -- only when a feature needs a secret (SMTP relay password, emergency passphrase, MSP signing key). A plain install creates none.
-- Optional: **PIM Activator** browser extension with its own app registration (chapter 2), the **access-request (RFA) broker** `ca-pim-rfa`, an **MCP endpoint** on the Manager, and a **hybrid worker** VM for on-premises Active Directory.
+- Optional: **PIM Activator** browser extension with its own app registration (chapter 2), the **access-request (RFA) broker**, an **MCP endpoint** on the Manager, and a **hybrid worker** VM for on-premises Active Directory.
 - MSP installs add a managing-tenant side (a signed baseline bundle published to storage, pulled by each managed tenant).
 
 ### What Invardia hosts
@@ -53,17 +53,35 @@ PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with
 <a id="identities"></a>
 ## 2. Identities
 
-Every identity the product creates or uses, with its purpose and lifetime. Runtime identities are **managed identities** -- no secret or certificate to steal or rotate. The default resource names are shown; an installation may prefix them.
+Every identity the product creates or uses, with its purpose and lifetime. Runtime identities are **managed identities** -- no secret or certificate to steal or rotate. Every part is named by its role. The first table maps each role to its standard resource name, the earlier name an older installation may still carry, and the identity it signs in as; an installation may prefix the names.
+
+<!-- naming-table -->
+**Names: role, standard name, earlier name, identity**
+
+| Role | Standard name | Earlier name | Identity |
+|---|---|---|---|
+| The engine (scheduled job) | caj-pim-engine | ca-pim-tick (some installations: ca-pim-engine) | id-pim-engine (before the identity move: the job's system-assigned identity) |
+| The wake job (starts the engine on a queued request) | caj-pim-wake | -- | id-pim-engine (it runs as the engine) |
+| The Manager (web app) | ca-pim-manager | ca-pim-web (some installations) | id-pim-web (before the identity move: the app's system-assigned identity) |
+| The updater (update job) | caj-pim-updater | ca-pim-update | id-pim-updater (before the identity move: the job's system-assigned identity) |
+| The database job | caj-pim-dbinit | ca-pim-dbinit | id-pim-dbinit |
+| The installation documentation job | caj-pim-docs | caj-pim-asbuilt | id-pim-docs (earlier: id-pim-asbuilt) |
+| The access-request broker (RFA option) | ca-pim-rfa | ca-pim-requests (some installations) | id-pim-requests |
+| The baseline-publish job (MSP managing tenant) | caj-pim-publish | ca-pim-publish | id-pim-publish |
+| The downlink job (MSP managed tenant) | caj-pim-downlink | ca-pim-downlink-s6 | id-pim-downlink |
+| The image-pull identity (shared) | -- | -- | id-pim-<token> (the installation's short token), until each part pulls with its own identity |
+| The private-SQL setup identity (private SQL only) | -- | -- | id-pim-sql-<token> |
+<!-- /naming-table -->
 
 **Identities created or used**
 
 | Identity | Kind | Purpose | Credential | Lifetime |
 |---|---|---|---|---|
-| ca-pim-tick (engine) | System-assigned managed identity of the engine job | Reads the tenant and applies the desired state | None (managed identity) | Lives as long as the job |
-| ca-pim-manager (Manager) | System-assigned managed identity of the Manager app | Reads the tenant for the GUI, writes SQL, starts the engine on Run now | None (managed identity) | Lives as long as the app |
-| ca-pim-update (updater) | System-assigned managed identity of the update job | Builds the new version in your registry and rolls the apps; applies schema; keeps the database job identity in the SQL admin group (PIM for Groups) | None (managed identity) | Lives as long as the job |
-| id-pim-<token> | User-assigned managed identity | Pulls images from your registry; attached to the Manager and jobs. No database access | None (managed identity) | Kept until the resource group is removed |
-| id-pim-sql-<token> | User-assigned managed identity (private SQL only) | SQL administrator for the in-cloud schema bootstrap job | None (managed identity) | Kept until removed |
+| The engine | Managed identity of the engine job (its own user-assigned identity after the identity move; before it, the job's system-assigned identity) | Reads the tenant and applies the desired state | None (managed identity) | Lives as long as the job |
+| The Manager (web app) | Managed identity of the Manager app (its own user-assigned identity after the identity move; before it, the app's system-assigned identity) | Reads the tenant for the GUI, writes SQL, starts the engine on Run now | None (managed identity) | Lives as long as the app |
+| The updater | Managed identity of the update job (its own user-assigned identity after the identity move; before it, the job's system-assigned identity) | Builds the new version in your registry and rolls the apps; applies schema; keeps the database job identity in the SQL admin group (PIM for Groups) | None (managed identity) | Lives as long as the job |
+| The image-pull identity | User-assigned managed identity | Pulls images from your registry; attached to the Manager and jobs. No database access | None (managed identity) | Kept until the resource group is removed |
+| The private-SQL setup identity | User-assigned managed identity (private SQL only) | SQL administrator for the in-cloud schema bootstrap job | None (managed identity) | Kept until removed |
 | Downlink / baseline-publish / RFA broker jobs | System-assigned managed identities (MSP and access-request options only) | Pull or publish the MSP bundle; serve access requests | None (managed identity) | Lives as long as the job/app |
 | Manager sign-in app registration | App registration (built-in sign-in) | Entra sign-in to the Manager (OpenID Connect code flow + PKCE, 8 h fixed session); app assignment required | None -- the web app's managed identity is a federated credential on the registration (no secret, no certificate) | Until the Manager is removed |
 | Manager users group (members, no guests) | Dynamic security group (optional) | Lets all member accounts sign in, never guests | n/a | Until removed |
@@ -93,7 +111,7 @@ Every permission the product grants or requires, per identity, read from the ins
 - The baseline-publish job has no fixed SQL role: SELECT on named objects only, and db_owner / db_datawriter / db_ddladmin / db_datareader are revoked.
 - Storage keys are disabled where the product creates storage; access is Azure RBAC.
 - **One identity per job in SQL:** every component that uses the database has its own contained database user, mapped from its own managed identity. The image-pull identity has no database access, and the web app holds no db_ddladmin (from 2.4.631): it cannot change the schema.
-- **SQL admin group = the database job identity only:** its standing member is the database job identity (id-pim-dbinit); people get in just-in-time through PIM for Groups. No runtime identity of the web app or the engine is a member, the updater is never a member, and a new installation does not make the Invardia Support app a member (chapter 5).
+- **SQL admin group = the database job identity only:** its standing member is the database job identity; people get in just-in-time through PIM for Groups. No runtime identity of the web app or the engine is a member, the updater is never a member, and a new installation does not make the Invardia Support app a member (chapter 5).
 - **One custom database role per component** (pim_web, pim_engine, pim_updater, pim_asbuilt, pim_publish, pim_downlink, pim_hybrid), object- or schema-level, never db_owner. Grants change after a release ONLY through one **certificate-signed procedure** (pim.usp_ApplyAccess) under fixed rules: a pim_ role, SELECT / INSERT / UPDATE / DELETE / EXECUTE, PIMs own schemas, never itself, never a fixed role. Its certificate lives in the database, expires 2099-12-31 and has **no private key** (removed after signing); altering the procedure drops the signature. The updater may only EXECUTE it and is refused when it grants directly; the engine cannot run it (proven on a live installation). Every update applies schema and grants with the updaters own database user alone, so the SQL admin group may stay empty for years.
 - **The web app cannot change the engine:** start-only rights on the named engine job (Jobs Operator), no registry push, no SQL admin.
 
@@ -108,69 +126,69 @@ Every permission the product grants or requires, per identity, read from the ins
 
 | Identity | Type | Permission | Scope | Why it is needed | What breaks without it | Optional |
 |---|---|---|---|---|---|---|
-| Engine (ca-pim-tick) | Graph application | Directory.Read.All | Tenant | Read users, groups, roles and directory objects to compare with the desired state | Everything -- the engine cannot read the tenant | No |
-| Engine (ca-pim-tick) | Graph application | User.ReadWrite.All | Tenant | Create and maintain the dedicated admin accounts | Admin account lifecycle (create, update, disable) | No |
-| Engine (ca-pim-tick) | Graph application | Group.ReadWrite.All | Tenant | Create and maintain PIM groups and their membership | Group-based delegation | No |
-| Engine (ca-pim-tick) | Graph application | RoleManagement.ReadWrite.Directory | Tenant | Create role-assignable groups and assign directory roles to them | Role-assignable groups and Entra role delegation | No |
-| Engine (ca-pim-tick) | Graph application | RoleManagement.Read.All | Tenant | Read role definitions and assignments | Role reporting and drift detection | No |
-| Engine (ca-pim-tick) | Graph application | RoleEligibilitySchedule.ReadWrite.Directory | Tenant | Create eligible Entra role assignments | Eligible Entra role delegation | No |
-| Engine (ca-pim-tick) | Graph application | RoleEligibilitySchedule.Remove.Directory | Tenant | Remove eligible Entra role assignments on revoke | Revoke of Entra role eligibility | No |
-| Engine (ca-pim-tick) | Graph application | RoleAssignmentSchedule.ReadWrite.Directory | Tenant | Create active (time-bound) Entra role assignments | Active role assignments | No |
-| Engine (ca-pim-tick) | Graph application | RoleAssignmentSchedule.Remove.Directory | Tenant | Remove active Entra role assignments on revoke | Revoke of active roles | No |
-| Engine (ca-pim-tick) | Graph application | RoleManagementPolicy.ReadWrite.Directory | Tenant | Apply Entra role PIM policies (approval, MFA, duration) | PIM policy management for Entra roles | No |
-| Engine (ca-pim-tick) | Graph application | RoleManagementPolicy.ReadWrite.AzureADGroup | Tenant | Apply PIM-for-Groups policies | PIM policy management for groups | No |
-| Engine (ca-pim-tick) | Graph application | PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup | Tenant | Create eligible group memberships | Eligible group membership | No |
-| Engine (ca-pim-tick) | Graph application | PrivilegedEligibilitySchedule.Remove.AzureADGroup | Tenant | Remove eligible group memberships on revoke | Revoke of group eligibility | No |
-| Engine (ca-pim-tick) | Graph application | PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup | Tenant | Create active group memberships | Active group membership | No |
-| Engine (ca-pim-tick) | Graph application | PrivilegedAssignmentSchedule.Remove.AzureADGroup | Tenant | Remove active group memberships on revoke | Revoke of group membership | No |
-| Engine (ca-pim-tick) | Graph application | AdministrativeUnit.ReadWrite.All | Tenant | Create and use administrative units as delegation scopes | AU-scoped delegation | No |
-| Engine (ca-pim-tick) | Graph application | AppRoleAssignment.ReadWrite.All | Tenant | Manage application role assignments (Entra app-role provider) | App-role delegation | No |
-| Engine (ca-pim-tick) | Graph application | Application.Read.All | Tenant | Resolve applications and service principals | App-role provider, reporting | No |
-| Engine (ca-pim-tick) | Graph application | UserAuthenticationMethod.ReadWrite.All | Tenant | Issue a Temporary Access Pass to a new admin account | Onboarding of new admin accounts (TAP) | No |
-| Engine (ca-pim-tick) | Graph application | AccessReview.Read.All | Tenant | Read access reviews | Access review reporting | No |
-| Engine (ca-pim-tick) | Graph application | AccessReview.ReadWrite.All | Tenant | Create and run access reviews (broader than needed; no narrower permission exists) | Access reviews | No |
-| Engine (ca-pim-tick) | Graph application | RoleManagement.ReadWrite.Defender | Tenant (Defender XDR) | Manage Defender XDR (unified RBAC) roles | Defender XDR provider | No (used only when Defender is managed) |
-| Engine (ca-pim-tick) | Graph application | DeviceManagementRBAC.ReadWrite.All | Tenant (Intune) | Manage Intune RBAC roles | Intune provider | No (used only when Intune is managed) |
-| Engine (ca-pim-tick) | Graph application | Domain.Read.All | Tenant | Read verified domains for admin account naming | Admin naming | No |
-| Engine (ca-pim-tick) | Graph application | Policy.Read.All | Tenant | Read authentication and authorization policies used in checks | Policy checks | No |
-| Engine (ca-pim-tick) | Azure RBAC | Reader | Tenant root management group | Discovery of management groups and subscriptions; Azure RBAC reporting | Azure discovery and reporting | Default on; can be skipped |
-| Engine (ca-pim-tick) | Azure RBAC | Reader | The hosting subscription (and optionally a management group) | Read Azure resources and role assignments | Azure reporting | Default on; can be skipped |
-| Engine (ca-pim-tick) | Azure RBAC | User Access Administrator | Tenant root management group, or the delegated scopes | Write Azure role assignments and PIM for Azure resources | Azure RBAC delegation (read-only without it) | Yes (opt-in switch) |
-| Engine (ca-pim-tick) | Azure RBAC | Container Apps Jobs Operator + Contributor | The updater job only | Start the updater when an update is expedited; put the updater back on its last good image | Expedited updates and the updater's self-repair (updates still run on their schedule) | No |
-| Engine (ca-pim-tick) | Azure RBAC | Reader | The ca-pim-tick job resource | Read its own execution status | Run status in the GUI | No |
-| Engine (ca-pim-tick) | Azure RBAC | Storage Table Data Contributor | The access-request storage account | Store access-request state | Access requests (RFA) | Yes (RFA option) |
-| Engine (ca-pim-tick) | Azure RBAC (custom role) | Microsoft.Storage/storageAccounts/read + write | The one MSP bundle storage account | Maintain the bundle store's network rules (MSP managing tenant, public-signed mode) | MSP bundle publication | Yes (MSP only) |
-| Engine (ca-pim-tick) | SQL | Role pim_engine (read/write the pim schema, read the tenant registry); db_datareader, db_datawriter, db_ddladmin only until the second cut-over run | The PIM database | Read and write the desired state, audit and journal | Everything | No |
-| Engine (ca-pim-tick) | Exchange RBAC for Applications | Application Mail.Send | A management scope containing ONE sender mailbox | Send TAP codes, approvals and alerts | Mail (the GUI shows codes instead) | Yes (mail option) |
-| Engine (ca-pim-tick) | Key Vault RBAC | Key Vault Secrets User | The one SMTP relay secret | Read the SMTP relay password | Mail through an SMTP relay | Yes (SMTP option) |
-| Engine (ca-pim-tick) | Other | Member of a Power BI security group + the Fabric tenant setting for read-only admin APIs | Power BI / Fabric | Read Power BI workspaces for discovery | Power BI provider | Yes (Power BI workload) |
-| Manager (ca-pim-manager) | Graph application (read-only) | User.ReadBasic.All, GroupMember.Read.All | Tenant | The people and group pickers; every other directory fact is read by the engine | GUI views and pickers | No |
-| Manager (ca-pim-manager) | Azure RBAC | Reader | The hosting subscription | Show Azure scopes and roles | Azure views | No |
-| Manager (ca-pim-manager) | Azure RBAC | Reader | The PIM resource group only | Read the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) for the Environment report | Environment report (the architecture section shows "not readable") | No |
-| Manager (ca-pim-manager) | Azure RBAC | AcrPull | Your container registry (legacy path; normally the pull identity) | Pull its image | Start-up | No |
-| Manager (ca-pim-manager) | SQL | Role pim_web (read; write staged changes, settings and audit; no schema right since 2.4.631); db_datareader, db_datawriter only until the second cut-over run | The PIM database | Read and stage changes, settings and audit | GUI | No |
-| Manager (ca-pim-manager) | Azure RBAC | Storage Blob Data Contributor | One blob container (pim-auth-tokens) in the installation's storage account, not the account | Microsoft's built-in sign-in keeps its sign-in tokens there (the token store); the Manager holds no Key Vault role | Sign-in sessions are not kept | No |
-| Manager (ca-pim-manager) | Exchange RBAC for Applications | Application Mail.Send | The one sender mailbox scope | Send mail from the GUI (test mail, approvals) | GUI mail | Yes (mail option) |
-| Updater (ca-pim-update) | Azure RBAC | Contributor | The environment's resource group (and the registry when it is in another group) | Update container apps and jobs; schedule image builds | Updates | Can be skipped (then updates are manual) |
-| Updater (ca-pim-update) | Azure RBAC | AcrPull | Your container registry | Pull built images | Updates | No |
-| Updater (ca-pim-update) | Graph application | PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup | Tenant (used on the SQL admin group only) | Make the database job identity an active member of the SQL admin group (PIM for Groups, permanent where the group policy allows) and renew a time-limited membership before it ends (owner decision 2026-11-05) | Database job membership | No |
-| Updater (ca-pim-update) | Graph application | PrivilegedAssignmentSchedule.Read.AzureADGroup | Tenant (used on the SQL admin group only) | Read the membership back before the database job or the support job starts | Database job membership | No |
-| Updater (ca-pim-update) | Graph application | RoleManagementPolicy.Read.AzureADGroup | Tenant (used on the SQL admin group only) | Read the SQL admin group's PIM policy maximum, so a time-limited membership asks for exactly that length | Database job membership | No |
-| Updater (ca-pim-update) | Graph application | GroupMember.Read.All | Tenant (used on the SQL admin group only) | Read the SQL admin group and the database job identity's group memberships (read only), so the membership is read back and the setup step reports it | Database job membership | No |
-| Updater (ca-pim-update) | Graph application | Application.Read.All | Tenant (used on the database job identity only) | Read the database job identity's own group memberships (read only; reading a service principal's memberships needs it besides GroupMember.Read.All), so the membership is read back | Database job membership | No |
-| Updater (ca-pim-update) | Graph application | Application.ReadWrite.OwnedBy | Only the app registrations the updater owns (the product's own: PIM Manager, and on Pro also PIM Manager Engine, PIM Activator, PIM Manager Deploy, PIM access request API) | Check and prove its ownership of the product's app registrations (one harmless change it reads back); later changes to them are made by the product itself instead of with a tenant-wide right (3.0.54) | App registration ownership | No |
-| Updater (ca-pim-update) | SQL | Its own database user: role pim_updater + db_ddladmin + EXECUTE on the signed grant procedure only (no security right of its own); leaves grp-pim-sql-admins in the second cut-over run | The PIM database | Apply schema changes during an update | Schema updates | No |
-| Pull identity (id-pim-<token>) | Azure RBAC | AcrPull | Your container registry | Pull images for the Manager and jobs | Start-up | No |
-| Pull identity (id-pim-<token>) | SQL | None -- removed from grp-pim-sql-admins (2026-10-14); an image-pull identity has no database access | n/a | Nothing: every component that uses the database has its own database user | Nothing | n/a |
-| SQL bootstrap identity (id-pim-sql-<token>) | SQL | SQL Entra administrator (or group member) | The SQL server (private SQL only) | Create the database users from inside the private network | Private SQL installs | Yes (private SQL) |
+| Engine | Graph application | Directory.Read.All | Tenant | Read users, groups, roles and directory objects to compare with the desired state | Everything -- the engine cannot read the tenant | No |
+| Engine | Graph application | User.ReadWrite.All | Tenant | Create and maintain the dedicated admin accounts | Admin account lifecycle (create, update, disable) | No |
+| Engine | Graph application | Group.ReadWrite.All | Tenant | Create and maintain PIM groups and their membership | Group-based delegation | No |
+| Engine | Graph application | RoleManagement.ReadWrite.Directory | Tenant | Create role-assignable groups and assign directory roles to them | Role-assignable groups and Entra role delegation | No |
+| Engine | Graph application | RoleManagement.Read.All | Tenant | Read role definitions and assignments | Role reporting and drift detection | No |
+| Engine | Graph application | RoleEligibilitySchedule.ReadWrite.Directory | Tenant | Create eligible Entra role assignments | Eligible Entra role delegation | No |
+| Engine | Graph application | RoleEligibilitySchedule.Remove.Directory | Tenant | Remove eligible Entra role assignments on revoke | Revoke of Entra role eligibility | No |
+| Engine | Graph application | RoleAssignmentSchedule.ReadWrite.Directory | Tenant | Create active (time-bound) Entra role assignments | Active role assignments | No |
+| Engine | Graph application | RoleAssignmentSchedule.Remove.Directory | Tenant | Remove active Entra role assignments on revoke | Revoke of active roles | No |
+| Engine | Graph application | RoleManagementPolicy.ReadWrite.Directory | Tenant | Apply Entra role PIM policies (approval, MFA, duration) | PIM policy management for Entra roles | No |
+| Engine | Graph application | RoleManagementPolicy.ReadWrite.AzureADGroup | Tenant | Apply PIM-for-Groups policies | PIM policy management for groups | No |
+| Engine | Graph application | PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup | Tenant | Create eligible group memberships | Eligible group membership | No |
+| Engine | Graph application | PrivilegedEligibilitySchedule.Remove.AzureADGroup | Tenant | Remove eligible group memberships on revoke | Revoke of group eligibility | No |
+| Engine | Graph application | PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup | Tenant | Create active group memberships | Active group membership | No |
+| Engine | Graph application | PrivilegedAssignmentSchedule.Remove.AzureADGroup | Tenant | Remove active group memberships on revoke | Revoke of group membership | No |
+| Engine | Graph application | AdministrativeUnit.ReadWrite.All | Tenant | Create and use administrative units as delegation scopes | AU-scoped delegation | No |
+| Engine | Graph application | AppRoleAssignment.ReadWrite.All | Tenant | Manage application role assignments (Entra app-role provider) | App-role delegation | No |
+| Engine | Graph application | Application.Read.All | Tenant | Resolve applications and service principals | App-role provider, reporting | No |
+| Engine | Graph application | UserAuthenticationMethod.ReadWrite.All | Tenant | Issue a Temporary Access Pass to a new admin account | Onboarding of new admin accounts (TAP) | No |
+| Engine | Graph application | AccessReview.Read.All | Tenant | Read access reviews | Access review reporting | No |
+| Engine | Graph application | AccessReview.ReadWrite.All | Tenant | Create and run access reviews (broader than needed; no narrower permission exists) | Access reviews | No |
+| Engine | Graph application | RoleManagement.ReadWrite.Defender | Tenant (Defender XDR) | Manage Defender XDR (unified RBAC) roles | Defender XDR provider | No (used only when Defender is managed) |
+| Engine | Graph application | DeviceManagementRBAC.ReadWrite.All | Tenant (Intune) | Manage Intune RBAC roles | Intune provider | No (used only when Intune is managed) |
+| Engine | Graph application | Domain.Read.All | Tenant | Read verified domains for admin account naming | Admin naming | No |
+| Engine | Graph application | Policy.Read.All | Tenant | Read authentication and authorization policies used in checks | Policy checks | No |
+| Engine | Azure RBAC | Reader | Tenant root management group | Discovery of management groups and subscriptions; Azure RBAC reporting | Azure discovery and reporting | Default on; can be skipped |
+| Engine | Azure RBAC | Reader | The hosting subscription (and optionally a management group) | Read Azure resources and role assignments | Azure reporting | Default on; can be skipped |
+| Engine | Azure RBAC | User Access Administrator | Tenant root management group, or the delegated scopes | Write Azure role assignments and PIM for Azure resources | Azure RBAC delegation (read-only without it) | Yes (opt-in switch) |
+| Engine | Azure RBAC | Container Apps Jobs Operator + Contributor | The updater job only | Start the updater when an update is expedited; put the updater back on its last good image | Expedited updates and the updater's self-repair (updates still run on their schedule) | No |
+| Engine | Azure RBAC | Reader | The engine job resource | Read its own execution status | Run status in the GUI | No |
+| Engine | Azure RBAC | Storage Table Data Contributor | The access-request storage account | Store access-request state | Access requests (RFA) | Yes (RFA option) |
+| Engine | Azure RBAC (custom role) | Microsoft.Storage/storageAccounts/read + write | The one MSP bundle storage account | Maintain the bundle store's network rules (MSP managing tenant, public-signed mode) | MSP bundle publication | Yes (MSP only) |
+| Engine | SQL | Role pim_engine (read/write the pim schema, read the tenant registry); db_datareader, db_datawriter, db_ddladmin only until the second cut-over run | The PIM database | Read and write the desired state, audit and journal | Everything | No |
+| Engine | Exchange RBAC for Applications | Application Mail.Send | A management scope containing ONE sender mailbox | Send TAP codes, approvals and alerts | Mail (the GUI shows codes instead) | Yes (mail option) |
+| Engine | Key Vault RBAC | Key Vault Secrets User | The one SMTP relay secret | Read the SMTP relay password | Mail through an SMTP relay | Yes (SMTP option) |
+| Engine | Other | Member of a Power BI security group + the Fabric tenant setting for read-only admin APIs | Power BI / Fabric | Read Power BI workspaces for discovery | Power BI provider | Yes (Power BI workload) |
+| Manager | Graph application (read-only) | User.ReadBasic.All, GroupMember.Read.All | Tenant | The people and group pickers; every other directory fact is read by the engine | GUI views and pickers | No |
+| Manager | Azure RBAC | Reader | The hosting subscription | Show Azure scopes and roles | Azure views | No |
+| Manager | Azure RBAC | Reader | The PIM resource group only | Read the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) for the Environment report | Environment report (the architecture section shows "not readable") | No |
+| Manager | Azure RBAC | AcrPull | Your container registry (legacy path; normally the pull identity) | Pull its image | Start-up | No |
+| Manager | SQL | Role pim_web (read; write staged changes, settings and audit; no schema right since 2.4.631); db_datareader, db_datawriter only until the second cut-over run | The PIM database | Read and stage changes, settings and audit | GUI | No |
+| Manager | Azure RBAC | Storage Blob Data Contributor | One blob container (pim-auth-tokens) in the installation's storage account, not the account | Microsoft's built-in sign-in keeps its sign-in tokens there (the token store); the Manager holds no Key Vault role | Sign-in sessions are not kept | No |
+| Manager | Exchange RBAC for Applications | Application Mail.Send | The one sender mailbox scope | Send mail from the GUI (test mail, approvals) | GUI mail | Yes (mail option) |
+| Updater | Azure RBAC | Contributor | The environment's resource group (and the registry when it is in another group) | Update container apps and jobs; schedule image builds | Updates | Can be skipped (then updates are manual) |
+| Updater | Azure RBAC | AcrPull | Your container registry | Pull built images | Updates | No |
+| Updater | Graph application | PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup | Tenant (used on the SQL admin group only) | Make the database job identity an active member of the SQL admin group (PIM for Groups, permanent where the group policy allows) and renew a time-limited membership before it ends (owner decision 2026-11-05) | Database job membership | No |
+| Updater | Graph application | PrivilegedAssignmentSchedule.Read.AzureADGroup | Tenant (used on the SQL admin group only) | Read the membership back before the database job or the support job starts | Database job membership | No |
+| Updater | Graph application | RoleManagementPolicy.Read.AzureADGroup | Tenant (used on the SQL admin group only) | Read the SQL admin group's PIM policy maximum, so a time-limited membership asks for exactly that length | Database job membership | No |
+| Updater | Graph application | GroupMember.Read.All | Tenant (used on the SQL admin group only) | Read the SQL admin group and the database job identity's group memberships (read only), so the membership is read back and the setup step reports it | Database job membership | No |
+| Updater | Graph application | Application.Read.All | Tenant (used on the database job identity only) | Read the database job identity's own group memberships (read only; reading a service principal's memberships needs it besides GroupMember.Read.All), so the membership is read back | Database job membership | No |
+| Updater | Graph application | Application.ReadWrite.OwnedBy | Only the app registrations the updater owns (the product's own: PIM Manager, and on Pro also PIM Manager Engine, PIM Activator, PIM Manager Deploy, PIM access request API) | Check and prove its ownership of the product's app registrations (one harmless change it reads back); later changes to them are made by the product itself instead of with a tenant-wide right (3.0.54) | App registration ownership | No |
+| Updater | SQL | Its own database user: role pim_updater + db_ddladmin + EXECUTE on the signed grant procedure only (no security right of its own); leaves grp-pim-sql-admins in the second cut-over run | The PIM database | Apply schema changes during an update | Schema updates | No |
+| Image-pull identity | Azure RBAC | AcrPull | Your container registry | Pull images for the Manager and jobs | Start-up | No |
+| Image-pull identity | SQL | None -- removed from grp-pim-sql-admins (2026-10-14); an image-pull identity has no database access | n/a | Nothing: every component that uses the database has its own database user | Nothing | n/a |
+| Private-SQL setup identity | SQL | SQL Entra administrator (or group member) | The SQL server (private SQL only) | Create the database users from inside the private network | Private SQL installs | Yes (private SQL) |
 | grp-pim-sql-admins | SQL | SQL server Entra administrator | The SQL server | One managed group instead of a person as SQL admin; people get in just-in-time through PIM for Groups. The Invardia Support app is never a standing member: only while a setup-level support session is open, the updater gives it a time-limited PIM for Groups membership (at most 24 hours ahead, ending with the session) and takes it away when the session closes | Schema changes, recovery | No |
 | Downlink job (MSP managed tenant) | Graph application | The engine permission set above | The managed tenant | Apply the bundle pulled from the managing tenant | MSP managed tenant | Yes (MSP only) |
 | Downlink job (MSP managed tenant) | Azure RBAC + SQL | AcrPull; member of grp-pim-sql-admins (fallback: the three db roles) | Registry; SQL server | Pull image; write the store | MSP managed tenant | Yes (MSP only) |
 | Baseline-publish job (MSP managing tenant) | Azure RBAC | Storage Blob Data Contributor | The bundle container only | Publish the signed bundle | MSP publication | Yes (MSP only) |
 | Baseline-publish job (MSP managing tenant) | Key Vault RBAC | Key Vault Crypto User | The signing key only (sign/verify) | Sign the bundle with a non-exportable key | MSP publication | Yes (MSP only) |
 | Baseline-publish job (MSP managing tenant) | SQL | SELECT on named objects; INSERT/UPDATE on its own last-run view; all fixed db roles revoked | The PIM database | Read the central admin set | MSP publication | Yes (MSP only) |
-| RFA broker (ca-pim-rfa) | Azure RBAC | Storage Table Data Contributor | The access-request storage account (shared keys disabled) | Store access requests | Access requests | Yes (RFA option) |
-| RFA broker (ca-pim-rfa) | Exchange RBAC for Applications | Application Mail.Send | The one sender mailbox scope | Mail access-request decisions | RFA mail | Yes |
+| Access-request broker | Azure RBAC | Storage Table Data Contributor | The access-request storage account (shared keys disabled) | Store access requests | Access requests | Yes (RFA option) |
+| Access-request broker | Exchange RBAC for Applications | Application Mail.Send | The one sender mailbox scope | Mail access-request decisions | RFA mail | Yes |
 | Manager sign-in app registration | Graph delegated | openid, profile, email, offline_access, User.Read (admin-consented) | Signed-in user only | Sign the administrator in | Sign-in | No |
 | Manager sign-in app registration | Delegated scope (MCP option) | mcp.access (Azure CLI pre-authorised) | Signed-in user, bounded by the Manager role | MCP clients call the Manager as the user | MCP endpoint | Yes (MCP, Pro) |
 | PIM Activator app registration | Graph delegated | PrivilegedAccess.ReadWrite.AzureADGroup, Group.Read.All, User.Read, RoleManagement.Read.Directory, RoleManagement.ReadWrite.Directory, AdministrativeUnit.Read.All, Application.Read.All; Azure Service Management user_impersonation | Signed-in user only -- bounded by that user's own eligibility | Users activate and deactivate their OWN eligible groups and roles | Activation from the extension | Yes (Activator option); tenant-wide admin consent by default |
@@ -266,7 +284,7 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - **Troubleshoot level:** read-only Graph (directory, applications, users, groups, roles, PIM policies and schedules, PIM for Groups read) plus Application.ReadWrite.OwnedBy (to renew its own secret); Azure Reader and Log Analytics Reader on the resource groups you name; Key Vault Reader.
 - **Setup level:** adds Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All, Group.Create and RoleManagement.ReadWrite.Directory in Graph, and Contributor + User Access Administrator on the subscriptions you name (optionally at the tenant root), Key Vault Secrets Officer, Network Contributor on a hub VNet. **Setup level is tier-0 equivalent** -- grant it for an install or repair, then lower it.
 - PIM Manager's own grant script (`Grant-PimSupportAccess.ps1`) gives, at every level, the read-only database user described above -- and nothing in Entra ID: no standing group membership, no ownership of the product's app registrations or groups. (The time-limited SQL admin group membership of a setup-level support session is given by the updater, not by this script.)
-- **As-built document (level `asbuilt`, also part of troubleshoot and setup):** the Support app may start the one as-built job (`caj-pim-asbuilt`) and read its executions, and may read the one storage container `asbuilt` -- nothing else. The job writes a PDF describing the installation's configuration (no secrets, people, user names or object ids) to that container. The storage account accepts only Entra tokens (no shared key, no anonymous access), so the PDF is **readable only by the Support app's identity after you grant it**, and it is **deleted after 24 hours**. Your admins download the same PDF from PIM Manager without any of this.
+- **As-built document (level `asbuilt`, also part of troubleshoot and setup):** the Support app may start the one installation documentation job and read its executions, and may read the one storage container `asbuilt` -- nothing else. The job writes a PDF describing the installation's configuration (no secrets, people, user names or object ids) to that container. The storage account accepts only Entra tokens (no shared key, no anonymous access), so the PDF is **readable only by the Support app's identity after you grant it**, and it is **deleted after 24 hours**. Your admins download the same PDF from PIM Manager without any of this.
 
 ### Security changes to an existing installation
 - Infrastructure changes to an installation that is already running (for example tightening database rights, turning on SQL auditing or shortening the sign-in session) are **never made by the updater**. They are made by Invardia through the Support app, one environment at a time, with a script that shows a plan first, reads every change back and writes a rollback record. Every SQL statement goes through Invardia's support SQL route, which records the statement and its reason before it runs.
@@ -290,7 +308,7 @@ The app's tenant rights are created by Invardia's own setup script (published at
 ## 6. Supply chain
 
 ### How code reaches your environment
-- Every update **builds the product from source inside your own container registry** and rolls the Manager and jobs. No pre-built vendor image is pulled. The updater job `ca-pim-update` does this on its schedule; an installation that turns it off updates by command (below).
+- Every update **builds the product from source inside your own container registry** and rolls the Manager and jobs. No pre-built vendor image is pulled. The updater does this on its schedule; an installation that turns it off updates by command (below).
 - **The signed Invardia update channel:** the update manifest is signed (RS256, RSA 4096) and verified against a public key embedded in the product -- never fetched at run time. The manifest must name your ring, a version, a SHA-256, a size and a sequence number (replays are refused); the download must be HTTPS; the archive's SHA-256 and size are checked before unpacking, and the version inside must match the manifest.
 - **Source-archive channel (self-hosted updates):** the archive is fetched from a storage container the update job is configured with, then built in your registry, rolled and health-checked like any other update.
 - **No storage token in the updater:** Pro installations fetch the source archive from invardia.com for the version their signed manifest names; the update job no longer keeps a storage SAS URL in its settings. The container registry's admin user is off.

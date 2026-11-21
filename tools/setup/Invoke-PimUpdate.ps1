@@ -208,8 +208,16 @@ param(
     # admin identity (Invoke-PimSqlAccessInstall -WithPrerequisites -- the product code the Support-app cut-over runs).
     # Invoke-PimDeployAll's schema step passes it, so the object grants (views the schema just created) are converged
     # before the Manager is restarted onto the new store. Off by default: the build-host / estate updater never does it.
-    [switch]$InstallSqlAccessModel
+    [switch]$InstallSqlAccessModel,
+    # NO-PERSON-DB-ADMIN D2 (framework 12.23 / SEC-08): Invoke-PimDeployAll's 'code' step on an EXISTING install, where the
+    # schema step already upgraded the store THROUGH THE DATABASE JOB (its own identity). This run builds + rolls only: no
+    # store connection at all (no core tables, no base schema, no drift DDL), so the signed-in person needs no database
+    # rights. Refused together with -SqlConnectionString / -SchemaOnly / -InstallSqlAccessModel.
+    [switch]$StoreViaDatabaseJob
 )
+if ($StoreViaDatabaseJob -and ("$SqlConnectionString".Trim() -or $SchemaOnly -or $InstallSqlAccessModel)) {
+    throw 'Invoke-PimUpdate: -StoreViaDatabaseJob is a run WITHOUT a store connection -- it cannot be combined with -SqlConnectionString, -SchemaOnly or -InstallSqlAccessModel.'
+}
 $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)            # SOLUTIONS/PIM4EntraPS
@@ -590,6 +598,12 @@ $guiPlan = Get-PimGuiUpdatePlan -PulledContentHash $pulledHash -RunningContentHa
 $deployedCols = Get-DeployedColumns -ConnString $SqlConnectionString
 $sqlPlan = Get-PimSqlUpdatePlan -DeployedColumns $deployedCols -LockedSqlSchema (Get-PimLockedSqlSchema) `
             -DeployedSchemaVersion $running.version -PulledSchemaVersion $pulledVersion
+if ($StoreViaDatabaseJob) {
+    # NO-PERSON-DB-ADMIN D2: the store is not this run's work (the deploy's schema step owns it) --
+    # no column read, no SQL update; the GUI half decides what this run builds and rolls.
+    $sqlPlan = [pscustomobject]@{ SqlUpdateRequired = $false; reason = 'the store is the deploy''s schema step''s work (the database job, or the time-boxed window) -- this run has no store connection'; tables = @(); missingTables = @(); deployedSchemaVersion = "$($running.version)"; pulledSchemaVersion = "$pulledVersion" }
+    Info 'store: NOT connected (-StoreViaDatabaseJob) -- the deploy''s schema step owns the database work; this roll needs no database admin'
+}
 $detection = Get-PimUpdateDetection -GuiPlan $guiPlan -SqlPlan $sqlPlan
 
 Write-Host ""

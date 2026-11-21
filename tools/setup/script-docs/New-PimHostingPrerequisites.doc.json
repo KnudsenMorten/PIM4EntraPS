@@ -22,7 +22,7 @@
   "parameters": [
     { "name": "TenantId", "required": true, "default": null, "help": "The tenant." },
     { "name": "SubscriptionId", "required": true, "default": null, "help": "The PIM subscription (must belong to -TenantId)." },
-    { "name": "Token", "required": true, "default": null, "help": "Short name every default resource name is derived from (rg-automateit-<token>, vnet-pim-<token>, ...); override any name with the parameters below." },
+    { "name": "Token", "required": true, "default": null, "help": "Short name every default resource name is derived from (rg-<prefix>-<token>, vnet-pim-<token>, ...); override any name with the parameters below." },
     { "name": "Index", "required": false, "default": -1, "help": "Address-plan index for the <AddressBase>.<Index*8>.0/21 scheme. Give this OR -VnetAddressPrefix + -SubnetAddressPrefix." },
     { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the deploy identity's client id (with -AdminCertPem). Customers use -UseSignedInAccount." },
     { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Create everything as the person signed in (browser) or the Invardia Support app session. The recommended way." },
@@ -48,7 +48,7 @@
     { "name": "AcrAgentPoolCount", "required": false, "default": 0, "help": "Build agents between builds (0: each build scales the pool to 2 and back to 0)." },
     { "name": "AcrAgentPoolTier", "required": false, "default": "S2", "help": "S1, S2 or S3 (S2 by default)." },
     { "name": "AddressBase", "required": false, "default": "10.220", "help": "The /16 the -Index scheme carves from." },
-    { "name": "ResourceGroupName", "required": false, "default": "rg-automateit-<token>", "help": "Your own resource group name." },
+    { "name": "ResourceGroupName", "required": false, "default": "derived from -Token", "help": "Your own resource group name. Without it the name is derived from -Token (rg-<prefix>-<token>); a re-run derives the same name, so an existing environment is found again." },
     { "name": "VnetName", "required": false, "default": "vnet-pim-<token>", "help": "Your own VNet name." },
     { "name": "SubnetName", "required": false, "default": "snet-pim-aca", "help": "Your own Container Apps subnet name." },
     { "name": "VnetAddressPrefix", "required": false, "default": null, "help": "Your VNet range (with -SubnetAddressPrefix)." },

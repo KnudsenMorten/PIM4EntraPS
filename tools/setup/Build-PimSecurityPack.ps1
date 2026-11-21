@@ -134,10 +134,15 @@ function ConvertTo-PimSecurityPackMarkdown {
         [void]$sb.AppendLine('')
         foreach ($t in @($c.tables)) {
             if (-not $t) { continue }
+            # DOC-NAMES-1 point 6 (framework, Invardia 2026-11-20): the ONE naming table (id 'names') sits between markers, so a
+            # reader finds it in any Markdown copy; running text names parts by role only.
+            $isNames = ("$($t.id)" -eq 'names')
+            if ($isNames) { [void]$sb.AppendLine('<!-- naming-table -->') }
             if ($t.title) { [void]$sb.AppendLine("**$($t.title)**"); [void]$sb.AppendLine('') }
             [void]$sb.AppendLine('| ' + ((@($t.columns) | ForEach-Object { ConvertTo-PimSpMdCell $_ }) -join ' | ') + ' |')
             [void]$sb.AppendLine('|' + ((@($t.columns) | ForEach-Object { '---' }) -join '|') + '|')
             foreach ($r in @($t.rows)) { [void]$sb.AppendLine('| ' + ((@($r) | ForEach-Object { ConvertTo-PimSpMdCell $_ }) -join ' | ') + ' |') }
+            if ($isNames) { [void]$sb.AppendLine('<!-- /naming-table -->') }
             [void]$sb.AppendLine('')
         }
     }
@@ -216,7 +221,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
         [void]$sb.Append((ConvertTo-PimSpHtmlBlock $c.body))
         foreach ($t in @($c.tables)) {
             if (-not $t) { continue }
-            [void]$sb.Append("<div class=`"tablewrap`"><table>")
+            [void]$sb.Append("<div class=`"tablewrap`"$(if ("$($t.id)" -eq 'names') { ' id="names"' })><table>")
             if ($t.title) { [void]$sb.Append("<caption>$(ConvertTo-PimSpHtmlText $t.title)</caption>") }
             [void]$sb.Append('<thead><tr>' + ((@($t.columns) | ForEach-Object { '<th>' + (& $h $_) + '</th>' }) -join '') + "</tr></thead><tbody>`n")
             foreach ($r in @($t.rows)) { [void]$sb.Append('<tr>' + ((@($r) | ForEach-Object { '<td>' + (ConvertTo-PimSpHtmlText $_) + '</td>' }) -join '') + "</tr>`n") }
@@ -236,6 +241,10 @@ $pack = $jsonText | ConvertFrom-Json
 $chapters = @($pack.chapters)
 if ($chapters.Count -ne 11) { throw "security-pack.json must carry the 11 chapters of framework 12.10 (found $($chapters.Count))" }
 foreach ($c in $chapters) { if (-not $c.id -or -not $c.title -or -not $c.body) { throw "chapter '$($c.id)' needs id, title and body" } }
+# DOC-NAMES-1 point 6: exactly one naming table (id 'names'), columns Role | Standard name | Earlier name | Identity
+$namesTables = @($chapters | ForEach-Object { @($_.tables) } | Where-Object { $_ -and "$($_.id)" -eq 'names' })
+if ($namesTables.Count -ne 1) { throw "security-pack.json must carry exactly one table with id 'names' (found $($namesTables.Count))" }
+if ((@($namesTables[0].columns) -join '|') -ne 'Role|Standard name|Earlier name|Identity') { throw "the 'names' table must have the columns Role | Standard name | Earlier name | Identity" }
 
 $md   = ConvertTo-PimSecurityPackMarkdown -Pack $pack -Version $Version -Date $Date
 $html = ConvertTo-PimSecurityPackHtml     -Pack $pack -Version $Version -Date $Date

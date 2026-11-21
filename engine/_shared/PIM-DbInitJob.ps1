@@ -23,7 +23,9 @@ function Get-PimDbInitIdentityNameDefault { if (Get-Command Get-PimInstallName -
 function Get-PimDbInitEnvAllowList {
     # PURE. The only settings a database job definition may carry (a literal-returning function: child-scope safe).
     return @('PIM_SqlServer', 'PIM_SqlDatabase', 'PIM_DBINIT_PRINCIPALS', 'PIM_DBINIT_SCHEMA', 'PIM_DBINIT_SQL_ACCESS', 'PIM_DBINIT_MI_CLIENT_ID',
-             'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED')
+             'PIM_DBINIT_FEATURE_GATES', 'PIM_DBINIT_FEATURE_DISABLE', 'PIM_DBINIT_MANAGER_ACCESS', 'PIM_DBINIT_UPDATE_SEED',
+             # FIRST-SUPERADMIN-1: the install's OWN Key Vault (a resource id -- nothing about a person)
+             'PIM_KeyVaultId')
 }
 
 function Get-PimDbInitJobName {

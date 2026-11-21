@@ -169,10 +169,19 @@ param(
     # Set-PimFeatureBaseline's own, so the two paths turn on the same things.
     [string[]]$FeatureGates        = @('scheduler.jobs','alerting.email','msp.downlink'),
     [string[]]$FeatureGatesDisable = @(),
-    # Who administers the Manager. Written by the same in-cloud job for the same reason -- and this
-    # is the one whose absence means NOBODY can administer the environment, so it travels with the
-    # users rather than being left to a later step that cannot reach the store.
+    # Who administers the Manager. FIRST-SUPERADMIN-1 (Invardia 2026-11-20): NOT carried by the job any more (framework SEC-08
+    # point 8: nothing about a SuperAdmin on the job definition or its start). The FIRST SuperAdmin is the person running this
+    # setup -- their object id from their OWN sign-in token, handed to the job through ONE secret in the install's own Key
+    # Vault (-KeyVaultName). The names here are only compared with that person: anyone else is added by the first
+    # SuperAdmin in PIM Manager > Settings > Manager access & roles (said at the end).
     [string[]]$ManagerSuperAdmins  = @(),
+    # FIRST-SUPERADMIN-1 (Support-app install, Invardia 2026-11-20): the CUSTOMER's named administrator (a lookup KEY only).
+    # Used ONLY when this setup runs as the Invardia Support app (no person): resolved in this tenant's directory to a
+    # Member + enabled account, and THAT object id is handed over. A person's own setup ignores it (said).
+    [string]$FirstSuperAdminUpn = '',
+    # The install's OWN Key Vault (made here when missing, private on a private install -- the same step the guided install's
+    # 'install-keyvault' runs). Blank = 'kv-pim-<token>' from the SQL server's 'sql-pim-<token>' name.
+    [string]$KeyVaultName = '',
     [string]$DbInitJobName = 'ca-pim-dbinit',
     # The user-assigned identity that IS the SQL Entra admin (New-PimHostingPrerequisites creates
     # 'id-pim-sql-<token>'). The job authenticates as this, not as its system identity -- which has
@@ -354,6 +363,8 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . "$solRoot\engine\_shared\PIM-TenantSizing.ps1"   # 100.31 the tick's size for this tenant (pure; Get-PimContainerJobResources)
 . "$solRoot\engine\_shared\PIM-DbInitJob.ps1"      # OPEN-06 the database job's ONE definition (Get-PimDbInitJobSpec), shared with the updater
 . "$solRoot\engine\_shared\PIM-DbInitMembership.ps1" # framework 4.5 point 5: the job identity in the SQL admin group + read back before the first start (same as the updater)
+. "$solRoot\engine\_shared\PIM-FirstAdminSeed.ps1"   # FIRST-SUPERADMIN-1: the first SuperAdmin through ONE Key Vault secret (never on the job)
+. "$here\_PimInstallKeyVault.ps1"                    # FIRST-SUPERADMIN-1: the install's own vault, made before the job's first run
 # §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
 # (Pro) file, for one 5-field check, so a Community copy without the MSP code could not run setup.
 
@@ -910,13 +921,11 @@ function Invoke-PimDbInitJob {
     if ("$SqlAdminIdentityClientId".Trim()) { $envVars += "PIM_DBINIT_MI_CLIENT_ID=$("$SqlAdminIdentityClientId".Trim())" }
     if (@($FeatureGates).Count)        { $envVars += "PIM_DBINIT_FEATURE_GATES=$((@($FeatureGates)        | Where-Object { "$_".Trim() }) -join ',')" }
     if (@($FeatureGatesDisable).Count) { $envVars += "PIM_DBINIT_FEATURE_DISABLE=$((@($FeatureGatesDisable) | Where-Object { "$_".Trim() }) -join ',')" }
-    $sa = @($ManagerSuperAdmins | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    if ($sa.Count) {
-        # Compressed JSON, carried as ONE string value in the ARM body.
-        $saJson = ConvertTo-Json -Compress -InputObject @($sa | ForEach-Object { @{ identity = $_; role = 'SuperAdmin' } })
-        if ($saJson -notmatch '^\s*\[') { $saJson = "[$saJson]" }   # a one-element array collapses to an object
-        $envVars += "PIM_DBINIT_MANAGER_ACCESS=$saJson"
-    }
+    # FIRST-SUPERADMIN-1 (Invardia 2026-11-20, framework SEC-08 point 8): NO SuperAdmin on this definition (the retired
+    # PIM_DBINIT_MANAGER_ACCESS) and none on the start. The job is told only WHERE the install's own vault is; the first
+    # SuperAdmin reaches it as ONE secret written below (Invoke-PimFirstAdminForJob), read + deleted by the job.
+    $faVault = Get-PimFirstAdminSetupVault
+    if ($faVault.ok) { $envVars += "$(Get-PimFirstAdminVaultEnvName)=$($faVault.id)" }
 
     $exists = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -ErrorAsNull).name)"
 
@@ -954,9 +963,9 @@ function Invoke-PimDbInitJob {
     # OPEN-06: the ONE definition of the database job (engine/_shared/PIM-DbInitJob.ps1), shared with the in-cloud updater
     # that creates the job on installs that do not have it: command + args as ARM arrays, manual trigger, 7 days, the
     # identity as ONE 'SystemAssigned,UserAssigned' value on CREATE only (an update carrying an identity block failed as
-    # "Request requires identities to be assigned"). -SetupManagerAccess: only setup may name SuperAdmins on it.
+    # "Request requires identities to be assigned"). FIRST-SUPERADMIN-1: no -SetupManagerAccess -- no SuperAdmin on it.
     $dbSpec = Get-PimDbInitJobSpec -JobName $DbInitJobName -Image $image -EnvironmentId $envId -Location $location -RegistryServer "$AcrName.azurecr.io" `
-                  -RegistryIdentity $regIdent -Env $dbEnvMap -Exists:([bool]"$exists".Trim()) -IdentityResourceIds $uaIds -EntryPath $entry -SetupManagerAccess
+                  -RegistryIdentity $regIdent -Env $dbEnvMap -Exists:([bool]"$exists".Trim()) -IdentityResourceIds $uaIds -EntryPath $entry
     if (-not $dbSpec.ok) { throw "the bootstrap job '$DbInitJobName' definition was refused: $($dbSpec.reason)" }
     $dbResource = $dbSpec.resource
     try {
@@ -979,6 +988,9 @@ function Invoke-PimDbInitJob {
     foreach ($l in @(if ($dbmPre.membership) { @($dbmPre.membership.lines) })) { Note $l.text }
     if (-not $dbmPre.start) { throw "'$DbInitJobName' NOT started: $($dbmPre.reason)" }
     Note "database job identity: $($dbmPre.reason)"
+
+    # FIRST-SUPERADMIN-1: the installing person's ONE secret + the job identity's grant on it, BEFORE the (empty-body) start
+    $faIssued = Invoke-PimFirstAdminForJob -Arm $dbmArm -Vault $faVault
 
     $exec = "$(Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName)".Trim()
     if (-not $exec) { throw "could not start '$DbInitJobName'." }
@@ -1003,6 +1015,84 @@ function Invoke-PimDbInitJob {
                "'Login failed for user <token-identified principal>' -- so this deploy stops here rather than exposing that.")
     }
     Note "database bootstrap succeeded ($exec)"
+    # FIRST-SUPERADMIN-1 (A): the job deleted the secret -> the job identity's grant on it goes now (this installer may remove
+    # role assignments; the job's identity usually may not), read back. Still there = the job did not use it: said.
+    if ($faVault.ok -and -not $WhatIfPreference) {
+        $faTrim = Invoke-PimFirstAdminGrantTrim -Arm $dbmArm -VaultId $faVault.id
+        foreach ($l in @($faTrim.lines)) { if ($faTrim.ok -and -not $faTrim.secretPresent) { Note $l } else { Warn $l } }
+        if ($faIssued -and $faIssued.wrote -and $faTrim.secretPresent) {
+            Warn 'first SuperAdmin: the database job did NOT use the secret -- nobody can administer this install yet. Its log names why; re-run setup as the same person for a fresh one.'
+        }
+    }
+}
+
+function Get-PimFirstAdminSetupVault {
+    <#
+      FIRST-SUPERADMIN-1: the install's OWN Key Vault for the first-SuperAdmin secret -- -KeyVaultName, else 'kv-pim-<token>'
+      from the SQL server's 'sql-pim-<token>' name (the guided install's names). Made here when missing (private on this
+      private install, rule 11 read back -- the same core the guided install's 'install-keyvault' step runs), so it exists
+      before the job's first run. @{ ok; id; name; reason }. Never throws.
+    #>
+    $o = @{ ok = $false; id = ''; name = ''; reason = '' }
+    if ($script:PimFirstAdminVault) { return $script:PimFirstAdminVault }
+    try {
+        $tok = ''
+        if ("$SqlServerFqdn" -match '^(?i)sql-pim-([a-z0-9]+)\.') { $tok = $Matches[1] }
+        $nm = Get-PimInstallKeyVaultName -Configured "$KeyVaultName" -Token $(if ($tok) { $tok } else { 'x' })
+        if (-not $nm.ok -or (-not "$KeyVaultName".Trim() -and -not $tok)) {
+            $o.reason = $(if (-not $nm.ok) { $nm.reason } else { 'no -KeyVaultName and the SQL server name carries no install token' })
+        } else {
+            $o.name = $nm.name
+            $o.id = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.KeyVault/vaults/$($nm.name)"
+            if ($WhatIfPreference) { $o.ok = $true; $o.reason = 'WhatIf' }
+            else {
+                $kvIo = @{ Arm = { param($M, $P, $B, $A) if ($M -eq 'GET') { Invoke-PimSetupArm -Path $P -ApiVersion $A -NotFoundOk } else { Invoke-PimSetupArm -Method $M -Path $P -Body $B -ApiVersion $A } }
+                           Sleep = { param($s) Start-Sleep -Seconds $s } }
+                $core = Invoke-PimInstallVaultCore -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location -VaultPath $o.id -KeyVaultName $nm.name `
+                            -SqlServer "$SqlServerFqdn" -SolutionRoot $solRoot -PrivateNetwork ([bool]$UseInCloudDbInit) -Io $kvIo -OnLine { param($st, $msg) Note "  key vault: $msg" }
+                foreach ($t in @($core.customerTasks)) { Warn "  key vault: $t" }
+                $o.ok = $true; $o.reason = "the install's own Key Vault $($nm.name)"
+            }
+        }
+    } catch { $o.reason = "the install's Key Vault is not in place: $((("$($_.Exception.Message)") -split "`n")[0])" }
+    if (-not $o.ok) { Warn "first SuperAdmin: $($o.reason) -- no first-SuperAdmin secret can be written; nobody can administer this install until a SuperAdmin is added" }
+    $script:PimFirstAdminVault = $o
+    return $o
+}
+
+function Invoke-PimFirstAdminForJob {
+    <#
+      FIRST-SUPERADMIN-1: who is installing (the oid of THIS setup's own ARM sign-in token -- never a parameter), whether a
+      secret is written (Get-PimFirstAdminIssueDecision: a DIFFERENT person than the one recorded on the vault writes
+      nothing), the secret + the job identity's Secrets Officer on that one secret, read back. The other -ManagerSuperAdmins
+      are named as NOT seeded. Returns the issue result (or $null). Never throws: a refusal is a loud line, and the job
+      still runs (users, schema, access model).
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Arm, [Parameter(Mandatory)][object]$Vault)
+    if ($WhatIfPreference) { return $null }
+    try {
+        $tok = "$(if ($global:PIM_SetupRestStub) { $global:PIM_SetupTokenStub } else { Get-PimRestToken -Resource 'arm' })"
+        # a person = that person; the Invardia Support app = ONLY the customer's named administrator (-FirstSuperAdminUpn),
+        # looked up in this tenant (Member + enabled), else nobody (said)
+        $faGraph = { param($m, $p, $b) if ($global:PIM_SetupGraphStub) { & $global:PIM_SetupGraphStub $m $p $b } elseif ($null -ne $b) { Invoke-PimGraph -Method $m -Path $p -Body $b } else { Invoke-PimGraph -Method $m -Path $p } }
+        $who = Resolve-PimFirstAdminSubjectLive -Token $tok -TenantId $TenantId -NamedUpn $FirstSuperAdminUpn -Graph $faGraph -SupportState $global:InvardiaSupportState
+        foreach ($n in @($who.notes)) { if ($n) { Warn "first SuperAdmin: $n" } }
+        if ($who.ok -and $who.namedBy) { Note "first SuperAdmin: $($who.reason)" }
+        $other = Get-PimFirstAdminOtherSuperAdminsNote -Named @($ManagerSuperAdmins) -InstallerUpn "$($who.userPrincipalName)"
+        if ($other) { Warn "  $other" }
+        if (-not $Vault.ok) { return $null }
+        $rec = ''
+        try { $vv = & $Arm 'GET' "$($Vault.id)?api-version=$(Get-PimFirstAdminKvArmApi)" $null; if ($vv -and $vv.tags) { $rec = "$($vv.tags.(Get-PimFirstAdminIssuerTag))" } } catch { $rec = '' }
+        $dec = Get-PimFirstAdminIssueDecision -Installer $who -StoreReadable $false -RecordedIssuerOid $rec
+        if (-not $dec.write) { Warn "first SuperAdmin: $($dec.reason)"; return $null }
+        Note "first SuperAdmin: $($dec.reason)"
+        $ident = $null
+        if ("$SqlAdminIdentityResourceId".Trim()) { $ident = & $Arm 'GET' "$("$SqlAdminIdentityResourceId".Trim())?api-version=2023-01-31" $null }
+        $r = Invoke-PimFirstAdminSecretIssue -Arm $Arm -VaultId $Vault.id -Installer $who -JobPrincipalId "$($ident.properties.principalId)"
+        foreach ($l in @($r.lines)) { Note $l }
+        if (-not $r.ok) { Warn "first SuperAdmin: $($r.reason) -- nobody can administer this install until it is fixed (re-run setup as the same person)" }
+        return $r
+    } catch { Warn "first SuperAdmin: not written ($((("$($_.Exception.Message)") -split "`n")[0]))"; return $null }
 }
 
 # BUG-40: read back what the platform says it is running and compare it to what we deployed.

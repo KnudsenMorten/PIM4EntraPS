@@ -538,10 +538,10 @@
         }
       },
       "info": {
-        "what": "The master switch for the scheduler. Every scheduled job checks it before it runs: engine reconcile runs, the change queue, discovery, digests and reminders, access-request handling, licence checks and requests, the Invardia support link, hybrid AD jobs and the rest. It applies from the next scheduler tick.",
+        "what": "The master switch for the scheduler. Every scheduled job checks it before it runs: engine reconcile runs, the change queue, discovery, digests and reminders, access-request handling, licence checks and requests, the Invardia support link, hybrid AD jobs and the rest. It applies from the next scheduler run.",
         "enabled": "Jobs run on the cadence shown on the Job schedule page. The engine reconciles your definitions into the tenant, which creates, updates and removes accounts, groups and assignments.",
         "disabled": "Every scheduled job is recorded as 'skipped' with status ok, and nothing runs. The engine does not reconcile, no reminders or digests are sent, access windows are not ended, and licence requests stop.",
-        "risk": "Switching it on lets the engine write to your tenant on a schedule. Switching it off makes the environment inert while every job still looks green, so missing work (an account not created, an access window not closed) goes unnoticed. Reversible: switch it on and the next tick resumes. Work skipped in between is caught up by the next reconcile.",
+        "risk": "Switching it on lets the engine write to your tenant on a schedule. Switching it off makes the environment inert while every job still looks green, so missing work (an account not created, an access window not closed) goes unnoticed. Reversible: switch it on and the next scheduler run resumes. Work skipped in between is caught up by the next reconcile.",
         "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Request the licence from Invardia automatically', 'Pro updates from Invardia' and 'Invardia support link' all depend on it.",
         "recommended": "On. Switch it off only for a short, deliberate pause, such as while restoring a configuration backup.",
         "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.scheduler.jobs/"
@@ -3367,11 +3367,11 @@
         }
       },
       "info": {
-        "what": "Who may do what in PIM Manager: each sign-in name is mapped to Reader (view only), Delegated (view only, limited to the groups they own), Admin (stage, commit and revoke) or SuperAdmin (everything, including settings, emergency access and this map). Each entry is one person; groups are not expanded.",
-        "enabled": "When saved: the server enforces the map on every request, within about 15 seconds. Saving is refused if no SuperAdmin would remain, and a new Delegated entry needs Pro. Without Pro, an existing Delegated entry acts as Reader.",
+        "what": "Who may do what in PIM Manager: each sign-in name is mapped to Reader (view only), Delegated (sees the groups they own; stages and commits only inside their tier, level, service and Azure scope limits), Admin (stage, commit and revoke) or SuperAdmin (everything, including settings, emergency access and this map). Each entry is one person; groups are not expanded.",
+        "enabled": "When saved: the server enforces the map on every request, within about 15 seconds. Saving is refused if no SuperAdmin would remain. A Delegated person can stage and commit only rows inside their tier, level, service and Azure scope limits; the server refuses anything outside them.",
         "disabled": "For a person not in the map (and not granted at setup): PIM Manager still lets them in as a Reader if they can sign in, so they can view configuration and assignments but not change anything.",
         "risk": "Admin and SuperAdmin can change who holds privileged access in your tenant through the engine, so grant them only to people who need them. Removing someone takes effect within seconds. Reversible: edit the map again. Every save is audited.",
-        "requires": "SuperAdmin to change it. Delegated entries need Pro; Reader, Admin and SuperAdmin are Free (Community). At least one SuperAdmin must remain.",
+        "requires": "SuperAdmin to change it. Every role (Reader, Delegated, Admin and SuperAdmin) is in both editions, Community and Pro. At least one SuperAdmin must remain.",
         "recommended": "Keep two SuperAdmins (so second-approver controls work), give everyday operators Admin, and limit who can sign in to PIM Manager at all with the app's user assignment.",
         "docUrl": "https://invardia.com/docs/pim/settings/ManagerAccess.RoleMapping/"
       }

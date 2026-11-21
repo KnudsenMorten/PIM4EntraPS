@@ -21,7 +21,8 @@
   at their start and skip that run with one line (Test-PimSchemaHoldActive). The hold expires by itself
   (Get-PimSchemaQuiesceHoldMinutes) so an updater that dies cannot stop the engine for longer; the updater clears it when
   its run ends (every exit path records its outcome, and the clear rides on that).
-  NEVER stops or cancels a running execution: this file has no write to ARM at all.
+  NEVER stops or cancels a running execution itself: this file has no write to ARM at all. The ONE exception is ROLL-HUNG-1
+  (below): a run that is HUNG by its exact definition is stopped through the caller's -StopExecution seam, never here.
 
   PURE except Invoke-PimSchemaQuiesce, whose I/O is injected (seams). ASCII; 5.1 + 7. Needs PIM-UpdateNow.ps1 (the
   executions shape) and, for the names, the install-name and database-job resolvers when loaded.
@@ -204,6 +205,139 @@ function Get-PimSchemaQuiesceHung {
     return [pscustomobject]$out
 }
 
+# ---- ROLL-HUNG-1 (framework, Invardia 2026-11-20; PIM 3.1.60) -- A HUNG RUN NO LONGER HOLDS THE ROLL -----------------------
+# Found live 2026-11-20 on a test install: a publish execution sat 'Running' 333 min with ZERO log lines (it normally ends in
+# seconds), the quiesce held the roll twice and ring 1 missed its window. An execution is HUNG only when ALL hold:
+#   (a) it has run MORE than Get-PimRollHungFactor x its usual length (Get-PimSchemaQuiesceUsualSeconds) AND at least
+#       Get-PimRollHungMinMinutes;
+#   (b) its log has been READ and holds NO line since its start.
+# Then the updater stops that ONE execution (the caller's -StopExecution seam), reads back Stopped, records it, files ONE fix
+# request (never an owner mail) and the quiesce no longer waits for it. Fail safe everywhere else:
+#   - a run that wrote ANY log line is never stopped, however long it runs (the owner's long-run rule);
+#   - a log that cannot be read (a query error, not zero lines) = NOT hung, said as unreadable;
+#   - no usual length known = NOT hung;
+#   - the stop fails or the read-back is not Stopped = NOT rolled past it: the quiesce holds exactly as before, reported.
+function Get-PimRollHungFactor     { <# PURE. LITERAL. Running MORE than this many times its usual length (and silent) = hung. #> return 10 }
+function Get-PimRollHungMinMinutes { <# PURE. LITERAL. ...and running at least this many minutes. #> return 120 }
+function Get-PimRollHungFixJob     { <# PURE. LITERAL. The uplink job id the fix request is filed under (the updater's run). #> return 'pim-update' }
+function Get-PimRollHungStoppedCode    { <# PURE. LITERAL. The fix request's class when the hung run was stopped and read back. #> return 'UPDATE-RUN-HUNG-STOPPED' }
+function Get-PimRollHungStopFailedCode { <# PURE. LITERAL. The fix request's class when the stop failed / did not read back Stopped. #> return 'UPDATE-RUN-HUNG-STOP-FAILED' }
+
+function Test-PimRollHungCandidate {
+    <#
+      PURE. Condition (a) only: @{ candidate; ranMinutes; usualMinutes }. candidate = ran > Factor x usual AND ran >= MinMinutes.
+      No start time or no usual length = not a candidate (fail safe).
+    #>
+    param([Parameter(Mandatory)]$Run, [AllowNull()][object]$UsualSeconds, [datetime]$NowUtc = [datetime]::UtcNow,
+          [int]$Factor = (Get-PimRollHungFactor), [int]$MinMinutes = (Get-PimRollHungMinMinutes))
+    $out = [ordered]@{ candidate = $false; ranMinutes = $null; usualMinutes = $null }
+    $st = ConvertTo-PimSchemaQuiesceUtc $Run.startUtc
+    if ($null -eq $st -or $null -eq $UsualSeconds -or [int]$UsualSeconds -le 0) { return [pscustomobject]$out }
+    $ran = ($NowUtc.ToUniversalTime() - $st).TotalMinutes; $usual = [int]$UsualSeconds / 60.0
+    $out.ranMinutes = [math]::Round($ran, 1); $out.usualMinutes = [math]::Round($usual, 1)
+    $out.candidate = [bool]($ran -gt ($Factor * $usual) -and $ran -ge $MinMinutes)
+    return [pscustomobject]$out
+}
+
+function ConvertTo-PimRollHungLog {
+    <#
+      PURE. What a -ReadLog seam answered -> @{ readable; lines; error }. Readable ONLY when the answer carries a whole,
+      non-negative line count ('lines'); anything else ($null, no count, a non-number) is NOT readable -- never "zero lines".
+    #>
+    param([AllowNull()][object]$Answer)
+    if ($null -eq $Answer) { return [pscustomobject]@{ readable = $false; lines = $null; error = 'no answer' } }
+    $get = { param($k) if ($Answer -is [System.Collections.IDictionary]) { if ($Answer.Contains($k)) { $Answer[$k] } else { $null } } elseif ($Answer.PSObject.Properties[$k]) { $Answer.$k } else { $null } }
+    $rd = & $get 'readable'
+    if ($rd -eq $false) { $e = "$(& $get 'error')".Trim(); return [pscustomobject]@{ readable = $false; lines = $null; error = $(if ($e) { (($e -split "`n")[0]).Trim() } else { 'not readable' }) } }
+    $n = & $get 'lines'; $i = [long]-1
+    if ($null -eq $n -or -not [long]::TryParse("$n", [ref]$i) -or $i -lt 0) { return [pscustomobject]@{ readable = $false; lines = $null; error = 'the answer holds no line count' } }
+    return [pscustomobject]@{ readable = $true; lines = $i; error = '' }
+}
+
+function Get-PimRollHungVerdict {
+    <#
+      PURE. THE decision for ONE running execution: @{ hung; state; line; ranMinutes; usualMinutes }.
+        state = not-candidate (condition (a) does not hold) | unreadable (the log could not be read: NOT hung) |
+                logging (it wrote log lines: NEVER stopped) | hung (silent since its start, past the bound)
+      -Log: ConvertTo-PimRollHungLog's object.
+    #>
+    param([Parameter(Mandatory)]$Run, [AllowNull()][object]$UsualSeconds, [AllowNull()][object]$Log, [datetime]$NowUtc = [datetime]::UtcNow)
+    $c = Test-PimRollHungCandidate -Run $Run -UsualSeconds $UsualSeconds -NowUtc $NowUtc
+    $out = [ordered]@{ hung = $false; state = 'not-candidate'; line = ''; ranMinutes = $c.ranMinutes; usualMinutes = $c.usualMinutes }
+    if (-not $c.candidate) { return [pscustomobject]$out }
+    $what = "{0} ({1}) has run {2} min, more than {3}x its usual {4} min and at least {5} min" -f $Run.job, $Run.execution, [math]::Round([double]$c.ranMinutes), (Get-PimRollHungFactor), [math]::Round([double]$c.usualMinutes, 1), (Get-PimRollHungMinMinutes)
+    $lg = $Log; if ($null -eq $lg) { $lg = ConvertTo-PimRollHungLog $null }
+    if (-not $lg.readable) {
+        $out.state = 'unreadable'
+        $out.line = "schema quiesce: $what; its log could not be read ($($lg.error)), so it is NOT called hung and is NOT stopped -- the update keeps waiting for it"
+        return [pscustomobject]$out
+    }
+    if ([long]$lg.lines -gt 0) {
+        $out.state = 'logging'
+        $out.line = "schema quiesce: $what, but it has written $($lg.lines) log line(s) -- a run that logs is never stopped; the update keeps waiting for it"
+        return [pscustomobject]$out
+    }
+    $out.hung = $true; $out.state = 'hung'
+    $out.line = "schema quiesce: $what and has written NO log line since it started -- it is HUNG; the updater stops this one run"
+    return [pscustomobject]$out
+}
+
+function ConvertTo-PimRollHungPart {
+    <#
+      PURE. The fix request's item (FailedStep, [a-z0-9.-], at most 60): <job>.<execution suffix>, the job only when it is a
+      shipped PIM name (ca-pim-* / caj-pim-*), else 'pim-job' -- never a name a customer typed. -Suffix is added last.
+    #>
+    param([AllowEmptyString()][string]$Job, [AllowEmptyString()][string]$Execution, [AllowEmptyString()][string]$Suffix = '')
+    $j = "$Job".Trim().ToLowerInvariant(); $x = "$Execution".Trim().ToLowerInvariant()
+    $js = $(if ($j -match '^(ca|caj)-pim-[a-z0-9-]{1,40}$') { $j } else { 'pim-job' })
+    if ($j -and $x.StartsWith("$j-")) { $x = $x.Substring($j.Length + 1) }
+    $x = ($x -replace '[^a-z0-9-]', '-').Trim('-'); if (-not $x) { $x = 'run' }
+    $p = "$js.$x"; $sf = $(if ("$Suffix".Trim()) { '.' + ("$Suffix".Trim().ToLowerInvariant() -replace '[^a-z0-9-]', '-') } else { '' })
+    $max = 60 - $sf.Length; if ($p.Length -gt $max) { $p = $p.Substring(0, $max).TrimEnd('-', '.') }
+    return "$p$sf"
+}
+
+function Register-PimRollHungReport {
+    <#
+      ONE fix request per hung execution through the updater's register-once / sent-once run report (Register-PimTrustStaleReport,
+      PIM-JobLanes.ps1): job pim-update, item = ConvertTo-PimRollHungPart, since = the execution's start. Stopped and read back
+      -> UPDATE-RUN-HUNG-STOPPED; the stop failed -> UPDATE-RUN-HUNG-STOP-FAILED (its own item, '.held'). Never a mail. NEVER
+      throws. -GetSetting / -SetSetting: the caller's store seams (passed on only when given). Returns @{ registered; id; reason }.
+    #>
+    param([Parameter(Mandatory)]$Entry, [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    try {
+        if (-not (Get-Command Register-PimTrustStaleReport -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ registered = $false; id = ''; reason = 'the run report is not loaded in this process' } }
+        $seams = @{}; if ($GetSetting) { $seams['GetSetting'] = $GetSetting }; if ($SetSetting) { $seams['SetSetting'] = $SetSetting }
+        $since = "$($Entry.startUtc)"
+        if ([bool]$Entry.ok) {
+            $part = ConvertTo-PimRollHungPart -Job "$($Entry.job)" -Execution "$($Entry.execution)"
+            return (Register-PimTrustStaleReport -Job (Get-PimRollHungFixJob) -Part $part -Code 'UPDATE-RUN-HUNG-STOPPED' -SinceUtc $since -NowUtc $NowUtc @seams)
+        }
+        $part = ConvertTo-PimRollHungPart -Job "$($Entry.job)" -Execution "$($Entry.execution)" -Suffix 'held'
+        return (Register-PimTrustStaleReport -Job (Get-PimRollHungFixJob) -Part $part -Code 'UPDATE-RUN-HUNG-STOP-FAILED' -SinceUtc $since -NowUtc $NowUtc @seams)
+    } catch { return [pscustomobject]@{ registered = $false; id = ''; reason = "$($_.Exception.Message)" } }
+}
+
+function New-PimRollHungStopRecord {
+    <#
+      PURE. The record of one stop (or failed stop) the updater keeps in UpdateState 'hungStops' (newest first, at most
+      Get-PimRollHungKeep, none older than 30 days) so the Jobs page and the heartbeat can show it. -Previous: the stored list.
+    #>
+    param([AllowNull()][object[]]$Previous, [Parameter(Mandatory)]$Entry, [datetime]$NowUtc = [datetime]::UtcNow)
+    $row = [pscustomobject][ordered]@{ job = "$($Entry.job)"; execution = "$($Entry.execution)"; startUtc = "$($Entry.startUtc)"
+        ranMinutes = $Entry.ranMinutes; usualMinutes = $Entry.usualMinutes; stoppedUtc = "$($Entry.stoppedUtc)"
+        readBack = "$($Entry.readBack)"; ok = [bool]$Entry.ok; error = "$($Entry.error)" }
+    $keep = New-Object System.Collections.Generic.List[object]; [void]$keep.Add($row)
+    foreach ($p in @($Previous | Where-Object { $null -ne $_ })) {
+        if ("$($p.job)" -eq $row.job -and "$($p.execution)" -eq $row.execution) { continue }
+        $t = ConvertTo-PimSchemaQuiesceUtc $p.stoppedUtc
+        if ($null -ne $t -and ($NowUtc.ToUniversalTime() - $t).TotalDays -gt 30) { continue }
+        if ($keep.Count -lt (Get-PimRollHungKeep)) { [void]$keep.Add($p) }
+    }
+    return @($keep.ToArray())
+}
+function Get-PimRollHungKeep { <# PURE. LITERAL. How many stop records UpdateState keeps. #> return 10 }
+
 function New-PimSchemaHoldRecord {
     # PURE. The hold row: set now, expires by itself after -Minutes.
     param([datetime]$NowUtc = [datetime]::UtcNow, [AllowEmptyString()][string]$By = '', [AllowEmptyString()][string]$Reason = '', [int]$Minutes = (Get-PimSchemaQuiesceHoldMinutes))
@@ -241,9 +375,15 @@ function Invoke-PimSchemaQuiesce {
         -SetHold { param($Record) }    -> writes pim.Settings UpdateSchemaHold ($null seam = no store: waits without a hold)
         -Sleep { param($Seconds) }     -Now { } -> [datetime] UTC   -Log { param($Line) }
       Returns @{ go; action (go|defer); line; waitedSeconds; reads; held; holdNote; longWait; maxWaitSeconds; hung (job|execution
-      keys); notes (the long-wait / hung lines) }. The hold is SET before the first read
-      and stays set on 'go' (the caller lifts it when its run ends); on 'defer' or a throw it is lifted here.
-      NEVER stops, cancels or writes to any execution.
+      keys); notes (the long-wait / hung lines); stopped / stopFailed (ROLL-HUNG-1 entries); reports (fix request results) }.
+      The hold is SET before the first read and stays set on 'go' (the caller lifts it when its run ends); on 'defer' or a
+      throw it is lifted here.
+      Writes to no execution itself. ROLL-HUNG-1, only when BOTH -ReadLog and -StopExecution are given:
+        -ReadLog { param($Job, $Execution, $StartUtc) } -> @{ lines = <count of its log lines since its start> } | throws
+                   (a throw, $null or no count = NOT readable = never stopped)
+        -StopExecution { param($Job, $Execution) } -> the status read back after the stop ('Stopped' = stopped) | throws
+        -ReportHung { param($Entry) } -> one fix request per entry (Register-PimRollHungReport); optional
+      Each running execution is judged at most once per call; only one that Get-PimRollHungVerdict calls hung is stopped.
     #>
     param([AllowNull()][string[]]$Jobs, [Parameter(Mandatory)][scriptblock]$ReadExecutions, [AllowNull()][scriptblock]$SetHold = $null,
           [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$Now = { [datetime]::UtcNow }, [scriptblock]$Log = $null,
@@ -251,12 +391,15 @@ function Invoke-PimSchemaQuiesce {
           [AllowEmptyString()][string]$By = '', [switch]$NoHold,
           # SCHEMA-QUIESCE-LONG-SNAPSHOT: -LastLog { param($Job, $Execution) } -> the UTC time of that execution's last log line,
           # $null = not readable ($null seam = never readable: nothing is called hung). -NoLongWait keeps the plain bound.
-          [AllowNull()][scriptblock]$LastLog = $null, [switch]$NoLongWait)
+          [AllowNull()][scriptblock]$LastLog = $null, [switch]$NoLongWait,
+          # ROLL-HUNG-1 (see above): all three $null = today's behaviour (nothing is ever stopped).
+          [AllowNull()][scriptblock]$ReadLog = $null, [AllowNull()][scriptblock]$StopExecution = $null, [AllowNull()][scriptblock]$ReportHung = $null)
     $t0 = ([datetime](& $Now)).ToUniversalTime()
     $out = [ordered]@{ go = $false; action = 'defer'; line = ''; waitedSeconds = 0; reads = 0; held = $false; holdNote = ''
-                       longWait = $false; maxWaitSeconds = $MaxWaitSeconds; hung = @(); notes = @() }
+                       longWait = $false; maxWaitSeconds = $MaxWaitSeconds; hung = @(); notes = @(); stopped = @(); stopFailed = @(); reports = @() }
     $keep = $false
     $reported = @{}
+    $judged = @{}; $stoppedKeys = @{}
     try {
         if (-not $NoHold) {
             if ($SetHold) {
@@ -279,6 +422,43 @@ function Invoke-PimSchemaQuiesce {
             $tNow = ([datetime](& $Now)).ToUniversalTime()
             $waited = [int][math]::Max(0, ($tNow - $t0).TotalSeconds)
             $st = Get-PimSchemaQuiesceState -Reads $reads -NowUtc $tNow
+            # (0) ROLL-HUNG-1: a run HUNG by the exact definition is stopped (that ONE execution), read back, recorded and
+            # reported -- and no longer waited for. Everything that is not proven hung keeps today's behaviour.
+            if ($ReadLog -and $StopExecution) {
+                foreach ($rr in @($st.running)) {
+                    $key = "$($rr.job)|$($rr.execution)"; if ($judged.ContainsKey($key)) { continue }
+                    $rdh = @($reads | Where-Object { "$($_.job)" -ieq "$($rr.job)" } | Select-Object -First 1)
+                    $us = $(if ($rdh.Count) { Get-PimSchemaQuiesceUsualSeconds -Executions @($rdh[0].executions) } else { $null })
+                    if (-not (Test-PimRollHungCandidate -Run $rr -UsualSeconds $us -NowUtc $tNow).candidate) { continue }   # the log is read only for a candidate
+                    $judged[$key] = $true
+                    $ans = $null; $lg = $null
+                    try { $ans = & $ReadLog "$($rr.job)" "$($rr.execution)" $rr.startUtc; $lg = ConvertTo-PimRollHungLog $ans }
+                    catch { $lg = [pscustomobject]@{ readable = $false; lines = $null; error = (("$($_.Exception.Message)" -split "`n")[0]).Trim() } }
+                    $v = Get-PimRollHungVerdict -Run $rr -UsualSeconds $us -Log $lg -NowUtc $tNow
+                    $out.notes += $v.line; if ($Log) { & $Log $v.line }
+                    if (-not $v.hung) { continue }
+                    $rb = ''; $err = ''
+                    try { $rb = "$(& $StopExecution "$($rr.job)" "$($rr.execution)")".Trim() } catch { $err = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
+                    $ok = (-not $err -and $rb -ieq 'Stopped')
+                    $entry = [pscustomobject][ordered]@{ job = "$($rr.job)"; execution = "$($rr.execution)"
+                        startUtc = $(if ($null -ne $rr.startUtc) { $rr.startUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { '' })
+                        ranMinutes = $v.ranMinutes; usualMinutes = $v.usualMinutes; stoppedUtc = ([datetime](& $Now)).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                        readBack = $rb; ok = $ok; error = $err }
+                    if ($ok) {
+                        $out.stopped += $entry; $stoppedKeys[$key] = $true
+                        $sl = "schema quiesce: {0} ({1}) was stopped and read back Stopped -- the update no longer waits for it; the stuck run is reported" -f $rr.job, $rr.execution
+                    } else {
+                        $out.stopFailed += $entry
+                        $sl = "schema quiesce: {0} ({1}) could NOT be stopped ({2}) -- the update does NOT roll past it and keeps holding exactly as before; reported" -f $rr.job, $rr.execution, $(if ($err) { $err } else { "read back '$(if ($rb) { $rb } else { 'nothing' })', not Stopped" })
+                    }
+                    $out.notes += $sl; if ($Log) { & $Log $sl }
+                    if ($ReportHung) { try { $out.reports += (& $ReportHung $entry) } catch { $out.reports += [pscustomobject]@{ registered = $false; id = ''; reason = "$($_.Exception.Message)" } } }
+                }
+                if ($stoppedKeys.Count) {
+                    $left = @(@($st.running) | Where-Object { -not $stoppedKeys.ContainsKey("$($_.job)|$($_.execution)") })
+                    $st = [pscustomobject]@{ running = $left; unreadable = @($st.unreadable); quiet = ($left.Count -eq 0 -and @($st.unreadable).Count -eq 0) }
+                }
+            }
             # (1) ONE known long job is all that runs: wait for it up to its usual length (once per run), renewing the hold.
             if (-not $NoLongWait -and -not $out.longWait -and $MaxWaitSeconds -gt 0 -and @($st.running).Count) {
                 $lw = Get-PimSchemaQuiesceLongWait -State $st -Reads $reads -StartUtc $t0 -BaseSeconds $MaxWaitSeconds
@@ -307,6 +487,11 @@ function Invoke-PimSchemaQuiesce {
             }
             $d = Get-PimSchemaQuiesceDecision -State $st -WaitedSeconds $waited -MaxWaitSeconds $MaxWaitSeconds
             $out.waitedSeconds = $waited; $out.line = $d.line; $out.action = $d.action
+            if (@($out.stopped).Count) {
+                $sn = (@($out.stopped | ForEach-Object { "$($_.job) ($($_.execution))" }) -join ', ')
+                if ($d.action -eq 'go') { $out.line = "$($d.line) (after stopping the hung run $sn)" }
+                else { $out.line = $d.line.Replace('(nothing was stopped)', "(only the hung run $sn was stopped)") }
+            }
             if ($d.action -eq 'go') { $out.go = $true; $keep = $true; break }
             if ($d.action -eq 'defer') { break }
             if ($Log -and ($out.reads -eq 1 -or ($out.reads % 4) -eq 0)) { & $Log $d.line }
@@ -335,7 +520,7 @@ function Invoke-PimSchemaQuiesce {
 function Get-PimDbInitStepsSettingName { <# PURE. LITERAL. The per-execution setting of the step filter. #> return 'PIM_DBINIT_STEPS' }
 function Get-PimDbInitStepIds {
     <# PURE. LITERAL. Every step of the database job, in the order the job runs them. #>
-    return @('users', 'schema', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed', 'drop-old-users', 'support-legacy-owner')
+    return @('users', 'schema', 'schema-upgrade', 'statistics', 'access-prerequisites', 'access', 'access-facts', 'access-run2', 'policy-templates', 'mail-templates', 'feature-gates', 'manager-access', 'update-seed', 'drop-old-users', 'support-legacy-owner')
 }
 function Get-PimDbInitStepClass {
     <#

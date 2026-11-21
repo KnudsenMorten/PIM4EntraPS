@@ -6,8 +6,8 @@
   "new": [],
   "fixes": [
     {
-      "title": "Runs on supported .NET 10 and PowerShell 7.6",
-      "text": "PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS, supported to November 2028, and is patched at every build. The older versions reached end of support on 10 November 2026."
+      "title": "Runs on Microsoft's supported platform",
+      "text": "PIM Manager now runs on Microsoft's long-term supported platform, supported to November 2028, and is patched at every build. The earlier platform reached end of support on 10 November 2026."
     },
     {
       "title": "Home permission check works again",

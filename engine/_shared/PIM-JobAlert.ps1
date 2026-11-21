@@ -33,6 +33,8 @@
 #>
 
 Set-StrictMode -Off
+# 100.40 (f) / framework 12.16: the Alerting event defaults + the person-set read (Get-PimJobAlertingConfig).
+if (-not (Get-Command Get-PimSettingEffective -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-SettingDefaults.ps1') }
 
 # ---------------------------------------------------------------------------
 # PURE: is this finished run alert-worthy, and what should the alert say?
@@ -518,6 +520,8 @@ function Get-PimJobAlertingConfig {
     $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage','target-missing','pending-uncommitted')   # 'pending-uncommitted': §79.2 ('data-quality' removed, PIM 100.151)
     $events = @{}
     foreach ($e in $catalog) { $events[$e] = $true }
+    # 100.40 (f): the PRODUCT default per event from the one table (PIM-SettingDefaults.ps1), also when no row is stored
+    if (Get-Command Get-PimAlertEventDefaults -ErrorAction SilentlyContinue) { $evDef = Get-PimAlertEventDefaults; foreach ($e in $catalog) { if ($evDef.Contains($e)) { $events[$e] = [bool]$evDef[$e] } } }
     $out = [ordered]@{ recipients = @(); events = $events }
 
     $cs = $ConnectionString
@@ -535,6 +539,11 @@ function Get-PimJobAlertingConfig {
     $rec = Get-PimJobAlertField -Item $raw -Name 'recipients'
     if ($rec) { $out.recipients = @(@($rec) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
     $ev = Get-PimJobAlertField -Item $raw -Name 'events'
+    # 100.40 (f) / framework 12.16: the events = the product default with what a PERSON switched laid over it (an old whole
+    # row by the migration rule), so a changed product default reaches an install whose Alerting page was saved.
+    if (Get-Command Get-PimSettingEffective -ErrorAction SilentlyContinue) {
+        try { $ev = (Get-PimSettingEffective -Name 'Alerting' -Stored $raw)['events'] } catch { }
+    }
     if ($ev) {
         foreach ($e in $catalog) {
             $v = Get-PimJobAlertField -Item $ev -Name $e

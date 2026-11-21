@@ -17,7 +17,7 @@
       "kind": "other",
       "name": "delegated Azure access (user_impersonation) through the first-party public client 'Microsoft Azure PowerShell'",
       "scope": "Azure Resource Manager, plus Fabric and Power BI (PowerBI) and the store (with -SqlServerFqdn) from the same sign-in",
-      "why": "Needed for DefenderXdr (Sentinel), AzureRbac, PowerBI (Fabric tenant setting; the Power BI admin API as YOU for the workspace step), to find the engine identity from the hosted tick job, and to record the result in the store."
+      "why": "Needed for DefenderXdr (Sentinel), AzureRbac, PowerBI (Fabric tenant setting; the Power BI admin API as YOU for the workspace step), to find the engine identity from the hosted engine job, and to record the result in the store."
     },
     {
       "kind": "entraRole",
@@ -65,7 +65,7 @@
       "kind": "azureRbac",
       "name": "Reader",
       "scope": "the hosting resource group and the Log Analytics workspaces",
-      "why": "Finds the engine identity from the tick job when -EngineObjectId is not given, and reads whether Sentinel is enabled."
+      "why": "Finds the engine identity from the engine job when -EngineObjectId is not given, and reads whether Sentinel is enabled."
     },
     {
       "kind": "entraRole",
@@ -184,7 +184,7 @@
   "parameters": [
     { "name": "Workload", "required": true, "default": null, "help": "DefenderXdr, Intune, PowerBI, AzureRbac or EntraRoles." },
     { "name": "TenantId", "required": true, "default": null, "help": "Your tenant id; every sign-in and token is checked against it." },
-    { "name": "SubscriptionId", "required": false, "default": null, "help": "The hosting subscription (finds the engine identity from the tick job; holds the dedicated Sentinel workspace)." },
+    { "name": "SubscriptionId", "required": false, "default": null, "help": "The hosting subscription (finds the engine identity from the engine job; holds the dedicated Sentinel workspace)." },
     { "name": "ResourceGroup", "required": false, "default": null, "help": "The hosting resource group." },
     { "name": "TickJobName", "required": false, "default": "ca-pim-tick", "help": "The engine's job. When -EngineObjectId is not given, the engine identity is the identity this job signs in as: the user-assigned one its PIM_ManagedIdentityClientId names, else its system-assigned one." },
     { "name": "SqlServerFqdn", "required": false, "default": null, "help": "The environment's store; without it (or access to it) the result is not recorded here." },
@@ -193,7 +193,7 @@
     { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation from the repository only: the certificate of -ClientId." },
     { "name": "UseSignedInAccount", "required": false, "default": "off", "help": "Use the signed-in session of this window (the Invardia Support app session opened by Invardia's connect script; without one, your own browser sign-in)." },
     { "name": "UseEdge", "required": false, "default": "$true", "help": "$true opens Microsoft Edge for the sign-in; $false the default browser." },
-    { "name": "EngineObjectId", "required": false, "default": "the tick job's identity", "help": "The engine identity's object id (shown in PIM Manager)." },
+    { "name": "EngineObjectId", "required": false, "default": "the engine job's identity", "help": "The engine identity's object id (shown in PIM Manager)." },
     { "name": "EngineAppId", "required": false, "default": null, "help": "The engine application's id, instead of -EngineObjectId." },
     { "name": "EngineCertThumbprint", "required": false, "default": null, "help": "Only with an engine application whose certificate is on this computer: test the Power BI admin API as the engine." },
     { "name": "ConfirmPortalStep", "required": false, "default": null, "help": "Check ids of portal steps you have done; recorded as confirmed (attested, not verified)." },

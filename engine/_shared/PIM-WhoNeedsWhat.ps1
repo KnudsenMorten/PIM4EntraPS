@@ -15,7 +15,8 @@
       * Graph application permissions: the identity's code set (count + the list behind More info);
       * Azure roles: the 'always' rows of the identity, plus -- for the engine, ONLY when Azure resource delegations are
         defined -- User Access Administrator at each defined scope (UAA-QUIET, owner 2026-11-10);
-      * Exchange: the scoped send right on the shared mailbox (both identities send), only in shared-mailbox mode.
+      * Exchange: the scoped send right on the shared mailbox, for the ENGINE only (since 3.1.52 only the engine sends; the
+        web app holds no mail right -- SECURE-WEB-1), only in shared-mailbox mode.
     An identity whose id is not known yet says so ("not known yet -- the engine records it on its next run"), never blank.
 #>
 Set-StrictMode -Off
@@ -80,7 +81,7 @@ function Get-PimWhoNeedsWhat {
             foreach ($s in $scopes) { $az.Add([ordered]@{ role = 'User Access Administrator'; scope = $s }) }
         }
         $ex = ''
-        if ("$MailMode" -eq 'sharedMailbox') {
+        if ("$MailMode" -eq 'sharedMailbox' -and $i.role -eq 'engine') {   # only the engine sends (SECURE-WEB-1: the web app holds no mail right)
             $ex = $(if ($sender) { "Send mail as $sender only (Exchange application role, scoped to that one mailbox)" } else { 'Send mail as the PIM shared mailbox only, once it is set up (Mail sender step)' })
         }
         $known = [bool]($i.objectId)

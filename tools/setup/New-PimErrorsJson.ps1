@@ -118,7 +118,32 @@ function New-PimErrorsCatalogue {
     $sol = Get-PimFailureSolutionCatalog
     $capsByArea = @{ az = @('azureRbac'); def = @('defenderXdr'); pbi = @('powerBi'); ad = @('hybridAd'); tap = @('tapPolicy'); entra = @('entraP2Pim'); grp = @('entraP2Pim') }
     $titleOf = @{ 'CONVERGENCE' = 'A committed change is not in place in the tenant'; 'UNCLASSIFIED' = 'An engine problem PIM Manager has not classified yet'
-                  'RUN-STALLED' = 'A run has made no progress for a while, or runs far longer than usual' }
+                  'RUN-STALLED' = 'A run has made no progress for a while, or runs far longer than usual'
+                  'WEB-IDENTITY-EXCESS' = 'The web app identity holds a right outside its approved set'
+                  'SQL-SUPPORT-OWNER' = 'Support database access holds standing full rights'
+                  'SQL-SUPPORT-OWNER-PROOF' = 'Standing support database rights stay: a check is not in place'
+                  'SQL-SUPPORT-OWNER-FAILED' = 'Removing the standing support database rights did not complete'
+                  'SQL-SUPPORT-OWNER-REMOVED' = 'Standing support database rights removed'
+                  'AA-SOURCE-STALE' = 'Part of the active-assignments view not read for a week'
+                  'DRIFT-SOURCE-STALE' = 'Part of the drift view not read for a week'
+                  'COVERAGE-SOURCE-STALE' = 'Part of the coverage view not read for a week'
+                  'COVERAGE-RIGHT-MISSING' = 'The engine lacks a right to read part of the coverage view'
+                  'UPDATE-RUN-HUNG-STOPPED' = 'A hung job run was stopped so the update could go ahead'
+                  'UPDATE-RUN-HUNG-STOP-FAILED' = 'A hung job run could not be stopped; the update waits' }
+    # 3.1.54: the internal note of the register-once run report's own classes (no engine rule carries a cause / remedy)
+    $noteOf = @{
+        'WEB-IDENTITY-EXCESS' = ' The updater''s least-privilege trim found a right of the internet-facing web identity outside its approved set that the updater may not remove itself. One fix request per item (FailedStep = the item); support removes it through the Support app; the update run lists it.'
+        'SQL-SUPPORT-OWNER' = ' SECAUDIT-1a 4a: the Support app''s database user holds db_owner with no open support grant. The updater may not change db_owner membership; the database job removes it once both proofs hold.'
+        'SQL-SUPPORT-OWNER-PROOF' = ' SECAUDIT-1a 4a: the legacy standing db_owner stays because a proof precondition is missing (FailedStep part p1 = the read-only user is not in pim_support_read, module = time-limited support access not set up, consent = the recorded support consent not set up). Asked again after 24 h.'
+        'SQL-SUPPORT-OWNER-FAILED' = ' SECAUDIT-1a 4a: the database job''s removal of the legacy standing db_owner did not complete (failed proof, refused, or restore pending); what was removed is put back and read back. The update run lists why.'
+        'SQL-SUPPORT-OWNER-REMOVED' = ' SECAUDIT-1a 4a: a NOTE, not a failure -- legacy standing db_owner removed and a JIT add + take-back proved, read back. Sent once (pim.Settings SupportLegacyOwnerNotes); no ticket.'
+        'AA-SOURCE-STALE' = ' TRUST-1 point 8: a surface of the active-assignments snapshot was not read for more than 7 days (FailedStep = the part). One fix request per part and since-date; its last findings stay listed with their date.'
+        'DRIFT-SOURCE-STALE' = ' TRUST-1 point 8: a scope of the drift snapshot was not read for more than 7 days (FailedStep = the scope). One fix request per part and since-date.'
+        'COVERAGE-SOURCE-STALE' = ' TRUST-1 point 8: a workload of the coverage job was not read for more than 7 days (FailedStep = the workload). One fix request per part and since-date.'
+        'COVERAGE-RIGHT-MISSING' = ' RIGHTS-LIVE-1 (round 6 F9): an APPROVED right of a coverage source was refused (HTTP 401 / 403) on a source never read before, its feature on (Power BI without Fabric Administrator; Azure Reader). ONE fix request per workload, no since-date.'
+        'UPDATE-RUN-HUNG-STOPPED' = ' ROLL-HUNG-1: the updater''s schema quiesce found a job execution Running more than 10x its usual length AND at least 120 min with NO log line since its start; it stopped that one execution, read back Stopped and rolled. ONE fix request per execution (FailedStep = <job>.<execution>, since = its start); the run is recorded in UpdateState hungStops. Find out why the run hung.'
+        'UPDATE-RUN-HUNG-STOP-FAILED' = ' ROLL-HUNG-1: the same hung execution, but the stop call failed or the read-back was not Stopped (e.g. a 403 on Microsoft.App/jobs/stop/action). Nothing rolled; the quiesce keeps holding and the 15-minute retry tries again. ONE fix request per execution (FailedStep ends .held); recorded in UpdateState hungStops. Stop it through the Support app (stop-job-execution) and check the updater''s rights.'
+    }
     $genericTitle = @{ 'customer-config' = 'A row or setting cannot be applied as written'; 'target-missing' = 'A row names something that does not exist in the tenant'
         'replication-delay' = 'An object is not visible at Microsoft yet'; 'throttled' = 'Microsoft asked PIM Manager to slow down'; 'upstream-error' = 'A Microsoft service error'
         'held-for-approval' = 'A large change is held for approval'; 'not-converged' = 'A committed change is not in place in the tenant'; 'permission' = 'A permission is missing'
@@ -143,7 +168,8 @@ function New-PimErrorsCatalogue {
         }
         $note = "Class $($row.class)."
         if ($rule) { $note += " Cause: $("$($rule.cause)".Trim()) Remedy: $("$($rule.remedy)".Trim())" }
-        elseif ("$($row.class)" -eq 'RUN-STALLED') { $note += ' STALL-1 (framework 8.18): the tick found a live run with no progress mark for 60 min, or running longer than max(2 x the median of its job''s last 10 successful runs, 10 min). ONE warning run report per stall (FailedStep = the area it works on; the text names the trigger and the minutes). PIM never stops it (100.166 (c)); the ticket resolves on the next OK run of the same job + step.' }
+        elseif ($noteOf.ContainsKey("$($row.class)")) { $note += $noteOf["$($row.class)"] }
+        elseif ("$($row.class)" -eq 'RUN-STALLED') { $note += ' STALL-1 (framework 8.18): the engine found a live run with no progress mark for 60 min, or running longer than max(2 x the median of its job''s last 10 successful runs, 10 min). ONE warning run report per stall (FailedStep = the area it works on; the text names the trigger and the minutes). PIM never stops it (100.166 (c)); the ticket resolves on the next OK run of the same job + step.' }
         elseif ("$($row.class)" -eq 'CONVERGENCE') { $note += ' The convergence check (pim-verify-convergence) found definitions in the Manager that are not in the tenant past the grace window; the engine item failures name the cause per item.' }
         elseif ("$($row.class)" -eq 'UNCLASSIFIED') { $note += ' No catalog rule matched the error text: give it its own class and code (framework 8.16: a failure without a cause is a PIM defect).' }
         else { $note += " The generic code of cause class $($row.causeClass): a failure of this kind that has no own code yet." }

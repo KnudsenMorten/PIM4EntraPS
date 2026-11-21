@@ -3240,9 +3240,25 @@ See §17.7 for the full template/approval mechanics.
   - *smtp* — `System.Net.Mail.SmtpClient` (STARTTLS or none; implicit TLS on 465 is not supported and
     refused). `pim.Settings` `SmtpRelay` = { host, port, security, username, from, vaultName, secretName }.
     The **password is never in the database or the page**: it is a secret in the environment's own Key
-    Vault, read at send time by the sending identity. The Manager writes it with its own identity when it
-    may; otherwise `Set-PimSmtpRelayPassword.ps1` (browser sign-in) writes it and grants the sending
-    identities read access on **that one secret**.
+    Vault, read at send time by the sending identity. The Manager never writes it. **The sealed hand-over
+    (3.1.56):** the person never writes Key Vault. The installation's updater keeps one RSA-3072 key pair --
+    the private key is a secret in the installation's own vault, only the public key is published to
+    `pim.Settings` `SecretHandoverPublicKey`. A SuperAdmin types the password once in Settings > Mail & alerting
+    > SMTP relay > **Set relay password** (`POST /api/settings/mail/relay-password`, SuperAdmin checked by the
+    server, never open to an API application); the server seals it to that key (RSA-OAEP-SHA256 wraps a random
+    AES-256-GCM key; the vault, the secret name and the key id are bound into the seal), stores **only the sealed
+    copy** in `pim.Settings` `SecretHandoverPending`, drops the plain value and records the action in the audit
+    trail without it. The person needs no Key Vault and no SQL right; the web identity still holds no Key Vault
+    right. The page shows the status (waiting, written and when, refused and why) from `SecretHandoverResult`.
+    Invardia support can do the same with `Set-PimSmtpRelayPassword.ps1 -SqlServerFqdn` as the Support app. On its next run the updater -- the only writer of the
+    installation's secrets -- opens it, refuses a changed copy, one sealed to another key or for another vault,
+    and any target it must never overwrite (its own key, an app secret moved into the vault, a secret of another
+    kind), writes the secret, reads it back (the previous value is put back on a mismatch; a failed write keeps
+    the old secret and the sealed copy for the next run), deletes the sealed copy only if it is unchanged and
+    records `SecretHandoverResult` (names only, never the value). The updater assigns no role: it reports
+    whether the engine identity may read the secret. Without `-SqlServerFqdn` the script writes the secret
+    directly and grants the engine read access on **that one secret** -- the fallback for an installation whose
+    updater is older than 3.1.56; the person then needs Key Vault Secrets Officer on the vault.
   - *none* — every send returns "switched off" (also to the TAP readiness probe).
   The Manager's Get Started > Mail sender and Settings > Mail & alerting > Mail sending are one form over
   `GET/PUT /api/settings/mail`; `POST /api/settings/mail/test` queues a test mail that the PIM engine sends as its
@@ -10632,6 +10648,16 @@ offline, §19a).
 
 ### 19b. Defaults — what an environment does before anyone changes a setting
 
+**A saved page keeps following the product defaults (Alerting, Notifications, Email controls; built 2026-11-20, not
+released).** Saving one of these pages stores only what a person set: the alert event switches, the kill switch, a
+recipient's report / alert switches, audience and severity floor, and a report's PDF attach are stored only when they
+differ from the product default (or when the person had already chosen that value -- it stays theirs). Recipients,
+webhook, redirect and allowlist are the person's data and are always stored. Every reader -- the Manager, the scheduler,
+each mail sender -- reads the product default with the person's choices laid over it, so a changed default reaches every
+environment, saved page or not. A page saved by an earlier version is read by one rule: a value equal to the default of
+that version is treated as the default, a value that differs is the person's choice and is kept; the page takes the new
+form the next time it is saved. Nothing is rewritten in bulk.
+
 **Capabilities (the feature catalog, `engine/_shared/PIM-FeatureCatalog.ps1`).** *Default* is the catalog value before
 any stored setting or deploy baseline; *switches itself on* means it is on while rows of those entities exist, unless a
 `false` has been stored deliberately. Core capabilities are never switched off by the customization framework.
@@ -10648,7 +10674,7 @@ any stored setting or deploy baseline; *switches itself on* means it is on while
 | Discovery and gaps (`coverage.gaps`; called Coverage & gaps until 2.4.604) | **Pro** | single | on (core) — **needs the licence** | — |
 | Revoke current delegations (`revoke.current`) | **Pro** | single | on (core) — **needs the licence** | — |
 | Access review campaigns (`reviews.campaigns`) | **Pro** | single | on (core) — **needs the licence** | — |
-| Delegated administration ceilings (`access.delegated`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Delegated administration ceilings (`access.delegated`) | Free (both editions since 2026-11-20) | single | on (core) | — |
 | Tier-impact report (`reports.tier`) | **Pro** | single | on (core) — **needs the licence** | — |
 | Evidence / audit export (`reports.evidence`) | **Pro** | single | on (core) — **needs the licence** | — |
 | Second approver on sensitive changes (`makerchecker`) | **Pro** | single | off | — |
@@ -10689,7 +10715,8 @@ snapshots per entity are kept.
 > (`single` | `multi`); the older Pro list in `PIM-License.ps1` is kept equal to the catalog's Pro set (a test fails on
 > drift). **Pro, single tenant:** `coverage.gaps`, `discovery.sweep`, `connectors.apps` (app-role, Azure DevOps,
 > Dataverse, Business Central, Power Platform), `connectors.powerbi`, `connectors.exo`, `revoke.current`,
-> `reviews.campaigns`, `makerchecker`, `access.delegated`, `reports.tier`, `reports.evidence`. **Pro, multi tenant:**
+> `reviews.campaigns`, `reports.tier` (`makerchecker` and `reports.evidence` moved to both editions 2026-11-04,
+> `access.delegated` 2026-11-20). **Pro, multi tenant:**
 > `msp.downlink` and the managing tenant / managed roles. `connectors.workload` (Intune + Defender XDR) and everything else
 > is free. Enforcement is **targeted**: the feature gate also checks for a valid (or in-grace) Pro licence bound to the
 > tenant, so a Pro capability is inert in the engine and jobs (skipped with the licence reason) and the Manager answers
@@ -11464,6 +11491,83 @@ run reports no changes. Certificate or signed-in (certificate) context only — 
   Manager, still refuse a version change. When sign-in fails, the refusal names the identity's object id
   (read from the token the database refused) and the group to add it to.
 
+**A person installing is a member only while a new install has no database job yet (built 2026-11-20; the schema and
+code steps of an existing install were moved off the person later the same day, not yet released).** When a person signs in to run the deploy against a database with a public endpoint, the deploy first reads
+whether the installation's database job exists:
+
+* **The job exists, so this is an existing install.** The feature settings and the PIM Manager administrators are not
+  written by the deploy: they are kept as stored and changed in PIM Manager > Settings > Features and Settings > Manager
+  access & roles. If the deploy is given feature settings or administrators that differ from what the database holds, it
+  says so in one line and names the page, and changes nothing. If the stored values cannot be read, it says that too. The
+  updater's database user is made by the job. Alert recipients are kept as they are and changed in PIM Manager >
+  Settings > Alerting. The end-of-install check does not read the database as the person. For these steps the person is
+  **not** added to the group. If the job cannot be read, the deploy treats the install as an existing one. A failed read
+  never makes an install look new.
+* **The schema of an existing install is upgraded by the database job** when the job already runs the version being
+  installed. The deploy starts the job once, with nothing added to the start and nothing written on the job, and first
+  reads back that the job's identity is in the SQL admin group. The job creates the store's core tables when they are
+  missing, applies the shipped schema file with the same safety check the updater uses, adds missing columns, and checks
+  the result again. A change that would remove a column is refused. When the deploy installs a different version than the
+  job runs, the schema step keeps the time-boxed membership, and the plan says so.
+* **The code step of an existing install opens no database connection** when an update ring governs the roll. An install
+  with no update ring still needs its edition read from the database before a roll, so there the code step keeps the
+  time-boxed membership, and the plan says so.
+* **The job does not exist, so this is a new install.** The person is added to the group for the run, removed at the end,
+  and the removal is read back.
+* The infrastructure and licence steps still connect as the person. When one of them runs on an existing install, the
+  deploy plan names that step, and the person is added for that run only.
+
+The plan lists each database step and where its work is done. **If the person's removal at the end is refused, cannot be
+checked or is not read back, the run stops** at step `sql-admin-release` with a failed status, and the installer stops
+the same way. It is not a warning, so no one is left a database admin without being told.
+
+**The first SuperAdmin of a new install (built 2026-11-20, not yet released).** The first SuperAdmin is always the
+person who runs the install. Their Entra object id is read from their own sign-in, never typed on a command line. An
+install run by an application adds nobody, with one exception: the Invardia Support app may name the customer's
+administrator (see "An install by the Invardia Support app" below). Other people named as SuperAdmins are not added by
+the install: the first SuperAdmin adds them in PIM Manager > Settings > Manager access & roles, and the install names them
+in one line.
+
+* **Private SQL.** The installation's database job runs inside the network, and nothing about a person is written on
+  the job or added when it is started. Before the job's first run, the installer makes sure the installation's own Key
+  Vault exists and writes **one** secret to it, `pim-first-superadmin`. The secret holds the person's object id, sign-in
+  name and tenant, the time it was issued, an expiry 48 hours later and a random value that is new every time. The
+  installer gives the database job's identity *Key Vault Secrets Officer* on that one secret only. On its run the job
+  reads the secret and checks it: the content type, its own tenant (read from its own sign-in), that it has not
+  expired, that its lifetime is no longer than 48 hours and that it holds exactly the agreed fields. It then adds the
+  person as SuperAdmin, bound to their object id, **only when no SuperAdmin exists** (an existing administrator is never
+  replaced). Then it deletes the secret, reads back that it is gone, and records the result (used, used but not deleted,
+  refused with the reason, or pending). A secret that fails a check is refused and deleted, and nobody is added. As
+  soon as the secret is gone, the job identity's role on it is removed and read back. The job removes it when it has the
+  right, otherwise the installer removes it right after the run, and the updater checks for it on every run.
+* **Recovery.** If the secret was refused or expired before the job used it, the **same person** runs the installer
+  again. The installer writes a fresh secret with a new random value and a new 48 hours, grants the role on it again,
+  and starts the job once with nothing added to the start. When a different person runs the installer, nothing is
+  written, and the installer says so.
+* **Public SQL.** The installer writes the first SuperAdmin to the database directly, with the same rules: bound to
+  the person's object id, only when no SuperAdmin exists, read back and recorded.
+* **Sign-in.** An administrator added this way is matched on the object id in the person's sign-in token only. A sign-in
+  that carries the same name but another object id, or no object id, gets nothing from it. With no SuperAdmin, nobody
+  gets a role by signing in first: every sign-in is a Reader, and the start page says how to get the first SuperAdmin.
+* **An install by the Invardia Support app.** The installer takes the sign-in name of the administrator the customer
+  named (`-FirstSuperAdminUpn`). The name is only used to look the person up. It is used only when the installer is signed
+  in as the Invardia Support app of an open support session for this tenant. The installer reads the account from the
+  customer's own directory (its object id, account type, enabled state and sign-in name). The account must be a member
+  account (not a guest), must be enabled, and its sign-in name must be the one asked for. That account's object id then
+  becomes the first SuperAdmin through the same one-time secret, with the same checks. The secret also records who named
+  the person: the Support app and the reason or ticket of its session. The database job writes this, with the object id,
+  to the install's record and to its audit log. When no one was named, or the account is not found, is a guest, is
+  disabled or cannot be read, nobody is added and the installer says so. The customer's administrator can then run the
+  installer themselves, or the Support app runs it again with the right name. When a person runs the installer, that
+  person is the first SuperAdmin, and a named administrator is not used. The installer says so.
+* **End-of-install check.** The check counts only a SuperAdmin that is bound to an object id. A SuperAdmin entry that has
+  only a name is reported with that name. The check never trusts it and never rewrites it. The check does not write
+  SuperAdmins: a missing first SuperAdmin is reported with the way to get one.
+* **Health report.** The installation's health report includes `FirstAdminSeed` with the state and its time. The state is
+  pending while no SuperAdmin exists, and the field is left out when it cannot be read. It also says whether a role is still
+  left on the used secret: `leftoverGrant` is true when the updater found one it could not remove, false when it checked
+  and none is left, and absent when it has not checked. A leftover role never changes the state.
+
 Directory behaviours the step handles: reading a group's members without a type filter can omit service
 principals under app-only auth, so membership is read per type; adding a member that is already present
 returns an "already exist" error, which is success; setting the SQL admin is asynchronous, so the new admin
@@ -11745,7 +11849,8 @@ an assignment whose every referenced group is theirs; an admin of their departme
 below, and Azure only under the department's own Azure scopes (a department without scopes grants no Azure rights at
 all). Anything else is refused and audited. A helpdesk profile capped at level 2 works the same way: level 2 and below
 commit; level 1 and 0 are refused, and rows the helpdesk cannot see can be neither overwritten nor deleted by omission.
-Delegated administration is a Pro feature.
+Delegated administration is in **both editions** (G1, 2026-11-20: per-person scoped roles are core security): no
+licence caps the role, and these checks run identically in Community and Pro — none of them reads the licence.
 
 The ceiling of an **assignment** is taken from what it grants, never from what the row claims: the stored definition
 of every group it names, and the role or scope itself — a directory role is tier 0 (level 0 for the privileged roles,

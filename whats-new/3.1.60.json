@@ -1,0 +1,5 @@
+{"version":"3.1.60","date":"2026-11-20","type":"fix-only",
+ "summary":"A job run that has stopped working can no longer hold an update back.",
+ "new":[],
+ "fixes":[{"title":"A stuck job run no longer holds updates","text":"When a PIM Manager job run has gone on far longer than usual and written nothing since it started, the update stops that one run, tells Invardia support and goes ahead. A run that is still working is never stopped."},
+          {"title":"Clearer update log","text":"The update log no longer says an installation is already on a new version while it still runs the previous one."}]}

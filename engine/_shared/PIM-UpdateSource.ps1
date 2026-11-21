@@ -365,6 +365,13 @@ function Get-PimUpdateDowngradeDecision {
              "direction is exactly the one that must not run unattended. Known here: $whereTxt."))
     }
     if ($to -eq $high.v) {
+        # 2026-11-20 (a ring-1 test install, 3.1.59): the highest known version can be PIM_UPDATE_LAST_BUILT -- built, NOT yet rolled (a roll
+        # held by a running job). Then the running Manager image is older and the roll still moves it: say that, never
+        # "already on" (the log read "already on 3.1.59 -- moves nothing" while every container ran 3.1.58).
+        $run = $known[0]
+        if ($run.v -and $run.v -lt $to) {
+            return (& $ok 'same' $from $fromSrc "$toRaw is already built here ($fromSrc); the running Manager image is $($run.raw) -- the roll moves it to $toRaw.")
+        }
         return (& $ok 'same' $from $fromSrc "already on $from -- the roll to $toRaw moves nothing.")
     }
     if ($to -gt $high.v) {

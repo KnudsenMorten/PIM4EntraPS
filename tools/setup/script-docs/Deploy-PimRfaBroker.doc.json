@@ -41,7 +41,7 @@
     { "name": "AcrName", "required": false, "default": "", "help": "The registry name, pulled with the app's system identity." },
     { "name": "SenderMailbox", "required": true, "default": null, "help": "The PIM mail sender the broker sends as." },
     { "name": "TenantName", "required": false, "default": "", "help": "The tenant name shown on the portal." },
-    { "name": "EngineIdentityPrincipalIds", "required": true, "default": null, "help": "The engine (tick job) managed identity object id(s): they pull the requests from the store." },
+    { "name": "EngineIdentityPrincipalIds", "required": true, "default": null, "help": "The engine job's managed identity object id(s): they pull the requests from the store." },
     { "name": "ApiAllowedIps", "required": false, "default": "none", "help": "Allow ingress only from these IPv4 addresses / CIDRs (the API-only shape: the portal is then not public)." },
     { "name": "MinReplicas", "required": false, "default": 0, "help": "0 (scale to zero) .. 2; 1 keeps one warm." },
     { "name": "ExistingEnvironmentName", "required": false, "default": "", "help": "Shared only: join an existing PUBLIC Container Apps environment instead of building one." },

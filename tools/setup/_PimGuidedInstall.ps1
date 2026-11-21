@@ -443,6 +443,9 @@ function ConvertTo-PimInstallDeployArgs {
     Add-PimInstallNetworkDeployArgs -DeployArgs $a -Config $Config -ResourceGroup $n.resourceGroup
     # CR5 step 2: the new names -- the deploy decides them from the resource group (a new one: the new names)
     if ($n.newNames) { $a['NewInstallNames'] = $true }
+    # FIRST-SUPERADMIN-1: a customer-named vault reaches the deploy (the first-SuperAdmin secret of a private install goes there);
+    # the default kv-pim-<token> is derived by the deploy itself
+    if ($Config.PSObject.Properties['keyVaultName'] -and "$($Config.keyVaultName)".Trim()) { $a['KeyVaultName'] = $n.keyVault }
     if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
     if ($Config.engineAzureRootUserAccessAdmin) { $a['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in

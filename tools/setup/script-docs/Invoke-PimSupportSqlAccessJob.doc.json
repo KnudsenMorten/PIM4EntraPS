@@ -26,7 +26,7 @@
     { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM Manager installation (its Container Apps environment and jobs)." },
     { "name": "SupportAppId", "required": false, "default": "the application of the Support session in this window", "help": "The Invardia Support app's application (client) id. Required with a browser sign-in. In the Support app's own session it may be left out; a different id is refused." },
     { "name": "DbUserName", "required": false, "default": "invardia-support", "help": "The name for the database user when one has to be created. An existing user with the Support app's id keeps its name." },
-    { "name": "TemplateJobName", "required": false, "default": "ca-pim-dbinit", "help": "The installation's own job the identity, the image, the environment and the database are read from. It is only read. When it is not given, ca-pim-dbinit is read, else caj-pim-dbinit (an installation with the new names): the first of the two that exists." },
+    { "name": "TemplateJobName", "required": false, "default": "ca-pim-dbinit", "help": "The installation's own job the identity, the image, the environment and the database are read from. It is only read. When it is not given, the database job is read under its earlier name, else under its standard name (an installation with the new names): the first of the two that exists." },
     { "name": "JobName", "required": false, "default": "caj-pim-supportsql", "help": "The name of the one-time job (created, run once, removed)." },
     { "name": "SqlIdentityClientId", "required": false, "default": "the identity the template job names (its setting PIM_DBINIT_MI_CLIENT_ID)", "help": "Only when the template job does not name its database identity itself: the client id of a user-assigned identity that job already carries. An identity the job does not carry is refused." },
     { "name": "TimeoutSeconds", "required": false, "default": "600", "help": "How long to wait for the one-time job to end (with -SupportHours: for its result)." },
@@ -40,7 +40,7 @@
   ],
   "readsOnly": [
     "the subscription (visible, and in -TenantId)",
-    "the installation's database setup job (ca-pim-dbinit, else caj-pim-dbinit): environment, image, registry, identities, PIM_SqlServer, PIM_SqlDatabase, PIM_DBINIT_MI_CLIENT_ID",
+    "the installation's database job: environment, image, registry, identities, PIM_SqlServer, PIM_SqlDatabase, PIM_DBINIT_MI_CLIENT_ID",
     "whether a job of the one-time name is already there, and its tags",
     "the Invardia Support app's service principal (Microsoft Graph): does the application exist in this tenant",
     "the one-time job's provisioning state and its execution's status",

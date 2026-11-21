@@ -1,0 +1,5 @@
+{"version":"3.1.55","date":"2026-11-20","type":"feature",
+ "summary":"Delegated administration is now in every edition, and a new install run needs fewer database rights.",
+ "new":[{"title":"Delegated administration for everyone","text":"Community now includes the Delegated role: a person who may stage and commit only within their tier, level, service and Azure scope. PIM Manager refuses anything outside those limits."}],
+ "fixes":[{"title":"Fewer database rights during setup","text":"Running the install again on an existing installation does most database work through the installation's own database job, so you are no longer added as database administrator for those steps."},
+          {"title":"Edition list kept in step","text":"The Free and Pro list in PIM Manager matches the published feature list again."}]}

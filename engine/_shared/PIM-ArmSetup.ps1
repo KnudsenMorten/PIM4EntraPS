@@ -116,7 +116,7 @@ function Test-PimSetupInteractiveHost {
 function Get-PimSupportRestSession {
     <#
       The Invardia Support app's REST session in this shell ($global:InvardiaSupportState, set by Connect-InvardiaSupport.ps1
-      without -AzCli) when it covers -TenantId (and -SubscriptionId, when given): @{ appId; secret; tenantId } or $null.
+      its REST session) when it covers -TenantId (and -SubscriptionId, when given): @{ appId; secret; tenantId } or $null.
       -State is the test seam. The secret is returned only to hand it to PIM-Rest's token client; it is never printed.
     #>
     param([Parameter(Mandatory)][string]$TenantId, [string]$SubscriptionId, [object]$State)
@@ -172,7 +172,7 @@ function Connect-PimSetupRest {
     if ($sec -and $thumb) { throw 'Connect-PimSetupRest: pass EITHER a client secret OR a certificate, not both.' }
     if (($sec -or $thumb) -and -not $cid) { throw 'Connect-PimSetupRest: a credential needs its -ClientId.' }
 
-    # No credential passed, and the Invardia Support app's REST session (Connect-InvardiaSupport.ps1 WITHOUT -AzCli) covers
+    # No credential passed, and the Invardia Support app's REST session (Connect-InvardiaSupport.ps1, its REST session) covers
     # this tenant: that app IS the agreed support identity (framework 4.1a) -- PIM-Rest signs in as it with its secret.
     $support = $null
     if (-not $cid -and -not $sec -and -not $thumb) { $support = Get-PimSupportRestSession -TenantId $tid -SubscriptionId $SubscriptionId }

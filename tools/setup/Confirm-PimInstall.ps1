@@ -11,7 +11,9 @@
     ('verify-install'), and the guided / trial install (Install-PimManager 'verify-install').
 
     Lines (Get-PimInstallVerifyRows, _PimInstallVerify.ps1, decides each one):
-      superadmins         every SuperAdmin of the install is a SuperAdmin in pim.Settings['ManagerAccess']   REPAIRS (Set-PimManagerAccess)
+      superadmins         every SuperAdmin of the install is a SuperAdmin BOUND TO AN OBJECT ID in pim.Settings['ManagerAccess'];
+                          a name-only SuperAdmin entry is REPORTED by name. NO repair (never written by name -- the first
+                          SuperAdmin comes only through the one-time oid-bound hand-over, FIRST-SUPERADMIN-1)
       updater             the updater job exists, its PIM_UPDATE_RING reads back (+ the update-state record) REPAIRS (Deploy-PimUpdateJob)
       licence             the licence is registered (+ the install key stored / its claim queued) -- Pro, trial and MSP
       mailsender          a mail sender is set AND every sending identity (engine job + Manager) is InScope
@@ -523,15 +525,9 @@ function Invoke-CvRepair([string]$Id, $Fact) {
     $global:LASTEXITCODE = 0
     try {
         switch ($Id) {
-            'superadmins' {
-                $want = @($SuperAdmins); if (-not $want.Count) { return $false }
-                $json = '{"managerAccess":[' + (($want | ForEach-Object { '{"identity":"' + $_ + '","role":"SuperAdmin"}' }) -join ',') + ']}'
-                $a = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; AccessJson = $json }
-                if ($UseSignedInAccount) { $a['UseSignedInAccount'] = $true } else { $a['AdminAppId'] = $ClientId; $a['AdminCertThumbprint'] = $CertThumbprint }
-                Write-Host "    repair: SuperAdmin $($want -join ', ') -> pim.Settings['ManagerAccess'] (Set-PimManagerAccess)" -ForegroundColor Yellow
-                & (Join-Path $here 'Set-PimManagerAccess.ps1') @a | Out-Host
-                return (-not $LASTEXITCODE)
-            }
+            # FIRST-SUPERADMIN-1 (Invardia 2026-11-20): NO 'superadmins' repair. The old one wrote the named SuperAdmins BY NAME
+            # (Set-PimManagerAccess) -- a typed name as the binding. The first SuperAdmin comes only through the one-time,
+            # oid-bound hand-over; a missing or name-only SuperAdmin is reported, never written here.
             'updater' {
                 if ($NoUpdater -or -not "$AcrName".Trim() -or -not "$EnvName".Trim()) { return $false }
                 $img = "$(@(@((Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)).properties.template.containers) | Where-Object { $_ -and "$($_.name)" -ne 'signin-front' })[0].image)".Trim()   # the Manager, never [0] = the sign-in front
@@ -586,7 +582,10 @@ function Invoke-CvRepair([string]$Id, $Fact) {
 $resume = "$ResumeCommand".Trim()
 $fix = @{}
 $viaResume = { param($what) if ($resume) { "re-run the install's verify (it repairs $what): $resume" } else { '' } }
-$fix['superadmins'] = (@((& $viaResume 'this'), ".\tools\setup\Set-PimManagerAccess.ps1 -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -UseSignedInAccount -AccessJson '{`"managerAccess`":[{`"identity`":`"<upn>`",`"role`":`"SuperAdmin`"}]}'") | Where-Object { $_ }) -join "`n"
+# FIRST-SUPERADMIN-1: no name-only write as the fix -- the first SuperAdmin is the person who runs the install (their own
+# sign-in), or the administrator the customer named for an Invardia Support-app install (-FirstSuperAdminUpn, looked up in the
+# directory); a name-only entry is changed by a SuperAdmin in the Manager
+$fix['superadmins'] = (@('The first SuperAdmin is bound to an object id: the customer''s administrator runs the installer themselves (their own sign-in becomes the first SuperAdmin), or the Invardia Support app runs it again naming them with -FirstSuperAdminUpn. A name-only SuperAdmin entry is changed by a SuperAdmin in PIM Manager > Settings > Manager access & roles.', $(if ($resume) { "then re-run the install's verify: $resume" })) | Where-Object { $_ }) -join "`n"
 $fix['updater'] = (@((& $viaResume 'this'), ".\tools\setup\Deploy-PimUpdateJob.ps1 -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -EnvName $(if ($EnvName) { $EnvName } else { '<env>' }) -AcrName $(if ($AcrName) { $AcrName } else { '<acr>' }) -UseSignedInAccount$(if ($UpdateRing -ge 0) { " -UpdateRing $UpdateRing" })$(if ($UpdateSource) { " -UpdateSource $UpdateSource" })") | Where-Object { $_ }) -join "`n"
 $fix['licence'] = (@('PIM Manager > Settings > Licence: upload the .pimlicense file (the install key is claimed by the engine within minutes)', (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
 $mailCmd = New-PimMailSenderCommand -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -TickJobName $TickJobName -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn
@@ -632,7 +631,8 @@ foreach ($fk in @($fix.Keys)) { $fix[$fk] = Add-PimSupportScriptDocLines -Text $
 
 # Repair pass: a line that FAILS and has a repair is repaired once, then read again.
 $rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected) -LicenceLater ([bool]$LicenceLater)
-foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'superadmins', 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') -or
+# FIRST-SUPERADMIN-1: 'superadmins' is NOT in this list -- it is reported, never repaired (no write by name)
+foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') -or
                                     ($_.state -eq 'warning' -and $_.id -eq 'manager-rg-reader' -and [bool](Get-PimFactValue $facts[$_.id] 'readable')) })) {
     if ($r.id -eq 'sql-host-rule' -and -not [bool](Get-PimFactValue $facts[$r.id] 'readable')) { continue }
     # a line the STORE could not be read for is never "repaired": what is there is unknown, and a write (Set-PimManagerAccess,

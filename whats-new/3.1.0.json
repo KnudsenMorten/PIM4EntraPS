@@ -5,8 +5,8 @@
   "summary": "PIM Manager 3.1 runs on long-term supported Microsoft software and brings together the improvements of the 3.0 series.",
   "new": [
     {
-      "title": "Runs on supported .NET 10 and PowerShell 7.6",
-      "text": "PIM Manager runs on .NET 10 LTS and PowerShell 7.6 LTS on Microsoft's current image, supported to November 2028. Nothing changes for you."
+      "title": "Runs on Microsoft's supported platform",
+      "text": "PIM Manager runs on Microsoft's current long-term supported platform, supported to November 2028. Nothing changes for you."
     },
     {
       "title": "Invardia support link",

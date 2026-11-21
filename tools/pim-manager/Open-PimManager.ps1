@@ -588,6 +588,9 @@ if (Test-Path -LiteralPath $_pendRemLib) { . $_pendRemLib }
 # default (Get-PimSettingCustomerDelta) -- so a later change of a shipped default reaches this install. Loaded
 # UNCONDITIONALLY: the page saves below call it.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SettingDelta.ps1')
+# SECRETS-WRITE (sealed hand-over): POST /api/settings/mail/relay-password seals the relay password to this installation's
+# published key and stores ONLY the sealed copy; the updater writes Key Vault. The web identity holds no Key Vault right.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-SecretHandover.ps1')
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -1341,61 +1344,13 @@ function Get-PimManagerRecordedActor {
     return ("{0} (as {1})" -f $tag, "$Who".Trim())
 }
 
-function Get-PimManagerDelegatedCap {
-    <#
-      PURE. REQ-Y (operator 2026-09-20: "fix req-y 3 items"). What a RESOLVED Manager role becomes when the Pro
-      feature 'access.delegated' -- delegated administration ceilings -- is not licensed for this environment.
-
-      🔴 THE HOLE THIS CLOSES. 'Delegated' IS that Pro feature: a Delegated user is precisely "a Manager user
-      limited by tier / level / service / scope with named capabilities". POST /api/manager-access already refused
-      to CREATE one without a licence (Test-PimManagerProFeature -Key 'access.delegated', 403), but nothing checked
-      when a role was RESOLVED -- so both remaining doors stood open:
-        * env PIM_DelegatedAdmins granted Delegated with no licence check at all (the reported gap), and
-        * an entry already stored in pim.Settings['ManagerAccess'] -- written before the gate shipped, or restored
-          from a backup -- kept resolving to Delegated forever.
-      A write-only gate on a role that outlives the write is not a gate. This caps at RESOLUTION, so both sources
-      are covered by one rule and neither can drift from the other.
-
-      🔒 DOWNWARD ONLY. The cap is Reader -- never Admin -- so an unlicensed environment loses the ceiling feature
-      and grants NO extra authority. That is the same shape as the PIM_HostedDefaultRole cap a few lines below:
-      a role this environment may not express is capped, loudly, and the source string says why.
-      Returns @{ role; source; capped }.
-    #>
-    param([AllowEmptyString()][string]$Role, [AllowEmptyString()][string]$Source, [bool]$Licensed, [AllowEmptyString()][string]$Reason)
-    $r = "$Role".Trim()
-    if ($r -ne 'Delegated' -or $Licensed) { return @{ role = $r; source = "$Source"; capped = $false } }
-    $why = if ("$Reason".Trim()) { "$Reason".Trim() } else { 'no Pro licence covers delegated administration' }
-    return @{ role = 'Reader'; source = "$Source (Delegated capped at Reader -- $why)"; capped = $true }
-}
-
-function Limit-PimManagerRoleByLicence {
-    <#
-      REQ-Y. The LIVE half of Get-PimManagerDelegatedCap: verify 'access.delegated' for this environment and apply
-      the cap to one resolved @{ role; identity; source }. A no-op for every role but Delegated.
-      🪤 THE FAIL DIRECTION IS COPIED FROM Test-PimManagerProFeature ON PURPOSE, because the two gates must agree:
-      the verifier NOT LOADED in this process = allow (a Manager without the licence module cannot verify anything,
-      and locking it out would be a worse failure than the one being prevented); the verifier present but THROWING
-      = refuse. A resolution gate that allowed where the write gate refuses would hand out a role the same session
-      is then refused for using.
-    #>
-    param([Parameter(Mandatory)][hashtable]$Resolved)
-    if ("$($Resolved.role)".Trim() -ne 'Delegated') { return $Resolved }
-    if (-not (Get-Command Test-PimFeatureProLicence -ErrorAction SilentlyContinue)) { return $Resolved }
-    $srv = "$($global:PIM_SqlServer)".Trim(); if (-not $srv) { $srv = "$env:PIM_SqlServer".Trim() }
-    $pl = $null
-    try { $pl = Test-PimFeatureProLicence -Key 'access.delegated' -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv } catch { $pl = $null }
-    $licensed = [bool]($pl -and $pl.ok)
-    $reason   = if ($pl) { "$($pl.reason)" } else { 'the licence check failed' }
-    $cap = Get-PimManagerDelegatedCap -Role "$($Resolved.role)" -Source "$($Resolved.source)" -Licensed $licensed -Reason $reason
-    if (-not $cap.capped) { return $Resolved }
-    # Once per process: this is a deployment fact, not a per-request event, and one line per gate check would bury it.
-    if (-not $script:PimDelegatedLicenceWarned) {
-        $script:PimDelegatedLicenceWarned = $true
-        Write-Warning ("  [rbac] Delegated administration is a Pro feature and is NOT licensed here -- every Delegated " +
-                       "identity resolves as Reader until a licence is registered ($($cap.source)). Contact info@invardia.com.")
-    }
-    return @{ role = $cap.role; identity = $Resolved.identity; source = $cap.source }
-}
+# G1 (Invardia 2026-11-20 decided (b); owner 2026-11-04 ~12:10Z, framework REQUIREMENTS 113-116 "the auth part (sign-in,
+# identities, roles and per-person scoped roles ...)" is core in BOTH editions). The REQ-Y licence cap that resolved an
+# unlicensed 'Delegated' as Reader (Get-PimManagerDelegatedCap / Limit-PimManagerRoleByLicence) is GONE: a Delegated person
+# is Delegated in Community and Pro alike. What made that safe to remove is unchanged and is the security control: the
+# CEILINGS are enforced server-side on every write path, never by edition -- the commit gate (Test-PimDelegatedWrite, gate
+# 'delegated', in Invoke-PimManagerCsvPut) and the stage gate ('not-yours', PUT /api/pending) refuse any row outside the
+# person's tier, level, service and Azure-scope ceilings, and neither has ever read the licence.
 
 # ---------------------------------------------------------------------------
 # §98 DEMO MODE (owner 2026-10-07). The pure rules live in engine/_shared/PIM-DemoMode.ps1; these are the live
@@ -1621,7 +1576,14 @@ function Get-PimManagerRole {
             $reqOid = if ($script:PimHosted) { "$script:CurrentRequestOid" } else { '' }
             foreach ($e in $entries) {
                 if (-not "$($e.identity)".Trim()) { continue }
-                $mt = Test-PimManagerAccessEntryMatch -Entry $e -Identity $whoLc -ObjectId $reqOid
+                # FIRST-SUPERADMIN-1 (C): the installer-seeded first SuperAdmin matches a HOSTED request on its verified oid
+                # ONLY -- a request without an oid (an edge that sent none) gets nothing from it, whoever's name it carries.
+                $reqOidOnly = [bool]($script:PimHosted -and (Get-Command Test-PimAccessEntryRequiresObjectId -ErrorAction SilentlyContinue) -and (Test-PimAccessEntryRequiresObjectId -Entry $e))
+                $mt = Test-PimManagerAccessEntryMatch -Entry $e -Identity $whoLc -ObjectId $reqOid -RequireObjectId:$reqOidOnly
+                if ($mt.needsObjectId) {
+                    Write-Warning ("  [rbac] '{0}' matches the installer-seeded first SuperAdmin by name only -- NOT granted: that entry needs the sign-in's object id, and this request carries none." -f $who)
+                    continue
+                }
                 if ($mt.conflict) {
                     Write-Warning ("  [rbac] '{0}' matches a ManagerAccess entry by name, but that entry belongs to a different Entra object -- NOT granted (a renamed or re-used sign-in name)." -f $who)
                     continue
@@ -1629,9 +1591,9 @@ function Get-PimManagerRole {
                 if ($mt.match) {
                     $r = "$($e.role)".Trim()
                     if ($r -notin @('Reader','Admin','SuperAdmin','Delegated')) { $r = 'Reader' }
-                    # REQ-Y: a STORED Delegated entry is capped at Reader without a Pro licence, exactly as the env
-                    # var below is -- the write gate on POST /api/manager-access cannot reach a row written earlier.
-                    $__rr = Limit-PimManagerRoleByLicence @{ role = $r; identity = $who; source = 'sql ManagerAccess' }
+                    # G1 (2026-11-20): a stored Delegated entry is Delegated in both editions -- no licence cap (the
+                    # ceilings are enforced on every write, Get-PimManagerDelegatedContext + Test-PimDelegatedWrite).
+                    $__rr = @{ role = $r; identity = $who; source = 'sql ManagerAccess' }
                     if ($__rr -is [System.Collections.IDictionary]) { $__rr['matchedBy'] = "$($mt.via)" }
                     return $__rr
                 }
@@ -1646,9 +1608,8 @@ function Get-PimManagerRole {
     # Delegated (workload owner): sees ONLY the groups they own. Identity match here;
     # the data layer (Read-PimRows) scopes rows to groups whose Owners include them.
     $delegs = @("$env:PIM_DelegatedAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-    # REQ-Y: capped at Reader without a Pro licence for 'access.delegated' -- this env var was the one door into
-    # delegated administration that no licence check covered.
-    if ($delegs -contains $whoLc) { return (Limit-PimManagerRoleByLicence @{ role = 'Delegated'; identity = $who; source = 'env PIM_DelegatedAdmins' }) }
+    # G1 (2026-11-20): Delegated in both editions -- no licence cap; the ceilings are enforced on every write.
+    if ($delegs -contains $whoLc) { return @{ role = 'Delegated'; identity = $who; source = 'env PIM_DelegatedAdmins' } }
     if ("$env:PIM_HostedDefaultRole".Trim()) {
         # 🔴 IMP-49 m: a DEFAULT role is what every signed-in tenant user (guests included, SEC-44) gets
         # without being named anywhere. It used to accept Admin/SuperAdmin, which turned one env var into
@@ -1714,12 +1675,17 @@ function Get-PimManagerAccessBootstrapState {
         }
     } catch { $entries = 0 }
     $envAdmins = [bool]("$env:PIM_SuperAdmins".Trim() -or "$env:PIM_Admins".Trim())
+    # FIRST-SUPERADMIN-1 (C): this is a STATE, never a grant -- with no SuperAdmin NOBODY gets a role by signing in first
+    # (Get-PimManagerRole has no bootstrap / first-sign-in-wins branch; the Manager never writes ManagerAccess for a caller
+    # who is not already a SuperAdmin). The first SuperAdmin is the person who installed, bound to their object id.
     [ordered]@{
         sqlEntries = [int]$entries
         envAdmins  = $envAdmins
         configured = [bool]($entries -gt 0 -or $envAdmins)
-        fixHint    = ('No Manager access is configured yet, so every sign-in is a Reader and nobody can save a change. ' +
-                      'Grant the first SuperAdmin with tools/setup/Set-PimManagerAccess.ps1 ' +
+        firstSignInGrants = $false
+        fixHint    = ('No Manager access is configured yet, so every sign-in is a Reader and nobody can save a change -- signing in first gives nobody a role. ' +
+                      'The first SuperAdmin is the person who installed PIM Manager: that person re-runs the installer to issue a fresh first-SuperAdmin grant. ' +
+                      'An operator can also grant one with tools/setup/Set-PimManagerAccess.ps1 ' +
                       '(stored in SQL, pim.Settings ManagerAccess), or set PIM_SuperAdmins to your identity and restart the Manager.')
     }
 }
@@ -1799,8 +1765,8 @@ function Get-PimManagerDelegatedContext {
     <#
       §79.9 THE DELEGATED MODEL, write side (engine/portal-admins/PIM-DelegatedModel.ps1). For a caller BELOW Admin: are they a
       delegated administrator, and under which profile? Delegated = ManagerAccess role 'Delegated', or a Reader who OWNS a
-      department (derived; operator decision 2026-09-25 "derived, capped at level 3"). Pro ('access.delegated'): without the
-      licence nobody is delegated (Limit-PimManagerRoleByLicence caps it). Fresh per call (no cache): a definition committed a
+      department (derived; operator decision 2026-09-25 "derived, capped at level 3"). G1 (2026-11-20): the same in Community
+      and Pro -- no licence decides who is delegated or which ceiling applies. Fresh per call (no cache): a definition committed a
       moment ago changes what the caller owns. Returns @{ isDelegated; profile; ownership; identity; source; reason }.
     #>
     $out = @{ isDelegated = $false; profile = $null; ownership = $null; identity = ''; source = ''; reason = '' }
@@ -1824,8 +1790,6 @@ function Get-PimManagerDelegatedContext {
     $own = Get-PimDelegatedOwnership -Identity $out.identity -Departments $deps -Definitions @($defs.ToArray()) -Admins $adms -AzureBindings $azb -AdminAssignments $amb
     if ($r -eq 'Reader') {
         if (-not $own.departments.Count) { $out.reason = 'a Reader who owns no department'; return $out }
-        $capped = $null; try { $capped = Limit-PimManagerRoleByLicence @{ role = 'Delegated'; identity = $out.identity; source = 'department owner (derived)' } } catch { $capped = $null }
-        if (-not $capped -or "$($capped.role)" -ne 'Delegated') { $out.reason = 'department owner, but delegated administration needs a Pro licence'; return $out }
         $out.source = 'department owner (derived)'
     } elseif ($r -eq 'Delegated') { $out.source = 'ManagerAccess Delegated' }
     else { $out.reason = "role $r"; return $out }
@@ -5452,6 +5416,8 @@ function Get-PimAlertingConfig {
     $digestRecipients = @(); $tierReportRecipients = @()
     $events = @{}
     foreach ($e in $script:PimAlertEventCatalog) { $events[$e] = $true }   # default: all events ON
+    # 100.40 (f): the PRODUCT default per event comes from one table (PIM-SettingDefaults.ps1), also with no row stored
+    if (Get-Command Get-PimAlertEventDefaults -ErrorAction SilentlyContinue) { $evDef = Get-PimAlertEventDefaults; foreach ($e in $script:PimAlertEventCatalog) { if ($evDef.Contains($e)) { $events[$e] = [bool]$evDef[$e] } } }
     if ($raw) {
         $r = $raw
         if ($r -is [string]) { try { $r = $r | ConvertFrom-Json } catch { $r = $null } }
@@ -5471,6 +5437,9 @@ function Get-PimAlertingConfig {
             $trProp = & $getProp $r 'tierReportRecipients'
             if ($trProp) { $tierReportRecipients = @($trProp | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
             $evProp = & $getProp $r 'events'
+            # 100.40 (f) / framework 12.16: the switches = the product default with what a PERSON switched laid over it
+            # (an old whole row by the migration rule) -- a changed product default reaches a saved page.
+            if (Get-Command Get-PimSettingEffective -ErrorAction SilentlyContinue) { try { $evProp = (Get-PimSettingEffective -Name 'Alerting' -Stored $r)['events'] } catch { } }
             if ($evProp) {
                 foreach ($e in $script:PimAlertEventCatalog) {
                     $val = $null
@@ -5579,7 +5548,15 @@ function Set-PimAlertingConfig {
     $kind = ''
     if (Get-Command Resolve-PimWebhookKind -ErrorAction SilentlyContinue) { $kind = Resolve-PimWebhookKind -Url $url -Kind $WebhookKind }
     else { $kind = "$WebhookKind".Trim().ToLowerInvariant(); if ($kind -ne 'teams' -and $kind -ne 'generic') { $kind = 'generic' } }
-    Set-PimManagerSetting -Name 'Alerting' -Value ([ordered]@{ recipients = @($clean); digestRecipients = @($digest); tierReportRecipients = @($tier); events = $ev; webhookUrl = $url; webhookKind = $kind })
+    $full = [ordered]@{ recipients = @($clean); digestRecipients = @($digest); tierReportRecipients = @($tier); events = $ev; webhookUrl = $url; webhookKind = $kind }
+    # 100.40 (f) / framework 12.16: store only what a PERSON set (an event switch equal to the product default is not
+    # stored, so a later default change reaches this install; a switch the person had set stays theirs). A field only the
+    # stored row has (e.g. throttledAfterRuns / throttledAfterHours) is kept instead of dropped.
+    if (Get-Command ConvertTo-PimSettingStoredValue -ErrorAction SilentlyContinue) {
+        $priorRaw = $null; try { $priorRaw = Get-PimManagerSetting -Name 'Alerting' } catch { $priorRaw = $null }
+        $full = ConvertTo-PimSettingStoredValue -Name 'Alerting' -Value $full -Stored $priorRaw
+    }
+    Set-PimManagerSetting -Name 'Alerting' -Value $full
     return (Get-PimAlertingConfig)
 }
 
@@ -5817,8 +5794,15 @@ function Save-PimManagerMailNotifications {
         foreach ($n in $names) { $m["$n"] = Get-PimMailPrefField $Reports "$n" }
         $rep = $m
     }
-    $norm = ConvertTo-PimMailNotificationPrefs ([ordered]@{ recipients = $rec; reports = $rep })
-    Set-PimManagerSetting -Name 'MailNotifications' -Value $norm
+    $norm = ConvertTo-PimMailNotificationPrefs ([ordered]@{ recipients = $rec; reports = $rep }) -NotStored   # 100.40 (f): page values are the person's
+    # 100.40 (f) / framework 12.16: store only what a PERSON set -- per recipient its address + the switches / audience /
+    # floor that differ from the product default, per report an attach that is not the default -- so a later default change
+    # reaches recipients whose preferences were saved. The answer stays the full (normalised) preference.
+    $store = $norm
+    if ((Get-Command ConvertTo-PimSettingStoredValue -ErrorAction SilentlyContinue) -and (Get-Command Get-PimMailNotificationRawFromStore -ErrorAction SilentlyContinue)) {
+        $store = ConvertTo-PimSettingStoredValue -Name 'MailNotifications' -Value $norm -Stored (Get-PimMailNotificationRawFromStore)
+    }
+    Set-PimManagerSetting -Name 'MailNotifications' -Value $store
     return $norm
 }
 
@@ -6672,7 +6656,88 @@ function Get-PimManagerMailState {
         }
         # MAIL CHECK: every prerequisite as its own line (Get Started > Mail sender, the Home banner). Mail is optional.
         checks = $checks
+        # SECRETS-WRITE (sealed hand-over): the status of the relay password hand-over + whether THIS caller may set it
+        relayPassword = $(try { Get-PimManagerRelayPasswordState } catch { [ordered]@{ status = 'unknown'; line = 'The relay password status could not be read.'; canSet = $false } })
     }
+}
+
+function Get-PimManagerRelayPasswordState {
+    <#
+      SECRETS-WRITE (framework 12.25, decision Q2 a): what the page shows for the relay password hand-over -- from pim.Settings
+      SecretHandoverPublicKey / SecretHandoverPending / SecretHandoverResult (names, times and plain reasons only; never a value,
+      never the sealed copy). @{ status = no-key | none | pending | written | refused | failed | missing | unknown; line;
+      pendingSinceUtc; lastUtc; secret; canSet (SuperAdmin) }. -GetSetting { param($Name) <raw JSON or $null> } is a test seam.
+    #>
+    param([scriptblock]$GetSetting = { param($n) Get-PimSqlSettingRaw -ConnectionString $script:PimSqlCs -Name $n })
+    $rd = { param($n) $raw = & $GetSetting $n; if (-not "$raw".Trim()) { return $null }; try { return ("$raw" | ConvertFrom-Json) } catch { return $null } }
+    $canSet = $false; try { $canSet = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') } catch { $canSet = $false }
+    $pub = & $rd (Get-PimShoPublicKeySetting); $pend = & $rd (Get-PimShoPendingSetting); $res = & $rd (Get-PimShoResultSetting)
+    $out = [ordered]@{ status = 'none'; line = ''; pendingSinceUtc = ''; lastUtc = ''; secret = ''; canSet = $canSet }
+    $ts = { param($x) if ($x -is [datetime]) { $x.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") } else { "$x" } }   # ConvertFrom-Json turns ISO text into [datetime]
+    if ($res) { $res.utc = (& $ts $res.utc); $out.lastUtc = "$($res.utc)"; $out.secret = "$($res.secret)" }
+    if ($pend) {
+        $out.status = 'pending'; $out.pendingSinceUtc = (& $ts $pend.createdUtc); $out.secret = "$($pend.secret)"
+        $out.line = "Handed over sealed$(if ($out.pendingSinceUtc) { " at $($out.pendingSinceUtc)" }); waiting for the installation's updater to put it in Key Vault (its next run -- Update now starts it)."
+        if ($res -and "$($res.state)" -eq 'failed') { $out.line += " The last try did not finish: $($res.detail)" }
+        return $out
+    }
+    if (-not $pub) { $out.status = 'no-key'; $out.line = 'This installation has not published its hand-over key yet: the updater does that on its next run (Update now starts it). Until then the password cannot be set here.'; $out.canSet = $false; return $out }
+    if ($res) {
+        $out.status = "$($res.state)"
+        $out.line = switch ("$($res.state)") {
+            'written' { "Written into Key Vault ($($res.vault) / $($res.secret)) by the updater at $($res.utc)$(if ($res.engineCanRead -eq $false) { ' -- the engine may not read it yet: give its identity Key Vault Secrets User on that secret' })." }
+            'refused' { "The last hand-over was refused at $($res.utc): $($res.detail). The old password is kept -- set it again." }
+            default   { "The last hand-over ended '$($res.state)' at $($res.utc): $($res.detail)" }
+        }
+        return $out
+    }
+    $out.line = 'The relay password has not been handed over from this page yet.'
+    return $out
+}
+
+function Invoke-PimManagerRelayPasswordSeal {
+    <#
+      SECRETS-WRITE (framework 12.25, decision Q2 a; coordinator review 2026-11-20: a person must need neither a Key Vault right
+      NOR the SQL admin group). POST /api/settings/mail/relay-password, SuperAdmin only: the password from the body is SEALED
+      to this installation's published key (Invoke-PimShoSubmit, engine/_shared/PIM-SecretHandover.ps1 -- the same code the
+      Support app's script uses) and ONLY the sealed copy is stored (pim.Settings SecretHandoverPending). The plain value is
+      never stored, logged, audited or answered, and is dropped right after sealing. The web identity writes no Key Vault
+      secret (it writes pim.Settings, as for every setting). Returns @{ status; body }. Seams: -GetSetting / -SetSetting
+      (raw JSON) and -Audit { param($Action, $Target, $After, $Result) } for tests.
+    #>
+    param([AllowNull()]$Body,
+          [scriptblock]$GetSetting = { param($n) Get-PimSqlSettingRaw -ConnectionString $script:PimSqlCs -Name $n },
+          [scriptblock]$SetSetting = { param($n, $j) Set-PimSqlSetting -ConnectionString $script:PimSqlCs -Name $n -ValueJson $j },
+          [scriptblock]$Audit = { param($a, $t, $af, $r) Write-PimManagerAuditEvent -Action $a -Target $t -After $af -Result $r },
+          [string]$Reader = '')
+    if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { return @{ status = 403; body = [ordered]@{ ok = $false; error = 'SuperAdmin role required to set the relay password.' } } }
+    $pw = ''
+    if ($null -ne $Body) {
+        if ($Body -is [System.Collections.IDictionary]) { if ($Body.Contains('password')) { $pw = "$($Body['password'])" } }
+        elseif ($Body.PSObject.Properties['password']) { $pw = "$($Body.password)" }
+    }
+    try {
+        if (-not $pw) { return @{ status = 400; body = [ordered]@{ ok = $false; error = 'Enter the relay password.' } } }
+        if ($pw.Length -gt 1024) { return @{ status = 400; body = [ordered]@{ ok = $false; error = 'The password is longer than 1024 characters.' } } }
+        # where it goes: the relay record's vault + secret name; the installation's own vault when the record names none
+        $relay = $null; try { $rr = & $GetSetting 'SmtpRelay'; if ("$rr".Trim()) { $relay = "$rr" | ConvertFrom-Json } } catch { $relay = $null }
+        $pubRec = $null; try { $pr = & $GetSetting (Get-PimShoPublicKeySetting); if ("$pr".Trim()) { $pubRec = "$pr" | ConvertFrom-Json } } catch { $pubRec = $null }
+        $vault = "$(if ($relay -and "$($relay.vaultName)".Trim()) { $relay.vaultName } elseif ($pubRec) { $pubRec.vault } else { '' })".Trim()
+        $secret = "$(if ($relay -and "$($relay.secretName)".Trim()) { $relay.secretName } else { Get-PimSmtpRelayDefaultSecretName })".Trim()
+        if (-not $vault) { return @{ status = 409; body = [ordered]@{ ok = $false; error = "This installation has not published its hand-over key yet: the updater does that on its next run (Update now starts it)." } } }
+        if (-not "$Reader".Trim()) { try { $Reader = "$((Get-PimManagerMailState -NoChecks).setup.tickObjectId)".Trim() } catch { $Reader = '' } }
+        $by = ''; try { $by = "$((Get-PimManagerRole).identity)".Trim() } catch { $by = '' }
+        $sub = $null
+        try { $sub = Invoke-PimShoSubmit -GetSetting $GetSetting -SetSetting $SetSetting -Kind 'smtp-relay-password' -VaultName $vault -SecretName $secret -Value $pw -Reader $Reader -By $by }
+        catch { $sub = @{ ok = $false; reason = "not stored: $(Protect-PimShoText -Text "$($_.Exception.Message)" -Values @($pw))"; keyId = '' } }
+        $pw = $null
+        $after = [ordered]@{ vault = $vault; secret = $secret; keyId = "$($sub.keyId)"; replaced = [bool]$sub.replaced; sealed = [bool]$sub.written }
+        try { & $Audit 'settings.mail.relay-password.sealed' (Get-PimShoPendingSetting) $after $(if ($sub.ok) { 'ok' } else { 'refused' }) } catch { }
+        if (-not $sub.ok) { return @{ status = 409; body = [ordered]@{ ok = $false; error = "Not handed over: $($sub.reason)" } } }
+        $state = $null; try { $state = Get-PimManagerRelayPasswordState -GetSetting $GetSetting } catch { $state = $null }
+        return @{ status = 200; body = [ordered]@{ ok = $true; keyId = "$($sub.keyId)"; vault = $vault; secret = $secret; relayPassword = $state
+            note = "Handed over sealed to this installation (key $($sub.keyId)). The updater puts it in Key Vault on its next run -- Update now starts it; then send a test mail." } }
+    } finally { $pw = $null; if ($null -ne $Body) { try { if ($Body -is [System.Collections.IDictionary]) { $Body['password'] = $null } elseif ($Body.PSObject.Properties['password']) { $Body.password = $null } } catch { } } }
 }
 
 function Get-PimManagerSmtpPasswordRefusal {
@@ -6685,7 +6750,7 @@ function Get-PimManagerSmtpPasswordRefusal {
     param([AllowNull()]$Setup, [AllowNull()]$Smtp)
     $cmd = @(); try { $cmd = @(Get-PimMailSetupCommand -Kind smtpPassword -Setup $Setup -Smtp $Smtp) } catch { $cmd = @() }
     return [ordered]@{ stored = $false
-        reason = 'PIM Manager does not store the password itself. Run the command below (it signs you in with your browser and puts the password in Key Vault), then press Send test mail: the engine checks that it can read it.'
+        reason = 'PIM Manager does not store the password with the mail settings. A SuperAdmin sets it with Set relay password (Settings > Mail & alerting, SMTP relay): it is sealed to this installation and the updater puts it in Key Vault on its next run -- Update now starts it. Then press Send test mail: the engine checks that it can read it.'
         command = ($cmd -join "`n") }
 }
 
@@ -13482,7 +13547,7 @@ function Get-PimManagerEnvironmentReport {
             $rows.Add([ordered]@{ name = 'Second approver for pending changes'; value = $(if ($ps) { $ps } else { 'default' }); why = 'who must approve a commit besides the person who staged it' })
             try { $dm = Get-PimManagerDemoConfig; $rows.Add([ordered]@{ name = 'Demo mode'; value = $(if ($dm.on) { 'on' } else { 'off' }); why = 'on = a demo group sees the Manager read-only' }) } catch { }
             try { $pp = Get-PimManagerEmergencyPassphraseStatus; $rows.Add([ordered]@{ name = 'Emergency override passphrase'; value = $(if ($pp.configured) { "configured ($($pp.source))" } else { 'not configured' }); why = 'the passphrase that unlocks the time-boxed emergency override (the value is never shown)' }) } catch { }
-            try { $ec = Get-PimManagerSetting -Name 'EmailControls'; $ks = Get-PimFeatureCatalogValue -Object $ec -Key 'killSwitch'; $rd = Get-PimFeatureCatalogValue -Object $ec -Key 'redirectAllTo'
+            try { $ec = Get-PimManagerSetting -Name 'EmailControls'; $ks = Get-PimFeatureCatalogValue -Object $ec -Key 'killSwitch'; if ($null -eq $ks -and (Get-Command Get-PimSettingEffective -ErrorAction SilentlyContinue)) { $ks = (Get-PimSettingEffective -Name 'EmailControls' -Stored $ec)['killSwitch'] }; $rd = Get-PimFeatureCatalogValue -Object $ec -Key 'redirectAllTo'
                   $rows.Add([ordered]@{ name = 'Mail kill switch / redirect'; value = "kill switch $(if ($ks) { 'ON' } else { 'off' })$(if ("$rd".Trim()) { ", all mail redirected to $rd" })"; why = 'stops or redirects every notification mail' }) } catch { }
             try { $am = Get-PimAuditRetentionMonths -ConnectionString (Get-PimManagerSettingCs); $rows.Add([ordered]@{ name = 'Audit retention'; value = $(if ([int]$am -gt 0) { "$am months" } else { 'keep every event' }); why = 'how long the audit trail is kept' }) } catch { }
             try { $lr = [bool](Test-PimFeatureEnabled -Key 'licence.autoRequest'); $rows.Add([ordered]@{ name = 'Licence auto-request'; value = $(if ($lr) { 'on' } else { 'off' }); why = 'requests the licence from Invardia automatically' }) } catch { }
@@ -19475,6 +19540,22 @@ function Handle-Request {
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
         }
+        # SECRETS-WRITE (sealed hand-over, framework 12.25 decision Q2 a):
+        #   POST /api/settings/mail/relay-password  (SuperAdmin) { password } -> SEALED to this installation's published key,
+        #                                             ONLY the sealed copy stored (pim.Settings SecretHandoverPending); the
+        #                                             updater writes Key Vault. The value is never stored, logged, audited or
+        #                                             answered. 403 below SuperAdmin; 409 when no key is published yet.
+        if ($path -eq '/api/settings/mail/relay-password' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to set the relay password.' }; return 403 }
+            $rpBody = Read-RequestJson -Request $req
+            $rpRes = $null
+            try { $rpRes = Invoke-PimManagerRelayPasswordSeal -Body $rpBody }
+            catch { $rpRes = @{ status = 500; body = @{ ok = $false; error = 'Not handed over: the password could not be sealed or stored.' } } }
+            finally { $rpBody = $null }
+            Write-JsonResponse -Response $resp -Status $rpRes.status -Body $rpRes.body
+            return [int]$rpRes.status
+        }
         # MAIL-NAMING (100.14, owner 2026-10-09: "the only way i could get it to work was to figure out the name and choose
         # use existing mailbox ... maybe 2 steps - create + validate"): Get Started / Settings > Mail sender, shared mailbox.
         #   PUT  /api/settings/mail/mailbox      (Admin) step 1 { name, domain, displayName, existing } -> pim.Settings
@@ -20373,6 +20454,8 @@ function Handle-Request {
             try {
                 $raw = $null; try { $raw = Get-PimManagerSetting -Name 'EmailControls' } catch {}
                 $kill = $false; $redirect = ''; $allow = @()
+                # 100.40 (f): the kill switch = the product default unless a person set it (an old whole row by the migration rule)
+                if (Get-Command Get-PimSettingEffective -ErrorAction SilentlyContinue) { try { $kill = [bool](Get-PimSettingEffective -Name 'EmailControls' -Stored $raw)['killSwitch'] } catch { } }
                 if ($raw) {
                     $kv = if ($raw -is [System.Collections.IDictionary]) { $raw } else { $raw }
                     $k = Get-PimFeatureCatalogValue -Object $kv -Key 'killSwitch'; if ($null -ne $k) { $kill = [bool]$k }
@@ -20398,7 +20481,14 @@ function Handle-Request {
                 $allowRaw = Get-PimFeatureCatalogValue -Object $payload -Key 'allowlist'
                 $allow = @(); if ($allowRaw) { $allow = @($allowRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
                 $val = [ordered]@{ killSwitch=$kill; redirectAllTo=$redirect; allowlist=@($allow) }
-                Set-PimManagerSetting -Name 'EmailControls' -Value $val
+                # 100.40 (f) / framework 12.16: store only what a PERSON set (the kill switch only when it is not the product
+                # default, or was switched by a person before); redirect + allowlist are the person's data and always stored.
+                $ecStore = $val
+                if (Get-Command ConvertTo-PimSettingStoredValue -ErrorAction SilentlyContinue) {
+                    $ecPrior = $null; try { $ecPrior = Get-PimManagerSetting -Name 'EmailControls' } catch { $ecPrior = $null }
+                    $ecStore = ConvertTo-PimSettingStoredValue -Name 'EmailControls' -Value $val -Stored $ecPrior
+                }
+                Set-PimManagerSetting -Name 'EmailControls' -Value $ecStore
                 # Mirror to the globals the notify path reads live.
                 $global:PIM_MailKillSwitch = $kill
                 $global:PIM_MailAllowlist = @($allow)
@@ -21892,21 +21982,14 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $lsaMsg; gate = 'last-superadmin' }
                 return 400
             }
-            # REQ-Y: delegated administration (a SCOPED Manager user) is Pro (hard). Only a NEW or CHANGED 'Delegated'
-            # grant is refused without a licence: every Reader / Admin / SuperAdmin edit, removing a Delegated user, and
-            # re-saving an existing one unchanged all stay free -- nobody is locked out of their own access.
-            $prevDelegated = @{}
+            # G1 (Invardia 2026-11-20, owner 2026-11-04 core rule): granting 'Delegated' (a SCOPED Manager user) is core in
+            # BOTH editions -- no licence check here any more (it was REQ-Y's Pro gate). The ceilings are enforced on every write.
             $prevEntries = @()
             try {
                 $prevMap = Get-PimManagerSetting -Name 'ManagerAccess'
                 if ($prevMap -is [string] -and "$prevMap".Trim()) { $prevMap = "$prevMap" | ConvertFrom-Json }
                 $prevEntries = @(if ($prevMap -and $prevMap.PSObject.Properties['managerAccess']) { $prevMap.managerAccess } else { @() })
-                foreach ($pe in $prevEntries) {
-                    if ("$($pe.role)".Trim() -eq 'Delegated') { $prevDelegated["$($pe.identity)".Trim().ToLowerInvariant()] = $true }
-                }
             } catch { }
-            $newDelegated = @($clean | Where-Object { $_.role -eq 'Delegated' -and -not $prevDelegated.ContainsKey("$($_.identity)".ToLowerInvariant()) })
-            if ($newDelegated.Count -and -not (Test-PimManagerProFeature -Key 'access.delegated' -Response $resp)) { return 403 }
             # SEC-90: the page sends { identity, role } only -- keep the object id the Manager bound to each identity (never one
             # from the browser); new identities are bound from the directory right after the save.
             $arr = @(Copy-PimManagerAccessObjectIds -Before $prevEntries -After @($clean.ToArray()) -DropUnknown | ForEach-Object { [pscustomobject]$_ })

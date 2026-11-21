@@ -78,8 +78,10 @@ $script:PimProEditionName       = 'Pro'
 # CORE SECURITY (framework §0 "CORE SECURITY IS THE SAME IN PRO AND COMMUNITY", owner 2026-11-04): FOUR-EYES (the second
 # approver, 'MakerChecker') and AUDIT (the evidence / audit export, 'EvidenceExport') are core in BOTH editions -- no longer
 # Pro names. A licence that still lists them is harmless (a free feature needs no licence).
+# G1 (Invardia 2026-11-20, owner 2026-11-04 core rule): DELEGATED ADMINISTRATION CEILINGS ('PortalAdmins') -- per-person
+# scoped roles -- are core in BOTH editions too; no longer a Pro name. A licence that still lists it is harmless.
 $script:PimProFeatureCatalog = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'HybridAd', 'ManagementReport', 'McpServer', 'MspFanout',
-    'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
+    'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 # PRO-FEATURES-MISSING (PIM REQUIREMENTS §100.32, owner 2026-10-09: "i cannot use any of the features" on a Pro licence issued
 # before ConsultantLifecycle / Rfa / BrokerApi / McpServer existed). The SINGLE-TENANT Pro features: the catalog's scope='single'
 # Pro names (Get-PimCatalogProFeatureNames -Scope single). Framework §12.6a LICENCE-FEATURES (owner 2026-10-09): the licence
@@ -89,7 +91,7 @@ $script:PimProFeatureCatalog = @('AccessReviews', 'ApiApplications', 'ApiReferen
 # (sku Pro-MSP, or a licence naming MspFanout / '*' as every MSP licence issued so far does). Must equal the catalog's
 # single-tenant list (tests/Test-PimProEnterpriseFeatures.ps1).
 $script:PimProSingleTenantFeatures = @('AccessReviews', 'ApiApplications', 'ApiReference', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'HybridAd', 'ManagementReport', 'McpServer',
-    'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
+    'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null
 $script:PimLicenseWarned = @{}

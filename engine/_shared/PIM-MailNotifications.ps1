@@ -18,6 +18,8 @@
   ASCII only; PS 5.1-safe.
 #>
 Set-StrictMode -Off
+# 100.40 (f) / framework 12.16: a saved page stores only what a person set; the product defaults come from one place.
+if (-not (Get-Command ConvertTo-PimSettingStoredValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-SettingDefaults.ps1') }
 
 function Get-PimMailAudiences { @('soc', 'posture', 'manager') }
 function Get-PimMailAudienceLabel {
@@ -91,23 +93,34 @@ function ConvertTo-PimMailNotificationPrefs {
       Unknown report / alert types and invalid addresses are dropped; an unknown audience is 'manager', an unknown floor
       'info', an unknown attach 'link'. Duplicate addresses: the LAST one wins (a re-save replaces).
     #>
-    param([AllowNull()][object]$Raw)
+    # -NotStored (100.40 k): -Raw is what a PAGE sends (a save), not a stored row -- every value in it is the person's, so the
+    # migration rule for old stored rows is NOT applied to it.
+    param([AllowNull()][object]$Raw, [switch]$NotStored)
     $v = $Raw
     for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) { if ("$v".Trim()) { try { $v = $v | ConvertFrom-Json } catch { $v = $null } } else { $v = $null } }
     $cat = @(Get-PimMailReportCatalog)
     $reportTypes = @($cat | Where-Object { $_.kind -eq 'report' } | ForEach-Object { $_.type })
     $alertTypes = @($cat | Where-Object { $_.kind -eq 'alert' } | ForEach-Object { $_.type })
+    # 100.40 (f): read = the product default with what a PERSON set laid over it. A row saved before (the whole object) is
+    # resolved by the migration rule (a value equal to the frozen 3.1.53 default follows the default from now on).
+    $recDef = $null
+    if (Get-Command Resolve-PimSettingPersonSet -ErrorAction SilentlyContinue) {
+        $v = if ($NotStored) { ConvertTo-PimSettingTree -Value $v } else { Resolve-PimSettingPersonSet -Name 'MailNotifications' -Stored $v }
+        $recDef = Get-PimMailRecipientDefaults -ReportTypes $reportTypes -AlertTypes $alertTypes
+    }
+    $defOn = { param($part, $t) if ($recDef -and $recDef[$part].Contains("$t")) { [bool]$recDef[$part]["$t"] } else { $true } }
     $byAddr = [ordered]@{}
     foreach ($e in @(Get-PimMailPrefField $v 'recipients')) {
         if ($null -eq $e) { continue }
         $addr = "$(Get-PimMailPrefField $e 'address')".Trim()
         if ($addr -notmatch '^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$') { continue }
-        $aud = "$(Get-PimMailPrefField $e 'audience')".Trim().ToLowerInvariant(); if ($aud -notin (Get-PimMailAudiences)) { $aud = 'manager' }
-        $floor = "$(Get-PimMailPrefField $e 'severityFloor')".Trim().ToLowerInvariant(); if ($floor -notin (Get-PimMailSeverities)) { $floor = 'info' }
+        $audDef = if ($recDef) { "$($recDef.audience)" } else { 'manager' }; $floorDef = if ($recDef) { "$($recDef.severityFloor)" } else { 'info' }
+        $aud = "$(Get-PimMailPrefField $e 'audience')".Trim().ToLowerInvariant(); if ($aud -notin (Get-PimMailAudiences)) { $aud = $audDef }
+        $floor = "$(Get-PimMailPrefField $e 'severityFloor')".Trim().ToLowerInvariant(); if ($floor -notin (Get-PimMailSeverities)) { $floor = $floorDef }
         $rep = [ordered]@{}; $rIn = Get-PimMailPrefField $e 'reports'
-        foreach ($t in $reportTypes) { $rep[$t] = -not (Test-PimMailPrefFalse (Get-PimMailPrefField $rIn $t)) }
+        foreach ($t in $reportTypes) { $x = Get-PimMailPrefField $rIn $t; $rep[$t] = $(if ($null -eq $x) { & $defOn 'reports' $t } else { -not (Test-PimMailPrefFalse $x) }) }
         $al = [ordered]@{}; $aIn = Get-PimMailPrefField $e 'alerts'
-        foreach ($t in $alertTypes) { $al[$t] = -not (Test-PimMailPrefFalse (Get-PimMailPrefField $aIn $t)) }
+        foreach ($t in $alertTypes) { $x = Get-PimMailPrefField $aIn $t; $al[$t] = $(if ($null -eq $x) { & $defOn 'alerts' $t } else { -not (Test-PimMailPrefFalse $x) }) }
         $byAddr[$addr.ToLowerInvariant()] = [ordered]@{ address = $addr; audience = $aud; reports = $rep; alerts = $al; severityFloor = $floor }
     }
     $repCfg = [ordered]@{}; $rcIn = Get-PimMailPrefField $v 'reports'
@@ -116,7 +129,8 @@ function ConvertTo-PimMailNotificationPrefs {
         if ($att -notin @('link', 'pdf')) { $att = 'link' }
         $repCfg[$t] = [ordered]@{ attach = $att }
     }
-    return [ordered]@{ recipients = @($byAddr.Values); reports = $repCfg }
+    # the marker: this value is already resolved -- normalising it again must not apply the migration rule a second time
+    return [ordered]@{ defaultsModel = 'person-set-1'; recipients = @($byAddr.Values); reports = $repCfg }
 }
 
 function Get-PimRecipientNotificationPref {
@@ -180,6 +194,12 @@ function Get-PimMailNotificationPrefsFromStore {
       (Get-PimManagerSetting in the Manager, Get-PimSetting in the scheduler); SQL directly. NEVER throws: a store that cannot
       be read gives the DEFAULT (everyone gets everything) -- a preference read failing must not silence an alert.
     #>
+    return (ConvertTo-PimMailNotificationPrefs (Get-PimMailNotificationRawFromStore))
+}
+
+function Get-PimMailNotificationRawFromStore {
+    # 100.40 (f): the stored MailNotifications row AS STORED -- a save needs it (what a person set before). Same read order
+    # as Get-PimMailNotificationPrefsFromStore. NEVER throws: an unreadable store gives $null.
     $raw = $null
     try {
         if ($null -ne $global:PIM_MailNotifications) { $raw = $global:PIM_MailNotifications }
@@ -190,7 +210,7 @@ function Get-PimMailNotificationPrefsFromStore {
             if ($cs) { $raw = Get-PimSqlSetting -ConnectionString $cs -Name 'MailNotifications' }
         }
     } catch { Write-Warning "  [Mail] notification preferences could not be read (everyone gets every mail): $($_.Exception.Message)"; $raw = $null }
-    return (ConvertTo-PimMailNotificationPrefs $raw)
+    return $raw
 }
 
 function Get-PimAudienceLink {

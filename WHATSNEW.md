@@ -1,5 +1,94 @@
 # What's new in PIM Manager
 
+## 3.1.60 · 2026-11-20 · Fix-only
+
+A job run that has stopped working can no longer hold an update back.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **A stuck job run no longer holds updates** - When a PIM Manager job run has gone on far longer than usual and written nothing since it started, the update stops that one run, tells Invardia support and goes ahead. A run that is still working is never stopped.
+- **Clearer update log** - The update log no longer says an installation is already on a new version while it still runs the previous one.
+
+## 3.1.59 · 2026-11-20 · Fix-only
+
+Get Started shows exactly which identity holds the mail right, and the install command uses plain words.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Mail right shown for the right identity** - The Who needs what table on Engine permissions shows the mail send right only on the engine identity, the one that sends mail. The web app identity holds no mail right.
+- **Plainer install command** - The install command now takes -Source hosted for a hosted installation. Commands you already use keep working unchanged.
+
+## 3.1.58 · 2026-11-20 · Security
+
+When support installs PIM Manager for you, your named administrator becomes the first SuperAdmin.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **First SuperAdmin when support installs** - When Invardia support runs the install, the administrator you named becomes the first SuperAdmin, bound to their own account. If nobody was named, nobody is made SuperAdmin, and the install says so.
+
+## 3.1.57 · 2026-11-20 · Security
+
+The person who installs PIM Manager becomes its first SuperAdmin, bound to their own account.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **First SuperAdmin bound to the installing person** - The person who runs the install becomes the first SuperAdmin, tied to their own Microsoft Entra account. Nobody else gets a role by signing in first. If the first step did not complete, run the install again.
+
+## 3.1.56 · 2026-11-20 · Feature update
+
+Set the mail relay password in PIM Manager, and a new install run needs fewer database rights.
+
+### New features
+
+- **Mail relay password set in PIM Manager** - A SuperAdmin sets the mail relay password under Settings > Mail & alerting. Nobody needs a Key Vault or database right for it: PIM Manager hands it over sealed, and the update stores it.
+
+### Fixes
+
+- **Fewer database rights during setup** - Running the install again on an existing installation now also updates the database without making you a database administrator. Who is a SuperAdmin and which features are on are changed in Settings.
+
+## 3.1.55 · 2026-11-20 · Feature update
+
+Delegated administration is now in every edition, and a new install run needs fewer database rights.
+
+### New features
+
+- **Delegated administration for everyone** - Community now includes the Delegated role: a person who may stage and commit only within their tier, level, service and Azure scope. PIM Manager refuses anything outside those limits.
+
+### Fixes
+
+- **Fewer database rights during setup** - Running the install again on an existing installation does most database work through the installation's own database job, so you are no longer added as database administrator for those steps.
+- **Edition list kept in step** - The Free and Pro list in PIM Manager matches the published feature list again.
+
+## 3.1.54 · 2026-11-20 · Feature update
+
+Your saved settings keep up with improved defaults, and every reported problem now has its own support code.
+
+### New features
+
+- **Settings follow improved defaults** - Alerting and mail settings now keep only what you changed. When PIM Manager improves a default later, you get it automatically, and every choice you made stays as you set it.
+
+### Fixes
+
+- **A support code for every problem** - Each problem PIM Manager reports now carries its own support code, so support finds the cause and the fix at once.
+- **Clearer names in the security pack** - The security pack names each part by what it does, with one table that lists every name.
+- **Mail password set safely** - Setting the mail relay password no longer gives the person running it extra rights in Key Vault. The step names the right it needs.
+
 ## 3.1.53 · 2026-11-20 · Feature update
 
 New SuperAdmins can sign in at once, and one unreadable Azure subscription no longer hides the others.
@@ -383,7 +472,7 @@ Security image updates install faster, and each install reports exactly which im
 
 ### New features
 
-- **Images reported by the install** - PIM Manager reports which images it runs and their .NET version, so a security update can be confirmed on every install.
+- **Images reported by the install** - PIM Manager reports which images it runs and their platform version, so a security update can be confirmed on every install.
 
 ### Fixes
 
@@ -619,7 +708,7 @@ None in this version.
 
 ## 3.1.6 · 2026-11-11 · Security
 
-PIM Manager runs on the latest .NET runtime with Microsoft's newest security fixes.
+PIM Manager runs with Microsoft's newest security fixes.
 
 ### New features
 
@@ -627,7 +716,7 @@ None in this version.
 
 ### Fixes
 
-- **Latest .NET security fixes** - PIM Manager and its sign-in front now run on .NET 10.0.15, which includes Microsoft's latest security fixes. Nothing changes in how it works.
+- **Microsoft's latest security fixes** - PIM Manager now runs on Microsoft's newest patched platform. Nothing changes in how it works.
 
 ## 3.1.5 · 2026-11-11 · Fix-only
 
@@ -700,7 +789,7 @@ PIM Manager 3.1 runs on long-term supported Microsoft software and brings togeth
 
 ### New features
 
-- **Runs on supported .NET 10 and PowerShell 7.6** - PIM Manager runs on .NET 10 LTS and PowerShell 7.6 LTS on Microsoft's current image, supported to November 2028. Nothing changes for you.
+- **Runs on Microsoft's supported platform** - PIM Manager runs on Microsoft's current long-term supported platform, supported to November 2028. Nothing changes for you.
 - **Invardia support link** - Health and run results go to Invardia support. Undelivered reports are retried without mailing you, and the status turns amber only after three failed rounds in a row.
 - **New Get Started steps** - Get Started has steps for Azure resources and Workloads, and a Who needs what table shows each identity's rights.
 - **Stalled runs are shown and reported** - The Jobs page shows Running far longer than usual, and Invardia support is told. Runs are never stopped.
@@ -809,7 +898,7 @@ None in this version.
 
 ### Fixes
 
-- **Runs on supported .NET 10 and PowerShell 7.6** - PIM Manager now runs on .NET 10 LTS and PowerShell 7.6 LTS, supported to November 2028, and is patched at every build. The older versions reached end of support on 10 November 2026.
+- **Runs on Microsoft's supported platform** - PIM Manager now runs on Microsoft's long-term supported platform, supported to November 2028, and is patched at every build. The earlier platform reached end of support on 10 November 2026.
 - **Home permission check works again** - The permission check on the Home page no longer fails with an error at some installations.
 
 ## 3.0.76 · 2026-11-10 · Security

@@ -39,6 +39,7 @@ $script:PimSettingsNeverCopy = @(
     'DemoMode', 'DemoGuestGroup', # s98: who may act here (a live demo); carried elsewhere it would cap that tenant's people
     'AdminDeletePins',   # review 1 fixes 2026-10-13 (decision 54): another environment's pinned account deletes are never this one's
     'GuardApprovals', 'GuardReleases', 'GuardHolds', 'GuardLimits', 'HybridAdCleanupApproval', 'HybridAdServerAutoGroupsApproval', 'AdServerAutoGroups', 'AdServerAutoGroupsWaiting', 'AdServerAutoGroupsProgress', 'AdCleanupResult', 'AdCleanupLocalAdmin',   # PIM 100.119 B1: who approved what HERE, and this tenant's guard limits (set by its SuperAdmin, audited)
+    'SecretHandoverPublicKey', 'SecretHandoverPending', 'SecretHandoverResult',   # the sealed hand-over: THIS installation's key, its sealed copy and its result (another installation refuses them anyway)
     'ReconcileRemovalMode', 'EnableAutomaticOffboarding'   # REVIEW FIXES 2026-10-13: this environment's own protection switches -- set on ITS Settings page (confirmation + the count shown), never carried in from another environment
 )
 

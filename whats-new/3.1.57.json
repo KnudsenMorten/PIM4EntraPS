@@ -1,0 +1,4 @@
+{"version":"3.1.57","date":"2026-11-20","type":"security",
+ "summary":"The person who installs PIM Manager becomes its first SuperAdmin, bound to their own account.",
+ "new":[],
+ "fixes":[{"title":"First SuperAdmin bound to the installing person","text":"The person who runs the install becomes the first SuperAdmin, tied to their own Microsoft Entra account. Nobody else gets a role by signing in first. If the first step did not complete, run the install again."}]}
