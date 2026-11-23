@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.60.2 -- 2026-11-23
+
+- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.60.1); no change in behaviour
+
 ## 3.1.60.1 -- 2026-11-23
 
 - Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.60); no change in behaviour

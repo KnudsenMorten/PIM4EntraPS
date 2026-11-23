@@ -49,7 +49,7 @@
 
 # ---- stage 1: fetch the pinned SQL driver assembly (no PS module) ----
 # PINNED: Microsoft.Data.SqlClient 6.1.8 (tools/pim-manager/nuget/sqlclient/shim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:2b1e13a22e46b55117f9cdb4b38e73172de08a30370166c8227d06cdaff82473 AS sqldriver
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:8c6edfb26c85153f236d26efebd9ad349aec403583f343f201ee67838b23658d AS sqldriver
 WORKDIR /drv/shim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/shim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/sqlclient/packages.lock.json ./
 # NET10-PS76: a RID-less publish puts the PLATFORM-NEUTRAL Microsoft.Data.SqlClient.dll at the root -- a stub that throws
@@ -68,7 +68,7 @@ RUN dotnet restore shim.csproj --locked-mode \
 # SDK image as stage 1 (no new base image). engine/_shared/PIM-AsBuilt.ps1 Add-Types them from $env:PIM_PDF_DLL_DIR.
 # The build FAILS if an assembly the renderer loads is missing. Licence: tools/pim-manager/third-party/ (copied below).
 # PINNED: PDFsharp-MigraDoc 6.2.4 (tools/pim-manager/nuget/pdf/pdfshim.csproj + its packages.lock.json)
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:2b1e13a22e46b55117f9cdb4b38e73172de08a30370166c8227d06cdaff82473 AS pdflib
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:8c6edfb26c85153f236d26efebd9ad349aec403583f343f201ee67838b23658d AS pdflib
 WORKDIR /pdf/pdfshim
 COPY SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/pdfshim.csproj SOLUTIONS/PIM4EntraPS/tools/pim-manager/nuget/pdf/packages.lock.json ./
 RUN dotnet restore pdfshim.csproj --locked-mode \
@@ -93,7 +93,7 @@ RUN dotnet restore pdfshim.csproj --locked-mode \
 # tests/Test-PimImageNoAzNoModules.ps1 proves no in-container code path reads a pruned folder, and the last RUN
 # below fails the BUILD (never a running container) if a file the runtime needs went missing.
 # tools/pim-manager/nuget (SEC-106: the carrier projects stages 1 / 1b restore) is build input only -- pruned as well.
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:2b1e13a22e46b55117f9cdb4b38e73172de08a30370166c8227d06cdaff82473 AS src
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:8c6edfb26c85153f236d26efebd9ad349aec403583f343f201ee67838b23658d AS src
 COPY SOLUTIONS/PIM4EntraPS /src/PIM4EntraPS
 WORKDIR /src/PIM4EntraPS
 RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/nuget \
@@ -119,7 +119,7 @@ RUN rm -rf tests internal legacy launcher diagnostics output tools/pim-manager/n
 #   in third-party/NOTICE.txt) -- no package manager and no extra network at build time; a changed file fails the build.
 
 # ---- stage 3: runtime ----
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:2b1e13a22e46b55117f9cdb4b38e73172de08a30370166c8227d06cdaff82473
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:8c6edfb26c85153f236d26efebd9ad349aec403583f343f201ee67838b23658d
 
 # 🔒 IMAGE-PATCH-1 (framework, owner 2026-11-10: "we immediately patch images when this happens") -- PATCH THE BASE AT BUILD.
 # A customer's Defender scan of 3.0.70 listed ~70 fixable High/Critical findings in the base layer. This one RUN, before
