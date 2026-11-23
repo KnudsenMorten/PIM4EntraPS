@@ -105,6 +105,7 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-RightsList.ps1')       # WEB-TRIM-1: the approved rights list (the web identity's approved set, step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobLanes.ps1')         # WEB-TRIM-1: Register-PimTrustStaleReport -- ONE fix request per reported item (step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-WebIdentityTrim.ps1')  # WEB-TRIM-1: id-pim-web trimmed to its approved set, removals only (step 2h)
+. (Join-Path $solRoot 'engine\_shared\PIM-EnvSuperAdminBind.ps1')   # ENV-SUPERADMIN-BIND-1: PIM_SuperAdmins bound to object ids (step 2d-esb)
 . (Join-Path $solRoot 'engine\_shared\PIM-FirstAdminSeed.ps1')    # FIRST-SUPERADMIN-1 (A): the job identity's grant on the used first-SuperAdmin secret removed (step 2h-ter)
 . (Join-Path $solRoot 'engine\_shared\PIM-SupportLegacyOwner.ps1') # SECAUDIT-1a 4a: the Support app's legacy standing db_owner -- the database job removes it after both proofs (step 2h-bis)
 . (Join-Path $solRoot 'engine\_shared\PIM-ManagerApiApps.ps1')   # SUPPORT-FIX-API-1 (framework 12.30 / 12.31): enrol the tagged support app (role Support) + READ the API app hardening (step 2d-api)
@@ -277,6 +278,13 @@ function Invoke-PimUpdaterConvergeStep {
             foreach ($l in @($apiHd.lines)) { Say ("  " + $l) $(if ("$l" -match 'refused|FAILED|not done') { 'Yellow' } else { 'DarkGray' }) }
         }
     } catch { Say "  support app enrolment / API hardening not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d-esb. ENV-SUPERADMIN-BIND-1 (Invardia 2026-11-22, security) -- PIM_SuperAdmins BOUND TO ENTRA OBJECT IDS ----------
+    # The Manager grants SuperAdmin from its container setting PIM_SuperAdmins only to the person whose verified object id is
+    # bound here (engine/_shared/PIM-EnvSuperAdminBind.ps1). Each name is resolved ONCE through this job's User.ReadBasic.All
+    # (no new right), recorded in pim.Settings 'EnvSuperAdminBinding' and read back; counts only in the log. It runs FIRST
+    # BEFORE the Manager rolls (Invardia 2026-11-22: "move the binding BEFORE the Manager roll"; the record is inert until the
+    # new Manager reads it), and again here (a no-op once bound; it picks up a name added since). Never fails the update.
+    Invoke-PimUpdaterEsbStep -When 'converge'
     # ---- 2d-bis. CR5 step 1 (framework §12.11c item 6, PIM 100.149) -- THE INSTALL RECORD ------------------------------------
     # pim.Settings 'InstallNames' = the names THIS install runs with, from what the updater was deployed with (its variables)
     # and the as-built job's name. Existing installs record TODAY's names -- nothing is renamed; every reader
@@ -769,6 +777,19 @@ $script:PimWebTrimResult = $null
 # named on the job as PIM_KeyVaultId). Once that secret is gone (used or refused), every role assignment on it is removed and
 # read back -- where this updater's own rights allow; else REPORTED (a line; the installer's next run removes it). While the
 # secret is still there it stays (the job needs it). REMOVALS ONLY; a problem is a line, never a failed update.
+function Invoke-PimUpdaterEsbStep {
+    # ENV-SUPERADMIN-BIND-1 (step 2d-esb): PIM_SuperAdmins on the Manager app bound to Entra object ids
+    # (engine/_shared/PIM-EnvSuperAdminBind.ps1). Called BEFORE the Manager roll and in the converge. Never throws.
+    param([string]$When = 'update')
+    try {
+        $esbCs = ''; try { $esbCs = "$(Get-PimSqlConnectionString)" } catch { $esbCs = '' }
+        if (-not $esbCs.Trim()) { Say "  SuperAdmin binding ($When): not run -- no store connection on this job" 'DarkGray'; return }
+        $esb = Invoke-PimEsbUpdaterStep -Arm { param($m, $p, $b) Invoke-PimArm -Method $m -Path $p } -Graph { param($m, $p, $b) Invoke-PimGraph -Method $m -Path $p } `
+                   -GetSetting { param($n) Get-PimSqlSettingRaw -ConnectionString $esbCs -Name $n } -SetSetting { param($n, $j) Set-PimSqlSetting -ConnectionString $esbCs -Name $n -ValueJson $j } `
+                   -AppPath "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/containerApps/$managerApp`?api-version=$script:PimAcaApi"
+        foreach ($l in @($esb.lines)) { Say ("  SuperAdmin binding ($When): " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+    } catch { Say "  SuperAdmin binding ($When) not checked: $($_.Exception.Message)" 'Yellow' }
+}
 function Invoke-PimUpdaterFirstAdminTrimStep {
     try {
         $faCs = ''; try { $faCs = "$(Get-PimSqlConnectionString)" } catch { $faCs = '' }
@@ -2401,6 +2422,9 @@ try {
     Say "registry: $(@($prPreRoll).Count) image reference(s) run before the roll (kept by the clean-up after it)" 'DarkGray'
 } catch { $prPreRoll = $null; Say "registry: what runs before the roll could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- the clean-up after it deletes nothing" 'DarkGray' }
 
+# ---- 0-esb. ENV-SUPERADMIN-BIND-1 -- the PIM_SuperAdmins binding is written BEFORE the Manager rolls, so the new Manager
+# (which grants env SuperAdmin on the bound object id only) never starts without it. Inert for the running old Manager.
+if (Get-Command Invoke-PimUpdaterEsbStep -ErrorAction SilentlyContinue) { Invoke-PimUpdaterEsbStep -When 'before the roll' }
 # ---- 1. the Manager ---------------------------------------------------------------------------
 Say "rolling $managerApp -> $targetImg"
 # PIM 100.114 (framework 12.16 CONVERGE-DEFAULTS): the roll is a read-modify-write of the WHOLE template -- whatever size

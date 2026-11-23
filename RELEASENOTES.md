@@ -13,13 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
-## 3.1.60.2 -- 2026-11-23
+## 3.1.62.1 -- 2026-11-23
 
-- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.60.1); no change in behaviour
+- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.62); no change in behaviour
 
-## 3.1.60.1 -- 2026-11-23
+## 3.1.62 -- 2026-11-23
 
-- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.60); no change in behaviour
+- DOC-RIGHTS-1: the environment report document prints only PIM Manager's own identities and the Invardia Support app, and only the rights they hold as declared, with the reason; a missing, extra or unreadable right goes to the permission health check, never into the document. The .NET sdk base image moves to its newest digest.
+
+## 3.1.61 -- 2026-11-23
+
+- SuperAdmins named in the Manager setting are bound once to their Entra object id before the Manager rolls, and only the bound id is granted SuperAdmin; a name alone no longer grants it. The heartbeat counts the setting's SuperAdmins, so an install with only setting SuperAdmins no longer reads first-admin pending. A secret hand-over accepts a key the Support app has pre-created.
 
 ## 3.1.60 -- 2026-11-20
 

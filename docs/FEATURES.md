@@ -252,6 +252,21 @@ deployment is a supported choice) and no credentials lying around.
   Vault" and the move of secrets into Key Vault read a setting whose name ends in Id, Url, Uri or Name as an address,
   never as a secret (the baseline signing key's Key Vault address was reported as a plain secret). Real secrets are
   still found.
+- **The Support app's old standing database right is removed without waiting.** ✅ 2026-11-22 (3.1.49) — While that
+  removal is still to do and no support session is open, the 15-minute update check runs the full update path to do it
+  (at most once an hour). Read back live: the Support app holds no database admin right at the internal installation or
+  at a ring-2 installation, and the ring-2 installation reported the removal.
+- **The retired sign-in front leaves nothing behind.** ✅ 2026-11-22 (3.1.50) — Updates no longer build its image, remove
+  its stored images from the installation's own registry, and no longer re-create its database schema. Read back live:
+  no sign-in front image is stored in the internal or a ring-2 installation's registry.
+- **PIM Manager signs people in through Microsoft's built-in sign-in only.** ✅ 2026-11-22 (3.1.51) — The sign-in code
+  of the retired sign-in front is removed, and a setting left over from it refuses every sign-in. Nothing changes in how
+  you sign in or work. Read back live: the built-in sign-in is on, with sign-in required, at the internal and a ring-2
+  installation.
+- **Only the engine can send mail.** ✅ 2026-11-22 (3.1.52) — The mail setup steps and the commands PIM Manager shows
+  give the send right and the mail relay password to the engine only, never to the web app (which sends no mail). Read
+  back live in Exchange: the web app holds no send right and the engine holds its mailbox-scoped one, at the internal
+  and a ring-2 installation.
 - **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
   licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
   key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own
@@ -2325,8 +2340,7 @@ deployment is a supported choice) and no credentials lying around.
   connectors, Power BI, Discovery and gaps, revoking current delegations, access reviews, the second approver,
   delegated administration, the tier-impact report, the evidence export and PIM for on-premises Active
   Directory -- listed as Pro ✅ 2026-10-03; the access request portal, temporary group access and the consultant
-  company review -- ✅ 2026-10-05; the second approver and the evidence export moved to both editions 2026-11-04, and
-  delegated administration 2026-11-20) and the multi-tenant half
+  company review -- ✅ 2026-10-05; the second approver and the evidence export moved to both editions 2026-11-04) and the multi-tenant half
   (managing and managed tenants). **Each Pro capability is allowed only while an installed Pro licence
   covers that capability and this tenant** — otherwise it is refused, with the reason shown in plain words.
   The edition you choose records the commercial basis; what is actually unlocked is decided by the installed
@@ -2426,8 +2440,7 @@ licence state.
 
 **Free — the community edition, for a single tenant.** The full portal; eligible, time-boxed access with approval
 and a complete audit trail; a second approver for sensitive changes and the evidence export (*changed 2026-11-04,
-3.0.29: core security is the same in both editions*); delegated administration -- portal users limited to a tier, level,
-service or scope (*changed 2026-11-20: per-person scoped roles are core in both editions*); Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
+3.0.29: core security is the same in both editions*); Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
 Defender XDR role delegation (PIM Manager adds your groups to Defender roles you keep; it never creates, changes or deletes a Defender role); delegation by group; access packages; existing office accounts as administrators; policy templates (a Standard and
 a RequireApproval template per kind, renameable, with a default per kind); drift detection; reports (standing and expiring access)
 and the current delegations list; administrator accounts and first-time access passes; permission templates imported in the portal or by script and tenant
@@ -2436,7 +2449,7 @@ preparation from one configuration file; nightly self-updating to signed release
 **Pro — licensed capabilities for a single tenant.** Discovery and gaps across every workload; the
 Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
-enforced); the tier-impact report;
+enforced); delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report;
 the management report (a PowerPoint for management); the access request API for ticketing systems; the AI assistant
 connection and API applications (both closed on every installation until opened through Invardia support) and the API
 and assistant reference; the chat in the Manager (off by default); and PIM for on-premises Active Directory.
@@ -2494,7 +2507,6 @@ Everything an organisation needs to govern its own tenant:
 - **eligible, time-boxed access** with approval and a complete audit trail;
 - a **second approver** for sensitive changes (separation of duties);
 - the **evidence export** — who may hold what, who held it, and who approved;
-- **delegated administration** — portal users limited to a tier, level, service or scope;
 - **Entra ID roles, PIM for Groups, administrative units and Azure RBAC**;
 - **Intune and Defender XDR** role delegation — PIM Manager adds your groups to Defender roles you create and keep; it
   never creates, changes or deletes a Defender role, and reports a role that is missing or grants more than defined;
@@ -2525,6 +2537,7 @@ On top of the free edition, a Pro licence adds:
   Business Central and Power Platform;
 - **revoking current delegations** from the portal (the list itself is free);
 - **access reviews** — campaigns with decisions recorded and enforced;
+- **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
 - the **management report** — a PowerPoint for management under **Reports > Management report**: key figures with
   trends, risk and exceptions, changes and audit, and compliance evidence, on demand or every month by mail (the monthly
@@ -2611,10 +2624,9 @@ What an environment does before anyone changes a setting (the full table is in
   hosted deploy.
 - **Switch themselves on when you have rows for them:** the Intune + Defender XDR connectors (free) and the
   app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors (Pro).
-- **Pro, on when licensed:** Discovery and gaps, revoke, access review campaigns and the tier-impact report.
-  **Pro, off until switched on:** discovery, Power BI and MSP.
-- **In both editions:** the evidence export (on), delegated administration (on), and the second approver (off until
-  switched on).
+- **Pro, on when licensed:** Discovery and gaps, revoke, access review campaigns, delegated administration and the
+  tier-impact report. **Pro, off until switched on:** discovery, Power BI and MSP.
+- **In both editions:** the evidence export (on), and the second approver (off until switched on).
 - **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
 - **Policy settings:** no policy setting is changed until you chose a value for it (Microsoft default,
   PIM Manager recommendation or Keep current), and every change that follows waits for a SuperAdmin's approval.
@@ -2685,6 +2697,10 @@ Two jobs talk to Invardia. Both are **on by default** in a new installation, and
   guard is clear again, so the status support sees follows your installation. It names the guard, its outcome, its
   severity and since when — not the accounts, groups or policies that are held.
   With an install key the heartbeat also says how many finished runs are still waiting to be reported, and since when.
+  ✅ 2026-11-22 (3.1.53, 3.1.54, 3.1.57, 3.1.58) — It also names the version the shipped documentation describes, the
+  database's size tier, space used, statistics state and whether its size is pinned, and the state of the first
+  SuperAdmin hand-over, including whether a temporary grant from it is still left. No names or object ids are sent. Read
+  back live from Invardia for every reporting installation.
 
 Apart from these two jobs, a Pro installation pulls its updates from Invardia at the nightly update, and the **Get
 support** button sends a ticket — only when a person presses it, and only what that person saw and confirmed.

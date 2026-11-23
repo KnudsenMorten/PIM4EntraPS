@@ -1079,3 +1079,65 @@ function Get-PimEnvironmentReport {
     $safe['redactions'] = $n
     return $safe
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# DOC-RIGHTS-1 (owner 2026-11-23, framework DOC-RIGHTS-1): what the DOCUMENT prints
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimEnvReportDocumentRoles {
+    <# PURE. LITERAL. The identity roles the document prints: PIM's own declared identities (matched by object id or the
+       install's declared name in Get-PimEnvironmentReport) + the Invardia Support app. NOT 'product' (an identity that only
+       holds a role on the resource group or sits in the SQL admin group -- an operator / automation account, another
+       product), NOT 'sql-admin' (the server's Entra administrator when it is not PIM's group), NOT 'break-glass' (persons). #>
+    return @('engine', 'manager', 'updater', 'engine-app', 'activator', 'support', 'sql-admin-group', 'mail-sender')
+}
+
+function Select-PimEnvReportDocument {
+    <#
+      PURE. The report model (Get-PimEnvironmentReport) -> the DOCUMENT the Manager serves and prints. DOC-RIGHTS-1:
+        identities  only Get-PimEnvReportDocumentRoles, and only those whose directory object was read
+        permissions only rows HELD AND DECLARED (status 'expected'), with their reason, of a printed identity -- never a
+                    missing, extra, undeclared ('held'), or not readable row, never an empty placeholder row
+        findings    no 'permissions' finding (a missing / extra right, an engine refusal) and no 'report' finding (sources not
+                    read); the other findings stay
+        sources     only the sources that were read
+        health      the permissions line keeps its status; its detail never names a right
+        counts      recomputed from what is printed
+      The DRIFT CHECK is not here and is not changed: PIM-PermissionHealth.ps1 still reports a missing / extra / unreadable
+      right to the Health page, the fix request and Invardia's RIGHTS-1 audit. This view only decides what a document shows.
+    #>
+    param([Parameter(Mandatory)][object]$Report)
+    $keep = @(Get-PimEnvReportDocumentRoles)
+    $ids = @(@($Report['identities']) | Where-Object { $_ -and $keep -contains "$(Get-PimEnvReportField $_ 'role')" -and (Get-PimEnvReportField $_ 'readable') -ne $false })
+    $idSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($i in $ids) { if ("$(Get-PimEnvReportField $i 'id')".Trim()) { [void]$idSet.Add("$(Get-PimEnvReportField $i 'id')".Trim()) } }
+    $perm = @(@($Report['permissions']) | Where-Object { $_ -and "$(Get-PimEnvReportField $_ 'status')" -eq 'expected' -and $idSet.Contains("$(Get-PimEnvReportField $_ 'identityId')".Trim()) })
+    $fnd = @(@($Report['findings']) | Where-Object { $_ -and "$(Get-PimEnvReportField $_ 'area')" -notin @('permissions', 'report') })
+    $src = @(@($Report['sources']) | Where-Object { $_ -and (Get-PimEnvReportField $_ 'readable') -eq $true })
+    $doc = [ordered]@{}
+    foreach ($k in @($Report.Keys)) { $doc[$k] = $Report[$k] }
+    $doc['identities'] = $ids; $doc['permissions'] = $perm; $doc['findings'] = $fnd; $doc['sources'] = $src
+    $sum = $Report['summary']
+    if ($sum) {
+        $s2 = [ordered]@{}; foreach ($k in @($sum.Keys)) { $s2[$k] = $sum[$k] }
+        $h = $sum['health']
+        if ($h) {
+            $items = @(@($h['items']) | Where-Object { $_ } | ForEach-Object {
+                if ("$(Get-PimEnvReportField $_ 'area')" -ne 'permissions') { $_ }
+                else {
+                    $st = "$(Get-PimEnvReportField $_ 'status')"
+                    [ordered]@{ area = 'permissions'; status = $st
+                        detail = $(if ($st -eq 'ok') { 'every declared right is held' } else { 'checked by the permission health check (Health > Permissions); a difference is reported there and to Invardia support' }) }
+                }
+            })
+            $s2['health'] = [ordered]@{ status = $h['status']; items = $items }
+        }
+        $doc['summary'] = $s2
+    }
+    $doc['counts'] = [ordered]@{
+        identities  = $ids.Count
+        permissions = [ordered]@{ expected = $perm.Count }
+        findings    = [ordered]@{ high = @($fnd | Where-Object { $_.severity -eq 'high' }).Count; medium = @($fnd | Where-Object { $_.severity -eq 'medium' }).Count; low = @($fnd | Where-Object { $_.severity -eq 'low' }).Count; info = @($fnd | Where-Object { $_.severity -eq 'info' }).Count }
+    }
+    $doc['documentView'] = 'DOC-RIGHTS-1'
+    return $doc
+}

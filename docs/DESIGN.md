@@ -1008,6 +1008,10 @@ behind one named switch (on) that support can turn off for an install — then a
 the 250 GB maximum size is still set. Every update records the outcome in its run record (`sqlTier` = ok / raised /
 below / pinned-below / n/a / unknown). A pin below S3 is a deliberate choice for a low-traffic database: an internal
 Community test installation runs pinned at S0 since 2026-11-06; its updates report `pinned-below` and never raise it.
+*Decision 2026-11-20 (Invardia, OPEN-27 Q3 sizing):* the internal Community installation and one other proof
+installation "stay S0 = ACCEPTED EXCEPTIONS (proof installs, tiny data)". PIM reports the pin instead of hiding it: since
+3.1.54 the heartbeat's `Database` carries `pinned` (true for `pinned-below`; see 29.2), and Invardia's sizing check skips
+a pinned tier.
 
 **Starting sizes (framework §0 "SIZING: NEW INSTALLS START AT THE LEARNED SIZES", 3.0.50).** A new install does not start
 small and wait to be raised. The engine job starts at **2 CPU / 4 GiB at any tenant size** and **4 CPU / 8 GiB from 15,000
@@ -3258,7 +3262,13 @@ See §17.7 for the full template/approval mechanics.
     records `SecretHandoverResult` (names only, never the value). The updater assigns no role: it reports
     whether the engine identity may read the secret. Without `-SqlServerFqdn` the script writes the secret
     directly and grants the engine read access on **that one secret** -- the fallback for an installation whose
-    updater is older than 3.1.56; the person then needs Key Vault Secrets Officer on the vault.
+    updater is older than 3.1.56; the person then needs Key Vault Secrets Officer on the vault. The script never
+    grants that right to whoever runs it (3.1.54): a refused write stops and names the step.
+    *Decision 2026-11-20 (Invardia, OPEN-08 Q2, framework §12.25 secrets write-only):* "(c) NOW --
+    Set-PimSmtpRelayPassword never grants the writer Key Vault Secrets Officer" (shipped 3.1.54); "(a) NEXT -- a sealed
+    hand-over the updater writes" (shipped 3.1.56, above). The same day's review of (a) added that the person must need
+    no SQL admin right either, which is why the person's path is the Manager page and the script's sealing path
+    (`-SqlServerFqdn`) is the Support app's only.
   - *none* — every send returns "switched off" (also to the TAP readiness probe).
   The Manager's Get Started > Mail sender and Settings > Mail & alerting > Mail sending are one form over
   `GET/PUT /api/settings/mail`; `POST /api/settings/mail/test` queues a test mail that the PIM engine sends as its
@@ -3785,6 +3795,25 @@ Container Apps provides (built-in authentication). In plain words:
   them.
 * **Signed changes use the same check.** The token the Manager verified is kept with the change. The
   engine checks it again with the same library before it acts.
+  - *The mode* is the setting `SignedRequests` (`engine/_shared/PIM-SignedRequests.ps1`): `off` (the default),
+    `observe` (each change is checked and applied as before, and one that would not verify is logged as "would have
+    refused: <reason>") or `enforce` (a change whose commit does not verify is not applied; it is held as a skipped item
+    with the reason). Enforce is reached only when the setting says exactly `enforce`, and a SuperAdmin must confirm it
+    explicitly; any other value is treated as observe and reported, so a typo neither switches the check off nor starts
+    refusing. Observe and enforce use the same verdict, so enforce refuses exactly what observe reports.
+  - *A change derived from a signed commit (3.1.53).* Memberships and owners that follow from a definition row are not
+    named by any commit, so observe reported every one of them as unsigned. The engine now passes where such a change
+    comes from (an administrative-unit member: the group's definition row and the AU's definition row; a group owner:
+    the group's definition row). Only when no commit names the change directly and it is not a removal, each of those
+    rows must pass: its latest journal entry written by a PIM commit names a commit that verifies exactly as a direct
+    one does (requester and approver), and the row still holds what that commit wrote (SHA-256 of the journal's after
+    state = SHA-256 of the row now) -- otherwise a verified adoption covers it -- otherwise the change is refused. Every
+    origin must pass. A row changed after its signed commit is refused with that reason; a journal that cannot be read
+    means "the check could not run" (held in enforce, never remembered).
+  - *Decision 2026-11-20 (Invardia, OPEN-04 Q1, on the owner's "work autonomously ... ask me any questions"):* **staged
+    enforce** -- "after 3.1.53 has run 3 days in OBSERVE with 0 false refusals (from 2026-11-23): enforce at internal;
+    [the two test installs] a week later; then ring 2. Send Invardia the observe counts at each step." Until then no
+    installation runs enforce.
 * **Sessions end after 8 hours**, fixed -- activity never extends them.
 * **The token store has its own small place.** It is one blob container (`pim-auth-tokens`) in the
   installation's own storage account, which accepts only Microsoft Entra sign-ins (no account keys).
@@ -5005,6 +5034,9 @@ is decided by its **release ring**, never by "newest available":
   `PIM_UPDATE_ALLOW_DOWNGRADE=1` on the update job — **off by default**, and reported loudly when used.
   Forward rolls and the same-version no-op are unchanged. The host-side rollers stay unguarded on purpose:
   they are attended, and `Get-PimUpdateRingChannelReport` already prints `BACKWARD` there.
+  *The direction note (3.1.60).* When the target was already built (`PIM_UPDATE_LAST_BUILT` = the target) but the
+  running Manager image is older, the note no longer says "already on <version> -- moves nothing"; it names the
+  running image and says the roll moves it.
 - **Then the normal lifecycle:** already running that version → nothing to roll; otherwise fetch that exact
   version's source archive, build it in the environment's **own** registry (no build machine, no credential
   shipped between environments — only a read-only link to the archive), apply additive schema changes first (the
@@ -5332,7 +5364,8 @@ These apply to the in-cloud updater (§11.6.0), which runs inside the installati
 schema file, the conformance changes and the access converge), the updater reads the executions of the installation's
 other PIM jobs: the scheduled tick, the requests, publish, pull and as-built jobs, the database job and the support-consent
 job, plus every managed-tenant pull job in the resource group (a job that does not exist there is skipped). It uses only
-read calls; nothing is ever stopped or cancelled.
+read calls; nothing is stopped or cancelled, with one exception since 3.1.60: a run that is hung by the exact rule
+below (*A hung run no longer holds the roll*) is stopped -- that one execution only.
 - *The hold.* Before it waits, the updater writes a hold row (`UpdateSchemaHold`: set time, end time, by whom, reason) in
   the installation's settings table. The main scheduled tick and the managed-tenant pull read it when they start (the pull
   before its cadence gate, so a due pull is not used up) and step aside while it is active. The hold ends by itself after
@@ -5350,6 +5383,30 @@ read calls; nothing is ever stopped or cancelled.
   the 20-minute bound. The snapshot's group read writes a progress line at least every 5 minutes, so a working run is
   visibly alive. A run counts as hung only when it is past three times its usual length **and** its log has been silent
   for more than 30 minutes; it is reported once and never stopped. When its log cannot be read, it is not called hung.
+- *A hung run no longer holds the roll (ROLL-HUNG-1, 3.1.60, 2026-11-20; framework ROLL-HUNG-1, Invardia yes
+  2026-11-20; the live proof at a test install is still open).* Measured on ring 1 on 2026-11-20: one job execution
+  stayed *Running* for 333 minutes with no log line at all (the job normally ends in seconds), the quiesce waited 20
+  minutes twice and said "NOT ROLLING: a PIM job is still running", and the ring missed its window until the run was
+  stopped by hand. The rule, as built (`Get-PimRollHungVerdict`, `engine/_shared/PIM-SchemaQuiesce.ps1`):
+  - Only the **waiting** quiesce applies it, never the one-read check, and each running execution is judged at most once
+    per call. A run is a candidate only when it has run **more than 10 times its usual length AND at least 120
+    minutes** (`Test-PimRollHungCandidate`; no start time or no usual length = not a candidate). Its log is read only
+    for a candidate.
+  - The candidate's log lines since its start are counted in the job environment's Log Analytics workspace
+    (`Get-PimUpdaterRunLogLines`, `tools/pim-engine/update-job-entry.ps1`, read only). The run is **hung** only when
+    that count READS as zero. A log that cannot be read is not hung: no workspace, a query error, no row, a value that is
+    not a whole number -- and also a workspace that holds no line of the same job's other runs in the last 2 days,
+    because then the query cannot prove silence. **A run that has written a log line is never stopped**, however long
+    it runs; the quiesce keeps waiting for it as before.
+  - A hung run is stopped: `POST .../executions/<execution>/stop` on that ONE execution, then up to 12 reads 10
+    seconds apart until it is no longer *Running* (`Stop-PimUpdaterHungExecution`). This is the quiesce's only ARM write
+    and uses the updater's existing Contributor on the install resource group; no new right. Another run of the same
+    job, and runs of other jobs, are untouched and still waited for.
+  - Read back *Stopped*: the quiesce no longer waits on it, the stop is kept in the update state (`hungStops`, newest
+    first, at most 10), and one fix request is filed through the register-once run report (job `pim-update`, class
+    UPDATE-RUN-HUNG-STOPPED, pim-upd-0107; no mail). The job's own retry or next schedule covers its work.
+  - The stop fails or does not read back *Stopped*: the update does **not** roll past it and holds exactly as before;
+    one fix request UPDATE-RUN-HUNG-STOP-FAILED (pim-upd-0108).
 - *Which jobs are held.* The main tick and the managed-tenant pull read the hold. The publish and as-built jobs read views
   only, so the updater protects the change from them by waiting for their running executions. Where the requests broker
   runs as an app rather than a job, it has no executions to wait for.
@@ -10483,6 +10540,15 @@ chat completions with function tools, validated against the deployment in use). 
   an unknown setting is refused and nothing is written. Switching the chat on also switches its feature on (every other
   feature stays as it is; the MCP server switch it builds on is never changed by the update). Every change is read back
   and audited with the update job as the actor; with nothing given, nothing is touched.
+- **Who calls the model.** Only two paths: a person's chat message (`POST /api/chat`) and the Admin's Check button (one
+  fixed completion). No job, no test and no MCP path calls it.
+- **Off at the vendor's internal installations -- owner order 2026-11-21 (~01:40Z, relayed by Invardia):** "turn off
+  integration in internal in all 3 solutions now". Invardia removed the web identity's Cognitive Services OpenAI User
+  role on the Azure OpenAI account and switched key access off there (read back). PIM read both internal installations
+  back the same day and had nothing to write: no `AiChat` setting, no `ai.chat` feature gate, and no job carrying a
+  `PIM_AICHAT_*` value, so the update cannot switch it on. Turning it back on -- the settings, a `PIM_AICHAT_*` job
+  value, a new role or endpoint -- is **the owner's decision only**. The MCP server switch is not part of the order: it
+  is inbound and calls no model.
 
 **The API and MCP reference (Pro; 2026-11-01, 3.0.12, Pro only from 3.0.13).** The reference is generated from the code of the running version,
 never kept by hand: every route with its method, path, the role its body checks first and its Pro feature, and every
@@ -10648,8 +10714,8 @@ offline, §19a).
 
 ### 19b. Defaults — what an environment does before anyone changes a setting
 
-**A saved page keeps following the product defaults (Alerting, Notifications, Email controls; built 2026-11-20, not
-released).** Saving one of these pages stores only what a person set: the alert event switches, the kill switch, a
+**A saved page keeps following the product defaults (Alerting, Notifications, Email controls; released in 3.1.54,
+2026-11-20).** Saving one of these pages stores only what a person set: the alert event switches, the kill switch, a
 recipient's report / alert switches, audience and severity floor, and a report's PDF attach are stored only when they
 differ from the product default (or when the person had already chosen that value -- it stays theirs). Recipients,
 webhook, redirect and allowlist are the person's data and are always stored. Every reader -- the Manager, the scheduler,
@@ -11491,8 +11557,14 @@ run reports no changes. Certificate or signed-in (certificate) context only — 
   Manager, still refuse a version change. When sign-in fails, the refusal names the identity's object id
   (read from the token the database refused) and the group to add it to.
 
-**A person installing is a member only while a new install has no database job yet (built 2026-11-20; the schema and
-code steps of an existing install were moved off the person later the same day, not yet released).** When a person signs in to run the deploy against a database with a public endpoint, the deploy first reads
+**A person installing is a member only while a new install has no database job yet (NO-PERSON-DB-ADMIN D1 in 3.1.55;
+the schema and code steps of an existing install moved off the person in 3.1.56; both 2026-11-20, offline-proven, a live
+proof is still open).** *Decision 2026-11-20 (Invardia, option A):* no setting rides a database job start or the job's
+definition -- the deploy's only job start is the schema run with the EMPTY start body, and the deploy writes no setting
+on the job; feature gates and SuperAdmins are changed in PIM Manager > Settings. (B, an exception, and C, a definition
+write and put-back, were rejected: the framework's empty-start rule, and a customer location policy had refused a job
+PATCH.) 3.1.55 still started the job with settings in the start body on an installer re-run; 3.1.56 fixed that. When a
+person signs in to run the deploy against a database with a public endpoint, the deploy first reads
 whether the installation's database job exists:
 
 * **The job exists, so this is an existing install.** The feature settings and the PIM Manager administrators are not
@@ -11521,7 +11593,12 @@ The plan lists each database step and where its work is done. **If the person's 
 checked or is not read back, the run stops** at step `sql-admin-release` with a failed status, and the installer stops
 the same way. It is not a warning, so no one is left a database admin without being told.
 
-**The first SuperAdmin of a new install (built 2026-11-20, not yet released).** The first SuperAdmin is always the
+**The first SuperAdmin of a new install (FIRST-SUPERADMIN-1: 3.1.57, the Support-app install 3.1.58, both
+2026-11-20; a live proof on ring 1 is still open).** *Decisions 2026-11-20 (Invardia):* the design was approved as
+described here (nothing about a person on the database job; one Key Vault secret, bound to an object id); and the
+no-name rule -- an install by the Invardia Support app without `-FirstSuperAdminUpn` seeds NOBODY, "a -SuperAdmins list
+is never used as the named admin". Invardia also added the soft key `FirstAdminSeed.leftoverGrant` to PIM's heartbeat
+contract the same day. The first SuperAdmin is always the
 person who runs the install. Their Entra object id is read from their own sign-in, never typed on a command line. An
 install run by an application adds nobody, with one exception: the Invardia Support app may name the customer's
 administrator (see "An install by the Invardia Support app" below). Other people named as SuperAdmins are not added by
@@ -11567,6 +11644,17 @@ in one line.
   pending while no SuperAdmin exists, and the field is left out when it cannot be read. It also says whether a role is still
   left on the used secret: `leftoverGrant` is true when the updater found one it could not remove, false when it checked
   and none is left, and absent when it has not checked. A leftover role never changes the state.
+* **SuperAdmins named in the Manager's setting are bound to their object id (3.1.61).** Invardia decided on 2026-11-22: "a
+  sign-in name alone never grants SuperAdmin". A SuperAdmin can also be named in the Manager's container setting
+  `PIM_SuperAdmins`. On every update the updater reads that setting and looks up each name once in Microsoft Graph with the
+  basic-profile read it already holds. A name binds only when the directory returns exactly one user whose sign-in name is
+  that name. The updater records the binding in the PIM database and reads it back. A bound name is never looked up again, so
+  a sign-in name re-used for another person later gets nothing. A name that does not resolve is not granted; it is counted and
+  looked up again on the next update. The hosted Manager grants SuperAdmin from the setting only when the request's verified
+  object id is the bound one. The local console, which signs its operator in to SQL directly, keeps the name match. The health
+  report adds `settingSuperAdmins` (counts: via the setting, bound, unresolved) to `FirstAdminSeed`, and a bound one counts as
+  "a SuperAdmin exists". The updater writes the binding before it rolls the Manager, so the new Manager never starts
+  without it, and checks it again after the roll. A name still unbound after that is not granted.
 
 Directory behaviours the step handles: reading a group's members without a type filter can omit service
 principals under app-only auth, so membership is read per type; adding a member that is already present
@@ -11851,6 +11939,11 @@ all). Anything else is refused and audited. A helpdesk profile capped at level 2
 commit; level 1 and 0 are refused, and rows the helpdesk cannot see can be neither overwritten nor deleted by omission.
 Delegated administration is in **both editions** (G1, 2026-11-20: per-person scoped roles are core security): no
 licence caps the role, and these checks run identically in Community and Pro — none of them reads the licence.
+*Decision (G1):* Invardia decided option (b) on 2026-11-20, applying the owner's core rule of 2026-11-04 -- core in BOTH
+editions = "the auth part (sign-in, identities, roles and per-person scoped roles, signed requests ...)". Delegated-admin
+ceilings are per-person scoped roles, so they opened in Community in 3.1.55 (the feature catalogue key
+`access.delegated` moved to Free, the Manager's licence cap on the role and the access-map licence refusal were
+removed). The ceilings themselves did not change and stay server-side and edition-blind; no other Pro key moved.
 
 The ceiling of an **assignment** is taken from what it grants, never from what the row claims: the stored definition
 of every group it names, and the role or scope itself — a directory role is tier 0 (level 0 for the privileged roles,
@@ -11957,7 +12050,7 @@ previous cycle started and are still beyond their job's watermark, counted befor
 oldest of them (null when there are none). It is computed from the run history only, carries no job content, and has its
 own switch (`PIM_UPLINK_UPLINKBACKLOG`, on by default). The anonymous heartbeat never carries it.
 
-**Database health on the heartbeat (`Database`, built, not yet released).** With an install key, the heartbeat carries
+**Database health on the heartbeat (`Database`, released in 3.1.11).** With an install key, the heartbeat carries
 `Database { tier, dtu, maxSizeMb, usedMb, peakLogWritePct1h, minutesAtLimit1h, statsAsync, statsStalePct, statsRefreshedUtc }`
 -- the same shape the other products send. It shows the database's service tier (and its DTUs for a DTU tier), its size
 and used space, the highest log-write load and the minutes spent at a resource limit in the last hour, whether statistics
@@ -11969,6 +12062,14 @@ job identity holds, so the database admin run creates one read-only procedure th
 data rows), and the job may only execute it. Until an install's admin run has created it, the job reads what it may
 directly and leaves the load figures out. Its own switch: `PIM_UPLINK_DATABASE` (on by default). The anonymous heartbeat
 never carries it, and a Community install that is not connected to Invardia sends nothing at all.
+*`pinned` (3.1.54, OPEN-27, Invardia 2026-11-20).* `Database` also carries `pinned`, taken from the updater's recorded
+tier fact (`UpdateState.setupFacts.sqlTier`, `Get-PimUplinkDatabasePinned`): `pinned-below` = true; ok / raised /
+below = false; anything else (n/a, unknown, nothing recorded) = the key is left out. The heartbeat reads no ARM for it.
+
+*`docsVersion` (3.1.53, DOCS-FRESH, framework ALIGN-AUTO-ALL item 3).* The heartbeat also carries the version the
+shipped docs name as live, read from `engine/docs-version.txt` (`Get-PimUplinkDocsVersion`); a missing, empty or
+malformed file leaves the key out. The release step keeps that file, `VERSION` and the docs' one `Docs-Live-Version`
+line equal, so Invardia can open a task when the docs lag the latest released version.
 
 **Security findings as alert records (`Kind = 'alert'`, 3.0.50).** Three findings also reach Invardia, beside the mail that
 stays the customer's own alarm:

@@ -3286,7 +3286,18 @@ function Get-PimUplinkStateFields {
             # leftoverGrant (true = reported, false = checked and none left, left out when not checked); state is untouched
             $__sfFaGrant = ''; try { $__sfFaGrant = "$(Get-PimUplinkField (Get-PimUplinkField (ConvertFrom-PimUplinkStoredValue $UpdateState) 'setupFacts') 'firstAdminGrant')".Trim() } catch { $__sfFaGrant = '' }
             $__sfV = Get-PimFirstAdminHeartbeatField -Record $__sfFaRec -Access $__sfFaAcc -RecordReadable $__sfFaRecOk -AccessReadable $__sfFaAccOk -LeftoverGrant $__sfFaGrant
-            if ($null -ne $__sfV) { $out['FirstAdminSeed'] = $__sfV }
+            # ENV-SUPERADMIN-BIND-1 / BUG-FAS-ENV-1: SuperAdmins named in the Manager's PIM_SuperAdmins setting, bound by the
+            # updater (pim.Settings EnvSuperAdminBinding). The soft field settingSuperAdmins { viaSetting; bound; unresolved }
+            # carries COUNTS only; a BOUND one is "a SuperAdmin exists", so 'pending' is not reported for it.
+            if ($null -ne $__sfV) {
+                if (-not (Get-Command Get-PimEsbCounts -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-EnvSuperAdminBind.ps1') }
+                $__sfEsb = $null; try { $__sfEsb = Get-PimEsbCounts -Binding (& $GetSetting (Get-PimEsbSettingName)) } catch { $__sfEsb = $null }
+                if ($null -ne $__sfEsb -and [int]$__sfEsb.viaSetting -gt 0) {
+                    $__sfV['settingSuperAdmins'] = $__sfEsb
+                    if ("$($__sfV['state'])" -ceq 'pending' -and [int]$__sfEsb.bound -gt 0) { $__sfV['state'] = 'none' }
+                }
+                $out['FirstAdminSeed'] = $__sfV
+            }
         } catch { Write-Warning "[uplink] FirstAdminSeed could not be built: $($_.Exception.Message)" }
     }
     return $out

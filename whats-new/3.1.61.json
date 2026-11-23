@@ -1,0 +1,6 @@
+{"version":"3.1.61","date":"2026-11-23","type":"fix-only",
+ "summary":"SuperAdmins set in the PIM Manager settings are tied to their own account.",
+ "new":[],
+ "fixes":[{"title":"SuperAdmins tied to their account","text":"Each SuperAdmin named in the PIM Manager app settings is matched once to that person's Microsoft Entra account. Only that account then gets SuperAdmin rights. A name that matches no single account gets no rights."},
+          {"title":"First admin status is right","text":"An installation whose SuperAdmins come only from the app settings no longer shows the first admin as still waiting."},
+          {"title":"Secret hand-over with a prepared key","text":"Handing a secret over to PIM Manager also works when Invardia support has prepared the key for it in advance."}]}

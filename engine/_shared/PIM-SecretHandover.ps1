@@ -350,7 +350,10 @@ function Invoke-PimShoUpdaterStep {
             }
             $out.detail = "the hand-over key was not read: $(Protect-PimShoText -Text $m)"; & $say 'warn' $out.detail; return $out
         }
-        if ($cur -and "$(Get-PimShoField $cur 'value')".Trim()) {
+        # A secret the Invardia Support app PRE-CREATED (tag pim-handover = placeholder, decision 15867370 option (a): the
+        # updater's Secrets Officer is scoped to this one secret, so it cannot create it) is not a key yet: make one into it.
+        $isPlaceholder = $cur -and ("$(Get-PimShoField (Get-PimShoField $cur 'tags') 'pim-handover')" -ieq 'placeholder')
+        if ($cur -and -not $isPlaceholder -and "$(Get-PimShoField $cur 'value')".Trim()) {
             $priv = "$(Get-PimShoField $cur 'value')"
         } else {
             $kp = New-PimShoKeyPair

@@ -1,6 +1,6 @@
 # What's new in PIM Manager
 
-## 3.1.60.2 · 2026-11-23 · Security
+## 3.1.62.1 · 2026-11-23 · Security
 
 A security update: PIM Manager now runs on Microsoft's latest patched platform.
 
@@ -12,9 +12,9 @@ None in this version.
 
 - **Latest patched Microsoft base images** - PIM Manager now runs on the newest patched Microsoft platform. Nothing changes in how you sign in or work.
 
-## 3.1.60.1 · 2026-11-23 · Security
+## 3.1.62 · 2026-11-23 · Fix-only
 
-A security update: PIM Manager now runs on Microsoft's latest patched platform.
+The environment report lists only PIM Manager's own accounts and the rights they hold.
 
 ### New features
 
@@ -22,7 +22,22 @@ None in this version.
 
 ### Fixes
 
-- **Latest patched Microsoft base images** - PIM Manager now runs on the newest patched Microsoft platform. Nothing changes in how you sign in or work.
+- **Environment report shows only PIM Manager's own accounts** - The environment report lists PIM Manager's own identities and the Invardia Support app, with each right they hold and why. Other accounts in your tenant are not listed. The permission health check still watches every right.
+- **Latest .NET base image** - PIM Manager is built on the newest Microsoft .NET 10 base image.
+
+## 3.1.61 · 2026-11-23 · Fix-only
+
+SuperAdmins set in the PIM Manager settings are tied to their own account.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **SuperAdmins tied to their account** - Each SuperAdmin named in the PIM Manager app settings is matched once to that person's Microsoft Entra account. Only that account then gets SuperAdmin rights. A name that matches no single account gets no rights.
+- **First admin status is right** - An installation whose SuperAdmins come only from the app settings no longer shows the first admin as still waiting.
+- **Secret hand-over with a prepared key** - Handing a secret over to PIM Manager also works when Invardia support has prepared the key for it in advance.
 
 ## 3.1.60 · 2026-11-20 · Fix-only
 

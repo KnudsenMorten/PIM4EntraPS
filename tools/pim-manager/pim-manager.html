@@ -10418,7 +10418,7 @@
       '<div class="cover-note">Confidential. This document names the identities, permissions and network exposure of this environment. It contains no secret values. Every fact was read from the environment at the time above; what could not be read is marked <i>not readable</i>.</div></div></section>';
     // ---- contents
     b += '<section class="toc"><h1 class="toc-h">Contents</h1><ol class="toc-list">' + secs.map(x => '<li><a href="#sec-' + x[0] + '"><span class="num">' + num(x[0]) + '</span> ' + erEsc(x[1]) + '</a></li>').join('') + '</ol>' +
-      '<div class="tiles"><div class="tile"><b>' + erEsc(String(C.identities || 0)) + '</b>identities</div><div class="tile"><b>' + erEsc(String(PC.expected || 0)) + '</b>permissions as expected</div><div class="tile bad"><b>' + erEsc(String(PC.missing || 0)) + '</b>missing</div><div class="tile warn"><b>' + erEsc(String(PC.extra || 0)) + '</b>extra</div><div class="tile ' + ((FC.high || 0) ? 'bad' : '') + '"><b>' + erEsc(String((FC.high || 0) + (FC.medium || 0))) + '</b>findings (high + medium)</div><div class="tile"><b>' + erEsc(String(C.unreadableSources || 0)) + '</b>sources not readable</div></div></section>';
+      '<div class="tiles"><div class="tile"><b>' + erEsc(String(C.identities || 0)) + '</b>identities</div><div class="tile"><b>' + erEsc(String(PC.expected || 0)) + '</b>permissions held as declared</div><div class="tile ' + ((FC.high || 0) ? 'bad' : '') + '"><b>' + erEsc(String((FC.high || 0) + (FC.medium || 0))) + '</b>findings (high + medium)</div></div></section>';
     // ---- 1 summary
     const H = (S.health && S.health.items) || [];
     b += '<section>' + h1('summary') + erKv([
@@ -10442,7 +10442,7 @@
     // ---- 4 permissions per identity
     const perms = erList(d.permissions);
     const areaLbl = { graph: 'Graph application', 'app-role': 'Other API application', directoryRole: 'Entra directory role', azure: 'Azure RBAC', keyVault: 'Key Vault', sql: 'SQL role', exchange: 'Exchange RBAC for Applications', delegated: 'Delegated (on behalf of the admin)' };
-    b += '<section>' + h1('permissions') + '<p>What each identity holds, compared with the set PIM Manager declares (<span class="mono">' + erEsc((d.expectedSource && d.expectedSource.file) || '') + '</span>): <b>Expected</b> = declared and held; <b>MISSING</b> = declared and not held; <b>EXTRA</b> = held and not declared; <b>Not readable</b> = the grants could not be read, so nothing is concluded.</p>';
+    b += '<section>' + h1('permissions') + '<p>The rights each of PIM Manager’s own identities holds, as PIM Manager declares them (<span class="mono">' + erEsc((d.expectedSource && d.expectedSource.file) || '') + '</span>), each with its reason. The permission health check (Health &gt; Permissions) compares them with the declared set.</p>';
     const byId = {}; perms.forEach(p => { const k = p.identityId || p.identity; (byId[k] = byId[k] || []).push(p); });
     let n4 = 0;
     ids.filter(i => byId[i.id]).forEach(i => {
@@ -10451,7 +10451,6 @@
       b += '<h2>' + num('permissions') + '.' + n4 + ' ' + erEsc(i.name || i.id) + ' <span class="muted">(' + erEsc(i.kind) + ')</span></h2>' +
         erTable(['Area', 'Permission', 'Scope', 'Status', 'Why / note'], rows.map(p => [erEsc(areaLbl[p.area] || p.area), erEsc(p.permission), erEsc(p.scope || '') + (p.scopeDetail ? '<div class="muted small">' + erEsc(p.scopeDetail) + '</div>' : ''), erStatusHtml(p), erEsc(p.why || '') + (p.reason ? '<div class="muted small">' + erEsc(p.reason) + '</div>' : '')]));
     });
-    if (!n4) b += '<p>' + nr('No permission could be read.') + '</p>';
     b += '</section>';
     // ---- 5 features
     const feats = erList(d.features).slice().sort((x, y) => (Number(!!y.securityRelevant) - Number(!!x.securityRelevant)) || String(x.group).localeCompare(String(y.group)));
@@ -10468,7 +10467,7 @@
     const F = erList(d.findings);
     b += '<section>' + h1('findings') + (F.length ? erTable(['Severity', 'Finding', 'Detail', 'Fix'], F.map(f => [erSevHtml(f.severity), '<b>' + erEsc(f.title) + '</b><div class="muted small">' + erEsc(f.area) + '</div>', erEsc(f.detail), f.fix ? '<pre class="fix">' + erEsc(f.fix) + '</pre>' + erFixDocLines(f.fix) : ''])) : '<p><span class="st st-ok">No findings.</span></p>') + '</section>';
     // ---- appendix
-    b += '<section>' + h1('sources') + '<p>Every source the report read, and whether it could be read. Secret-looking text redacted: ' + erEsc(String(d.redactions || 0)) + '.</p>' +
+    b += '<section>' + h1('sources') + '<p>Every source the report read. Secret-looking text redacted: ' + erEsc(String(d.redactions || 0)) + '.</p>' +
       erTable(['Section', 'Source', 'Readable', 'Reason'], erList(d.sources).map(s => [erEsc(s.section), erEsc(s.source), s.readable ? '<span class="st st-ok">yes</span>' : '<span class="st st-nr">no</span>', erEsc(s.reason || '')])) + '</section>';
     const css =
       '@page{size:A4;margin:18mm 14mm 16mm 14mm;' +
@@ -10558,8 +10557,8 @@
         '<button type="button" class="btn-sec" id="erRefresh">Read again</button>' +
         '<span style="font-size:12px;color:#57606a;">Read ' + erEsc(erTime(d.generatedUtc)) + (d.cached ? ' (kept from the last read; Read again for a fresh one)' : '') + '</span>' +
       '</div>' +
-      '<div id="erChips" style="margin-bottom:8px;">' + chip(C.identities, 'identities', '#0969da') + chip(PC.missing, 'missing permissions', '#cf222e') + chip(PC.extra, 'extra permissions', '#9a6700') +
-        chip(FC.high, 'high findings', '#cf222e') + chip(FC.medium, 'medium findings', '#bc4c00') + chip(C.unreadableSources, 'sources not readable', '#57606a') + '</div>' +
+      '<div id="erChips" style="margin-bottom:8px;">' + chip(C.identities, 'identities', '#0969da') +
+        chip(FC.high, 'high findings', '#cf222e') + chip(FC.medium, 'medium findings', '#bc4c00') + '</div>' +
       '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">Export PDF opens the print dialog: choose <b>Save as PDF</b>, paper <b>A4</b>, and keep <b>Background graphics</b> on. Confidential: it names identities and permissions, never a secret value.</div>' +
       '<iframe id="envReportFrame" title="Environment report" style="width:100%;height:calc(100vh - 290px);min-height:480px;border:1px solid #d0d7de;border-radius:6px;background:#eaeef2;"></iframe>';
     const fr = document.getElementById('envReportFrame');

@@ -591,6 +591,8 @@ if (Test-Path -LiteralPath $_pendRemLib) { . $_pendRemLib }
 # SECRETS-WRITE (sealed hand-over): POST /api/settings/mail/relay-password seals the relay password to this installation's
 # published key and stores ONLY the sealed copy; the updater writes Key Vault. The web identity holds no Key Vault right.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SecretHandover.ps1')
+# ENV-SUPERADMIN-BIND-1: a PIM_SuperAdmins name grants SuperAdmin only on its bound Entra object id (Test-PimEsbGrant).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-EnvSuperAdminBind.ps1')
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -1603,7 +1605,25 @@ function Get-PimManagerRole {
     } catch { Write-Warning "  [rbac] SQL 'ManagerAccess' read failed: $($_.Exception.Message)" }
     $supers = @("$env:PIM_SuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
     $admins = @("$env:PIM_Admins"      -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-    if ($supers -contains $whoLc) { return @{ role = 'SuperAdmin'; identity = $who; source = 'env PIM_SuperAdmins' } }
+    if ($supers -contains $whoLc) {
+        # 🔴 ENV-SUPERADMIN-BIND-1 (Invardia 2026-11-22): on a HOSTED Manager the sign-in name alone never grants SuperAdmin.
+        # The name must be BOUND (by the updater, step 2d-esb) to an Entra object id, and THIS request's verified oid must be
+        # that id (engine/_shared/PIM-EnvSuperAdminBind.ps1 Test-PimEsbGrant). Anything else falls through (Admin / Reader below).
+        # The local console (not hosted, the operator's own interactive SQL sign-in) keeps the name match.
+        if (-not $script:PimHosted) { return @{ role = 'SuperAdmin'; identity = $who; source = 'env PIM_SuperAdmins (local console)' } }
+        $esbBind = $null
+        try {
+            if ($script:PimSqlCs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) {
+                $esbNow = [datetime]::UtcNow
+                if (-not $script:PimEsbCache -or ($esbNow - $script:PimEsbCache.at).TotalSeconds -gt 15) { $script:PimEsbCache = @{ at = $esbNow; value = (Get-PimSqlSettingRaw -ConnectionString $script:PimSqlCs -Name (Get-PimEsbSettingName)) } }
+            }
+            if ($script:PimEsbCache) { $esbBind = $script:PimEsbCache.value }
+        } catch { $esbBind = $null }
+        # the library missing (never in a built image) = NOT granted, said -- fail closed, never the old name match
+        $esbG = if (Get-Command Test-PimEsbGrant -ErrorAction SilentlyContinue) { Test-PimEsbGrant -Binding $esbBind -Identity $whoLc -ObjectId "$script:CurrentRequestOid" } else { @{ grant = $false; reason = 'the binding check is not loaded' } }
+        if ($esbG.grant) { return @{ role = 'SuperAdmin'; identity = $who; source = 'env PIM_SuperAdmins (bound object id)'; matchedBy = 'objectId' } }
+        Write-Warning ("  [rbac] '{0}' is named in PIM_SuperAdmins but NOT granted SuperAdmin: {1}." -f $who, $esbG.reason)
+    }
     if ($admins -contains $whoLc) { return @{ role = 'Admin';      identity = $who; source = 'env PIM_Admins' } }
     # Delegated (workload owner): sees ONLY the groups they own. Identity match here;
     # the data layer (Read-PimRows) scopes rows to groups whose Owners include them.
@@ -13583,6 +13603,9 @@ function Get-PimManagerEnvironmentReport {
     }
     $who = ''; try { $who = "$((Get-PimManagerRole).identity)" } catch { $who = '' }
     $rep = Get-PimEnvironmentReport -Sources $envRepSources -Graph $envRepGraph -Arm $envRepArm -Sql $envRepSql -RequestedBy $who
+    # DOC-RIGHTS-1 (owner 2026-11-23): the route serves the DOCUMENT -- only PIM's own identities and the rights they hold as
+    # declared. A missing / extra / unreadable right stays in the permission health check (Health > Permissions, fix request).
+    $rep = Select-PimEnvReportDocument -Report $rep
     $rep['cached'] = $false
     $script:PimEnvReportCache = @{ at = (Get-Date); body = $rep }
     return $rep

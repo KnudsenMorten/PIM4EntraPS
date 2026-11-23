@@ -1,0 +1,5 @@
+{"version":"3.1.62","date":"2026-11-23","type":"fix-only",
+ "summary":"The environment report lists only PIM Manager's own accounts and the rights they hold.",
+ "new":[],
+ "fixes":[{"title":"Environment report shows only PIM Manager's own accounts","text":"The environment report lists PIM Manager's own identities and the Invardia Support app, with each right they hold and why. Other accounts in your tenant are not listed. The permission health check still watches every right."},
+          {"title":"Latest .NET base image","text":"PIM Manager is built on the newest Microsoft .NET 10 base image."}]}
