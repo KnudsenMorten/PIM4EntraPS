@@ -1,0 +1,13 @@
+{
+  "version": "3.1.60.1",
+  "date": "2026-11-23",
+  "type": "security",
+  "summary": "A security update: PIM Manager now runs on Microsoft's latest patched platform.",
+  "new": [],
+  "fixes": [
+    {
+      "title": "Latest patched Microsoft base images",
+      "text": "PIM Manager now runs on the newest patched Microsoft platform. Nothing changes in how you sign in or work."
+    }
+  ]
+}

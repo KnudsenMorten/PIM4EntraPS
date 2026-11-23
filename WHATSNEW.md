@@ -1,5 +1,17 @@
 # What's new in PIM Manager
 
+## 3.1.60.1 · 2026-11-23 · Security
+
+A security update: PIM Manager now runs on Microsoft's latest patched platform.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Latest patched Microsoft base images** - PIM Manager now runs on the newest patched Microsoft platform. Nothing changes in how you sign in or work.
+
 ## 3.1.60 · 2026-11-20 · Fix-only
 
 A job run that has stopped working can no longer hold an update back.

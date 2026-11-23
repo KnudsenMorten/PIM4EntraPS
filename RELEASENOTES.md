@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.60.1 -- 2026-11-23
+
+- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.60); no change in behaviour
+
 ## 3.1.60 -- 2026-11-20
 
 - A job run that stopped working (far past its usual length, nothing in its log since it started) no longer holds an update back: the updater stops that one run, reads it back, reports it and rolls; a logging run is never stopped. The update log no longer says already on a version while the previous one runs.
