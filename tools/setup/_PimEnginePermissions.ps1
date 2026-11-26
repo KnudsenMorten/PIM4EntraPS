@@ -16,6 +16,15 @@ function Get-PimEpGraphCliClientId { '14d82eec-204b-4c2f-b7e8-296a70dab67e' }   
 function Get-PimEpAzurePowerShellClientId { '1950a258-227b-4e31-a9cf-717495945fc2' } # Microsoft Azure PowerShell
 function Get-PimEpGraphAppId { '00000003-0000-0000-c000-000000000000' }             # Microsoft Graph (the resource)
 function Get-PimEpGraphScopes { @('AppRoleAssignment.ReadWrite.All', 'Application.Read.All') }
+# assigning an Entra directory role (-DirectoryRoles) also needs this delegated scope -- asked only then
+function Get-PimEpGraphDirectoryRoleScopes { @('RoleManagement.ReadWrite.Directory') }
+# ADMIN-DISABLE-PROTECTED-1 (b): the ONE Entra directory role this script gives the engine identity -- Privileged Authentication
+# Administrator (Microsoft protects admins that are members of role-assignable groups; disabling / re-enabling them needs it).
+# Built-in: the template id is the same in every tenant and is the role definition id. Any other role is refused (the script
+# never hands out a directory role PIM does not need, and never creates or changes a role definition). The id is written
+# here as a literal on purpose (this file is published standalone and loads nothing): the engine's permission check
+# (PIM-PermissionHealth.ps1) carries the same id, and tests\Test-PimAdminDisableProtected.ps1 holds the two together.
+function Get-PimEpKnownDirectoryRoles { @([pscustomobject]@{ name = 'Privileged Authentication Administrator'; id = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13' }) }
 function Get-PimEpArmScope { 'https://management.azure.com/user_impersonation' }
 function Get-PimEpArmApiVersion { '2022-04-01' }
 
@@ -92,7 +101,26 @@ function ConvertTo-PimEpAzureRoleSpec {
     [pscustomobject]@{ role = $role; roleDefinitionGuid = $guid; scope = $scope; spec = $s }
 }
 
+# An Entra directory role for the engine: its name ('Privileged Authentication Administrator') or its template id. Only the
+# roles of Get-PimEpKnownDirectoryRoles are accepted. Returns @{ role; roleTemplateId; spec }.
+function ConvertTo-PimEpDirectoryRoleSpec {
+    param([Parameter(Mandatory)][string]$Spec)
+    $s = $Spec.Trim()
+    $hit = @(Get-PimEpKnownDirectoryRoles | Where-Object { $_.name -ieq $s -or $_.id -ieq $s }) | Select-Object -First 1
+    if (-not $hit) { throw "The directory role '$Spec' is not one this script gives the engine identity. Allowed: $(@(Get-PimEpKnownDirectoryRoles | ForEach-Object { $_.name }) -join ', ')." }
+    [pscustomobject]@{ role = $hit.name; roleTemplateId = $hit.id; spec = $s }
+}
+
 # ---- request builders (pure) ------------------------------------------------------------------------------------------
+# POST /roleManagement/directory/roleAssignments -- one built-in Entra directory role for the engine at the whole directory ('/').
+function New-PimEpDirectoryRoleAssignmentRequest {
+    param([Parameter(Mandatory)][string]$PrincipalId, [Parameter(Mandatory)][string]$RoleTemplateId)
+    [pscustomobject]@{
+        Method = 'POST'
+        Path   = '/roleManagement/directory/roleAssignments'
+        Body   = [ordered]@{ principalId = $PrincipalId; roleDefinitionId = $RoleTemplateId; directoryScopeId = '/' }
+    }
+}
 # POST /servicePrincipals/{resource}/appRoleAssignedTo -- the body that gives the engine one application permission.
 function New-PimEpAppRoleAssignmentRequest {
     param([Parameter(Mandatory)][string]$PrincipalId, [Parameter(Mandatory)][string]$ResourceId, [Parameter(Mandatory)][string]$AppRoleId)
@@ -485,6 +513,39 @@ function Invoke-PimEpAzureRoleGrant {
             else { $results.Add((New-PimEpResult 'Azure role' $s.role $s.scope 'granted' 'accepted, not readable yet -- check again in a minute')) }
         } catch {
             $results.Add((New-PimEpResult 'Azure role' $s.role $s.scope 'refused' "$_"))
+        }
+    }
+    $results.ToArray()
+}
+
+# ADMIN-DISABLE-PROTECTED-1 (b): Entra directory roles for the engine identity (Privileged Authentication Administrator only --
+# ConvertTo-PimEpDirectoryRoleSpec refuses any other). Needs the Graph token with RoleManagement.ReadWrite.Directory. Idempotent:
+# an assignment at the whole directory is reported and left alone; a new one is a permanent active assignment at '/', read back.
+# It only ASSIGNS the existing built-in role -- no role definition is ever created or changed.
+function Invoke-PimEpDirectoryRoleGrant {
+    param([Parameter(Mandatory)][string]$EngineObjectId, [object[]]$Specs, [switch]$PlanOnly)
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($s in @($Specs)) {
+        if (-not $s) { continue }
+        $where = 'Microsoft Entra ID (directory /)'
+        $read = { @(Invoke-PimEpRest -Api graph -Path ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '{0}' and roleDefinitionId eq '{1}'" -f $EngineObjectId, $s.roleTemplateId) -All |
+                    Where-Object { $_ -and ("$($_.directoryScopeId)" -eq '/' -or -not "$($_.directoryScopeId)".Trim()) }) }
+        try {
+            if (@(& $read).Count) { $results.Add((New-PimEpResult 'directory role' $s.role $where 'already there')); continue }
+            if ($PlanOnly) { $results.Add((New-PimEpResult 'directory role' $s.role $where 'would grant')); continue }
+            $req = New-PimEpDirectoryRoleAssignmentRequest -PrincipalId $EngineObjectId -RoleTemplateId $s.roleTemplateId
+            try { [void](Invoke-PimEpRest -Api graph -Method $req.Method -Path $req.Path -Body $req.Body) }
+            catch {
+                $msg = "$_"; $st = Get-PimEpErrorStatus $msg
+                if (($st -eq 400 -or $st -eq 409) -and $msg -match '(?i)already exist|conflicting object') { $results.Add((New-PimEpResult 'directory role' $s.role $where 'already there')); continue }
+                if ($st -eq 403 -or $st -eq 401) { $results.Add((New-PimEpResult 'directory role' $s.role $where 'refused' "$msg -- sign in as a Global Administrator or Privileged Role Administrator")); continue }
+                $results.Add((New-PimEpResult 'directory role' $s.role $where 'refused' $msg)); continue
+            }
+            $seen = $false; try { $seen = [bool]@(& $read).Count } catch { $seen = $false }
+            if ($seen) { $results.Add((New-PimEpResult 'directory role' $s.role $where 'granted')) }
+            else { $results.Add((New-PimEpResult 'directory role' $s.role $where 'granted' 'accepted, not visible on the read-back yet -- check again in a minute')) }
+        } catch {
+            $results.Add((New-PimEpResult 'directory role' $s.role $where 'refused' "$_"))
         }
     }
     $results.ToArray()

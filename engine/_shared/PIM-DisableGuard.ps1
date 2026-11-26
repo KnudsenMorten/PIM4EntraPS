@@ -1146,3 +1146,84 @@ function Write-PimDisableAbortAlert {
     }
     if ($PassThru) { return $r }
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# ADMIN-DISABLE-PROTECTED-1 (c) (owner 2026-11-25 on internal, "this is very bad" / "nothing works"): disabling a PIM admin that
+# is a member (eligible or active) of a ROLE-* (role-assignable) group was answered by Graph with a raw
+# "403 Authorization_RequestDenied" -- Microsoft protects such accounts: accountEnabled is a protected property that needs the
+# Entra role Privileged Authentication Administrator; User.ReadWrite.All is not enough. The engine now says the cause and the fix
+# in plain words, and keeps the raw answer in the details.
+# ---------------------------------------------------------------------------------------------------------------------
+function Test-PimAccountEnabledRefusal {
+    <#
+      PURE. Is this error Graph refusing an accountEnabled change of a user (HTTP 403 / Authorization_RequestDenied /
+      "Insufficient privileges")? A 404, a 429, a 5xx or any other text is not. -Text: the error message (and its details).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $t = "$Text"
+    if (-not $t.Trim()) { return $false }
+    if ($t -match '(?i)Authorization_RequestDenied|Insufficient privileges') { return $true }
+    if ($t -match '(?i)\b(404|429)\b|NotFound|TooManyRequests|ServiceUnavailable') { return $false }
+    return [bool]($t -match '(?i)\b403\b|Forbidden')
+}
+
+function Get-PimEnginePrivAuthAdminHeldFact {
+    <#
+      3.1.69 review. Does the engine identity hold Privileged Authentication Administrator, by the engine's OWN recorded facts
+      (PIM-EngineDirectoryFacts.ps1: the 'pim-identities' book -- its engine object id and its recorded
+      roleManagement/directory/roleAssignments read)? Called only on the refusal path (one cached read, no Graph call).
+      $true / $false, or $null when not known (the library or the book is missing, the read was not recorded or was refused).
+      -Book: a test seam (an answer book).
+    #>
+    param($Book = $null)
+    try {
+        $bk = $Book
+        if ($null -eq $bk) {
+            if (-not (Get-Command Get-PimEngineRecordedBook -ErrorAction SilentlyContinue)) { return $null }
+            $bk = Get-PimEngineRecordedBook
+        }
+        if ($null -eq $bk -or -not (Get-Command Invoke-PimEngineRecordedGraph -ErrorAction SilentlyContinue)) { return $null }
+        $oid = "$(if ($bk -is [System.Collections.IDictionary]) { $bk['engineObjectId'] } else { $bk.engineObjectId })".Trim()
+        if (-not $oid) { return $null }
+        $asg = @(Invoke-PimEngineRecordedGraph -Book $bk -All -Path ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '{0}'&`$expand=roleDefinition" -f $oid))
+        foreach ($a in $asg) {
+            if ($null -eq $a) { continue }
+            $sc = "$($a.directoryScopeId)".Trim()
+            if ($sc -and $sc -ne '/') { continue }
+            $ids = @("$($a.roleDefinitionId)"); if ($a.PSObject.Properties['roleDefinition'] -and $a.roleDefinition) { $ids += "$($a.roleDefinition.templateId)" }
+            if (@($ids | Where-Object { "$_".Trim() -ieq '7be44c8a-adaf-4e2a-84d6-ab2649e08a13' }).Count) { return $true }
+        }
+        return $false
+    } catch { return $null }
+}
+
+function ConvertTo-PimAccountEnabledRefusalText {
+    <#
+      PURE. The customer-plain sentence for a refused accountEnabled change (Test-PimAccountEnabledRefusal true), with the raw
+      Graph answer kept in the details. -Enable: the change was an ENABLE (portal re-enable / AccountStatus=Enabled). -Admin:
+      the account's sign-in name. Returns '' when the error is not such a refusal (the caller then keeps the raw error).
+      The text keeps "403" + "Authorization_RequestDenied" in the details, so the failure catalog still files it under
+      PERMISSION-DENIED (the engine identity lacks a permission).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$ErrorText, [string]$Admin = '', [switch]$Enable,
+          # 3.1.69 review: a 403 can have another cause (a missing User.ReadWrite.All, a policy). The protected-account cause is
+          # said FIRMLY only when the engine's role facts show Privileged Authentication Administrator is NOT held ($false).
+          # $null (the default: not known here) = "most likely"; $true (held) = the role is not the cause, the raw answer says what is.
+          [AllowNull()][object]$PrivAuthAdminHeld = $null)
+    if (-not (Test-PimAccountEnabledRefusal -Text $ErrorText)) { return '' }
+    $verb = if ($Enable) { 'enable' } else { 'disable' }
+    $who = if ("$Admin".Trim()) { "the admin $("$Admin".Trim())" } else { 'this admin' }
+    $raw = "$ErrorText".Trim() -replace '\s+', ' '
+    if ($raw.Length -gt 600) { $raw = $raw.Substring(0, 597) + '...' }
+    $check = 'run the permission check in PIM Manager > Get Started > Engine permissions (or the setup check, Confirm-PimInstall.ps1) and grant what it lists'
+    if ($PrivAuthAdminHeld -is [bool] -and -not $PrivAuthAdminHeld) {
+        return ("PIM cannot $verb $who because the account is a member of a role-assignable group, which Entra protects, and the PIM engine " +
+                "does not hold the Entra role Privileged Authentication Administrator that this needs -- $check. Details: $raw")
+    }
+    if ($PrivAuthAdminHeld -is [bool] -and $PrivAuthAdminHeld) {
+        return ("Entra refused to $verb $who (HTTP 403). The PIM engine holds Privileged Authentication Administrator, so a missing " +
+                "Microsoft Graph permission is the likelier cause -- $check. Details: $raw")
+    }
+    return ("Entra refused to $verb $who (HTTP 403), most likely because the account is a member of a role-assignable group, which Entra " +
+            "protects: the PIM engine then needs the Entra role Privileged Authentication Administrator -- $check. Details: $raw")
+}

@@ -1917,6 +1917,9 @@ function Initialize-PimDefaultJobHandlers {
     # twice and the cadence follows the PendingReminders setting.
     Register-PimJobHandler -Type 'daily-summary' -Handler {
         param($job,$now,$whatIf)
+        # ONE-SENDER-1 point D (Invardia 2026-11-25): the DAILY Graph probe of every sending identity rides on this daily job
+        # (no new job, no standing loop) -- pim.Settings 'MailSenderProbe'; never fatal, never in -WhatIf
+        if (-not $whatIf -and (Get-Command Invoke-PimMailSenderProbeScheduled -ErrorAction SilentlyContinue)) { try { [void](Invoke-PimMailSenderProbeScheduled -NowUtc $now -Force) } catch { Write-Warning "[scheduler] the sender check did not run: $($_.Exception.Message)" } }
         return (& $script:PimDailySummaryCore $job $now $whatIf)
     }
     # (2) Tier 0/1 report. 🔴 HOLLOW (found 2026-09-12): it read $global:PIM_TierReportAssignments
@@ -4461,7 +4464,11 @@ function Invoke-PimTickJobRun {
     if (-not $WhatIf) { try { [void](Save-PimUnsavedRunRecords -Owner $Owner) } catch { Write-Verbose "[scheduler] unsaved run records: $($_.Exception.Message)" } }
     # (0) the execution time limit: a job that does not fit in what is left of this execution waits for the next one
     # instead of being killed half-way (the 'running' record that then never reports back).
-    if ($Kind -ne 'queue' -and -not $WhatIf -and $TimeLimitSeconds -gt 0) {
+    # LOOKUP-SLOT-1: the on-demand directory lookup is small and bounded -- never deferred on the estimate of the full
+    # 'tenant-cache' refresh its trigger shares a name with (hours in a big tenant).
+    # (a function-table lookup, not Get-Command: a missing function must not cost a module search on every job)
+    $__ownTrig = $false; if (${function:Test-PimOwnSlotTrigger}) { $__ownTrig = Test-PimOwnSlotTrigger -Job $Job }
+    if ($Kind -ne 'queue' -and -not $WhatIf -and $TimeLimitSeconds -gt 0 -and -not $__ownTrig) {
         $el = [int]([datetime]::UtcNow - $ExecWallStart).TotalSeconds
         $est = Get-PimJobDurationEstimateSeconds -Job $Job -History $History
         if (-not (Test-PimJobFitsExecution -ElapsedSeconds $el -LimitSeconds $TimeLimitSeconds -EstimateSeconds $est)) {
@@ -4617,6 +4624,12 @@ function Invoke-PimSchedulerTriggerDrain {
     $drainWall = [datetime]::UtcNow
     $out = New-Object System.Collections.Generic.List[object]
     $triggers = @(Get-PimPendingTriggers)
+    # LOOKUP-SLOT-1: the on-demand directory lookups go FIRST, so a long trigger queued ahead of them (a Run now of a full
+    # reconcile) never holds back a person waiting in the Manager. The rest keep their order.
+    if (${function:Test-PimOwnSlotTrigger} -and $triggers.Count) {
+        $__first = @($triggers | Where-Object { $_ -and (Test-PimOwnSlotTrigger -Job $_) })
+        if ($__first.Count) { $triggers = @($__first) + @($triggers | Where-Object { -not ($_ -and (Test-PimOwnSlotTrigger -Job $_)) }) }
+    }
     $tc = $script:PimTickCtx
     foreach ($tg in $triggers) {
         # BUG-235 (77.4): a Run-now trigger carries the job it was pressed on -- record the run under that name.

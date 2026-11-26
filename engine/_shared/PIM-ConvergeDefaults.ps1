@@ -374,7 +374,7 @@ function Invoke-PimUpdateConvergeDefaults {
     # ---- role checks (report only) ---------------------------------------------------------------------------------
     $ids = $script:PimConvergeRoleIds
     $mgrRg = & $readAssignments $rgScope $mgrOid
-    $d = Get-PimRbacConvergeDecision -Id 'manager-rg-reader' -What "Reader for $ManagerApp on the resource group (Environment report)" -Assignments $mgrRg.list -ReadError $mgrRg.error `
+    $d = Get-PimRbacConvergeDecision -Id 'manager-rg-reader' -What "Reader for $ManagerApp on the resource group (System Documentation)" -Assignments $mgrRg.list -ReadError $mgrRg.error `
             -Scope $rgScope -RoleIds @($ids.Reader, $ids.Contributor, $ids.Owner) -Fix $rgReaderFix
     & $add $d.id $(if ($d.action -eq 'noop') { 'info' } else { 'warn' }) $d.line
     # 🔒 SECURE-WEB-1 (framework 12.11f, 2026-11-14): the Manager is INTERNET-FACING and must hold NO never-right anywhere in

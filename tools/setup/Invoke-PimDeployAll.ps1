@@ -499,8 +499,9 @@ param(
     [ValidateRange(0,3)][int]$UpdateRing = 2,
     # §95.4 (2026-10-06) -- WHERE PRO UPDATES COME FROM. 'Invardia' = signed manifests + archives from Invardia for this
     # environment's ring (the install key is claimed by the engine once the Pro licence is in). Forwarded to
-    # Deploy-PimUpdateJob; empty keeps whatever the job already carries.
-    [ValidateSet('', 'pim-src', 'Invardia', 'InvardiaCommunity')][string]$UpdateSource = '',
+    # Deploy-PimUpdateJob; empty keeps whatever the job already carries. UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): the unsigned
+    # 'pim-src' choice was removed -- only the signed Invardia sources (Pro / Community) remain.
+    [ValidateSet('', 'Invardia', 'InvardiaCommunity')][string]$UpdateSource = '',
     # The HOST-SIDE ring gate (Update-PimContainers / Setup-PimContainers) refuses to roll an
     # environment to a version its ring does not approve. This is the only way past it, and it is
     # printed and audited. -Reason is mandatory with it.
@@ -1956,7 +1957,7 @@ function Get-PimDeployAllStepChanges {
                          "Entra ID: Microsoft Graph application permissions -> $TickJobName identity (the engine set) and $ManagerApp identity (the read-only set) @ tenant",
                          "Azure: $(@($AzureRbacRoles) -join ', ') -> $TickJobName identity @ $(if ("$AzureRbacManagementGroupId".Trim()) { "management group $AzureRbacManagementGroupId" } else { $sub })",
                          "Azure: Reader$(if ($EngineAzureRootUserAccessAdmin) { ' + User Access Administrator' }) -> $TickJobName identity @ tenant root management group$(if ($SkipEngineAzureRootAccess) { ' (skipped: -SkipEngineAzureRootAccess)' })",
-                         "Azure: Reader -> $ManagerApp identity @ resource group $rg only (the Environment report reads the architecture; PIM 100.22 b)",
+                         "Azure: Reader -> $ManagerApp identity @ resource group $rg only (the System Documentation reads the architecture; PIM 100.22 b)",
                          "Azure SQL: the least-privilege model @ $SqlDatabase (framework 12.23): a signed access procedure + one role per component; database users for $ManagerApp (pim_web) and $TickJobName (pim_engine), the updater pim_updater + db_ddladmin -- no db_datareader / db_datawriter") }
         'sqlaccess'  { @("Azure: subnet service endpoint Microsoft.Sql + a virtual network rule on $sql (Azure-services firewall rule verified)") }
         'schema'     { @("Azure SQL: idempotent schema upgrade of $SqlDatabase (never destructive)") }

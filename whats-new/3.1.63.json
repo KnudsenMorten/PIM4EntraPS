@@ -1,0 +1,4 @@
+{"version":"3.1.63","date":"2026-11-24","type":"fix-only",
+ "summary":"Security updates reach your installation within 15 minutes.",
+ "new":[],
+ "fixes":[{"title":"Security updates within 15 minutes","text":"When Invardia releases a security update of the Microsoft platform PIM Manager runs on, your installation applies it within 15 minutes instead of waiting for the nightly update. Running jobs are never stopped; the next run uses the update."}]}

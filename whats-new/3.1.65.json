@@ -1,0 +1,4 @@
+{"version":"3.1.65","date":"2026-11-25","type":"fix-only",
+ "summary":"MSP managed-tenant updates is off on a single tenant.",
+ "new":[],
+ "fixes":[{"title":"MSP managed-tenant updates off on single tenants","text":"On a single-tenant installation, Settings > Features & edition now shows MSP managed-tenant updates as off and locked, with the status \"Not used on a single tenant\". Managing and managed tenants are unchanged."}]}

@@ -837,6 +837,119 @@ function Grant-PimMiGraph {
     if ($granted) { Write-Host "    granted $granted new Graph app-role(s)" -ForegroundColor DarkGray }
 }
 
+# ADMIN-DISABLE-PROTECTED-1 (b) (OWNER DECISION 2026-11-25: "Yes - internal and customers" / "we must ensure the necessary
+# permissions at all env. it is core in the solution"): the Entra directory roles the ENGINE identity gets at the install --
+# name -> built-in role template id (the same in every tenant; for a built-in role it is the role definition id). A literal
+# map: engine\_shared\PIM-RightsList.ps1's test reads it by parsing (tests\Test-PimAdminDisableProtected.ps1 holds it against
+# the rights list, the permission check and the published fix script). Privileged Authentication Administrator: Entra protects
+# admin accounts that are members of role-assignable groups -- accountEnabled is a protected property, User.ReadWrite.All is not
+# enough -- so without it PIM cannot disable (offboarding, AccountStatus=Disabled, RFA auto-disable) or re-enable such an admin.
+# PIM only ASSIGNS this existing built-in role; it never creates, changes or deletes a role definition.
+$script:PimEngineDirectoryRoles = @{
+    'Privileged Authentication Administrator' = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'
+}
+
+function Get-PimEngineDirectoryRolePlan {
+    <#
+      PURE. Which engine directory roles are still to assign. -Assignments: the engine identity's
+      roleManagement/directory/roleAssignments (roleDefinitionId, directoryScopeId). Only an assignment at the whole directory
+      ('/') counts. Returns @( @{ role; roleTemplateId; action = 'present' | 'grant' } ).
+    #>
+    param([object[]]$Assignments = @(), [hashtable]$Roles = $script:PimEngineDirectoryRoles)
+    $held = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($a in @($Assignments | Where-Object { $_ })) {
+        $sc = "$($a.directoryScopeId)".Trim()
+        if ($sc -and $sc -ne '/') { continue }
+        if ("$($a.roleDefinitionId)".Trim()) { [void]$held.Add("$($a.roleDefinitionId)".Trim()) }
+    }
+    foreach ($n in @($Roles.Keys | Sort-Object)) {
+        $id = "$($Roles[$n])"
+        [pscustomobject]@{ role = "$n"; roleTemplateId = $id; action = $(if ($held.Contains($id)) { 'present' } else { 'grant' }) }
+    }
+}
+
+function Grant-PimEngineDirectoryRoles {
+    <#
+      ADMIN-DISABLE-PROTECTED-1 (b): assign the engine identity its Entra directory roles ($script:PimEngineDirectoryRoles) as
+      an ACTIVE, PERMANENT assignment at the whole directory ('/') -- an application identity cannot activate an eligible role --
+      then read back. Idempotent: what is held is left alone. Same token pinning as Grant-PimMiGraph (BUG-150). NEVER fatal: a
+      refusal (the installer is no Privileged Role Administrator / Global Administrator) is a loud warning with the exact fix,
+      and the install verify (Confirm-PimInstall.ps1, line engine-graph) and the Manager's permission check report it MISSING.
+      Returns @{ ok; granted[]; present[]; failed[]; error }.
+    #>
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$MiObjectId,
+        [string]$Name = 'the engine identity',
+        [string]$SubscriptionId,
+        [string]$ExpectedTenantId
+    )
+    $res = [ordered]@{ ok = $false; granted = @(); present = @(); failed = @(); error = '' }
+    $fixLine = ".\Grant-PimEnginePermissions.ps1 -TenantId '$(if ("$ExpectedTenantId".Trim()) { "$ExpectedTenantId".Trim() } else { '<tenant id>' })' -EngineObjectId '$MiObjectId' -DirectoryRoles 'Privileged Authentication Administrator'"
+    $gtok = Get-PimSetupGraphToken -SubscriptionId $SubscriptionId -ExpectedTenantId $ExpectedTenantId
+    if (-not $gtok) {
+        $res.error = "no Graph token for the setup identity ($($global:PimSetupGraphTokenError))"
+        Write-Warning "  $Name : the Entra role Privileged Authentication Administrator was NOT checked or assigned -- $($res.error). A Global Administrator runs (https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1): $fixLine"
+        return [pscustomobject]$res
+    }
+    if ("$ExpectedTenantId".Trim()) {
+        $seg = $gtok.Split('.')[1].Replace('-','+').Replace('_','/')
+        switch ($seg.Length % 4) { 2 { $seg += '==' } 3 { $seg += '=' } }
+        $claims = $null
+        try { $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json } catch { }
+        if (-not $claims -or "$($claims.tid)" -ne "$ExpectedTenantId") {
+            $res.error = "REFUSING to assign -- the Graph token is for tenant '$($claims.tid)', expected '$ExpectedTenantId'"
+            Write-Warning "  $Name : $($res.error)"
+            return [pscustomobject]$res
+        }
+    }
+    $gh = @{ Authorization = "Bearer $gtok"; 'Content-Type' = 'application/json' }
+    $readUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=principalId eq '$MiObjectId'"
+    $read = { try { @((Invoke-RestMethod -Headers $gh -Uri $readUri -ErrorAction Stop).value) } catch { $null } }
+    $have = & $read
+    if ($null -eq $have) { $have = @() }
+    foreach ($p in @(Get-PimEngineDirectoryRolePlan -Assignments $have)) {
+        if ($p.action -eq 'present') { $res.present += $p.role; continue }
+        $body = @{ principalId = $MiObjectId; roleDefinitionId = $p.roleTemplateId; directoryScopeId = '/' } | ConvertTo-Json
+        $attempt = 0; $waits = @(10, 20, 30, 45)
+        while ($true) {
+            try {
+                Invoke-RestMethod -Method POST -Headers $gh -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments' -Body $body -ErrorAction Stop | Out-Null
+                break
+            } catch {
+                $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+                $det = ''; try { $det = "$($_.ErrorDetails.Message)" } catch { }
+                if ("$det" -match '(?i)already exist|conflicting object') { break }
+                # a brand-new managed identity: Entra may not have replicated its service principal yet (Grant-PimMiGraph, 2026-10-11)
+                if (($code -eq 404 -or $code -eq 429 -or $code -ge 500) -and $attempt -lt $waits.Count) { Start-Sleep -Seconds $waits[$attempt]; $attempt++; continue }
+                $res.failed += "$($p.role): $($_.Exception.Message)$(if ("$det".Trim()) { " -- $det" })"
+                break
+            }
+        }
+    }
+    if (@($res.failed).Count) {
+        # re-read before condemning: a duplicate race is a success
+        $now = & $read
+        if ($null -ne $now) {
+            $still = @(Get-PimEngineDirectoryRolePlan -Assignments $now | Where-Object { $_.action -eq 'grant' })
+            if (-not $still.Count) { $res.failed = @() }
+        }
+    }
+    if (@($res.failed).Count) {
+        $res.error = ($res.failed -join ' | ')
+        Write-Warning (("  $Name : the Entra role Privileged Authentication Administrator could NOT be assigned ({0}). Without it PIM cannot disable or re-enable an admin that is a member of a role-assignable group. " +
+                        "A Global Administrator or Privileged Role Administrator runs (https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1): {1}") -f $res.error, $fixLine)
+        return [pscustomobject]$res
+    }
+    $after = & $read
+    $res.granted = @(Get-PimEngineDirectoryRolePlan -Assignments @($have) | Where-Object { $_.action -eq 'grant' } | ForEach-Object { $_.role })
+    $res.ok = $true
+    if ($null -ne $after -and @(Get-PimEngineDirectoryRolePlan -Assignments $after | Where-Object { $_.action -eq 'grant' }).Count) {
+        Write-Host "    the Entra role assignment was accepted but is not visible on the read-back yet (replication) -- the permission check confirms it later" -ForegroundColor DarkGray
+    }
+    if (@($res.granted).Count) { Write-Host "    assigned the Entra role(s) $(@($res.granted) -join ', ') to $Name (active, directory scope /)" -ForegroundColor DarkGray }
+    return [pscustomobject]$res
+}
+
 function Resolve-PimMiAppId {
     <#
       BUG-44 -- a managed identity's service principal is EVENTUALLY consistent in the directory.
@@ -1394,7 +1507,7 @@ function Grant-PimMiAzureRbac {
 function Get-PimManagerRgReaderScope {
     <#
       PURE. PIM 100.22 (b) (owner 2026-10-09) -- the ONE scope the Manager's managed identity gets 'Reader' on: the PIM
-      resource group itself (never the subscription, never the tenant root), so the Environment report
+      resource group itself (never the subscription, never the tenant root), so the System Documentation
       (Get-PimManagerEnvironmentReport) can read the installation's own architecture -- the container apps, jobs, registry,
       SQL server, Key Vault, network -- and nothing else. Refuses an empty or malformed name (fail closed: never a broader scope).
     #>
@@ -1408,10 +1521,10 @@ function Get-PimManagerRgReaderScope {
 function Grant-PimManagerRgReader {
     <#
       PIM 100.22 (b) (owner 2026-10-09): the install grants the Manager's managed identity (ca-pim-manager) 'Reader' on the PIM
-      resource group ONLY, so the Environment report reads the architecture. IDEMPOTENT: listed first, created only when
+      resource group ONLY, so the System Documentation reads the architecture. IDEMPOTENT: listed first, created only when
       absent, then READ BACK (a duplicate assignment exits non-zero and is success; a silent no-op exits zero and is not).
       Returns @{ ok; present (held before); created; scope; reason }. -Required makes a refusal fatal (throws), otherwise it
-      WARNS with the exact command -- the Environment report degrades, nothing else does.
+      WARNS with the exact command -- the System Documentation degrades, nothing else does.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -1436,7 +1549,7 @@ function Grant-PimManagerRgReader {
     try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $oid -PrincipalType ServicePrincipal -Role Reader -Scope $scope) }
     catch { Write-Verbose "role assignment create: $($_.Exception.Message)" }
     if (& $read) { Write-Host "    Reader for $Name on the resource group ${ResourceGroup}: assigned and read back" -ForegroundColor DarkGray; return @{ ok = $true; present = $false; created = $true; scope = $scope; reason = 'assigned and read back' } }
-    $msg = "Reader for '$Name' ($oid) on the resource group $ResourceGroup was NOT granted (the deploying identity needs User Access Administrator or Owner on the resource group). The Environment report cannot read the architecture until it is. Grant it with: $cmd"
+    $msg = "Reader for '$Name' ($oid) on the resource group $ResourceGroup was NOT granted (the deploying identity needs User Access Administrator or Owner on the resource group). The System Documentation cannot read the architecture until it is. Grant it with: $cmd"
     if ($Required) { throw $msg }
     Write-Warning "  $msg"
     return @{ ok = $false; present = $false; created = $false; scope = $scope; reason = $msg }

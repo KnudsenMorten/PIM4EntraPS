@@ -257,7 +257,7 @@ param(
     # PIM-TenantSizing.ps1: < 5,000 default, 5,000-14,999 2 CPU / 4 GiB / 7200 s, >= 15,000 4 CPU / 8 GiB / 14400 s), raise
     # only; PIM_Bootstrap_Cpu_Tick / PIM_Bootstrap_Memory_Tick / PIM_Bootstrap_ReplicaTimeout_Tick in this process's
     # environment win. The counts and the size are RECORDED on the job (pim-sizing-* tags) for the updater, the end-of-install
-    # check and the environment report. -TenantObjectCounts @{ Users; Groups; ServicePrincipals } skips the count (a caller
+    # check and the System Documentation. -TenantObjectCounts @{ Users; Groups; ServicePrincipals } skips the count (a caller
     # that already counted); a failed count keeps the recorded one, else the default -- and says so.
     [hashtable]$TenantObjectCounts,
     # Manager replicas. 0 = SCALE TO ZERO: the GUI costs nothing while nobody is using it and
@@ -1614,7 +1614,7 @@ if ($WorkerMode -eq 'cron') {
         # thing that can be checked -- which is why it has to be a digest to mean anything.
         Assert-PimDeployedImage -Kind job -Name $TickJobName -Expected $image
         # 100.31 -- RECORD the sizing on the job (Merge: the customer's own tags stay). The updater re-sizes from these when
-        # its own count fails, Confirm-PimInstall compares the job with them, and the environment report shows them.
+        # its own count fails, Confirm-PimInstall compares the job with them, and the System Documentation shows them.
         try {
             $tickJobId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName"
             $sizeTags = Get-PimTenantSizingTags -Counts $tickCounts -Size $tickSize -CountSource $tickCountSource
@@ -1646,6 +1646,9 @@ if ($WorkerMode -eq 'cron') {
         $jobAppId = Resolve-PimMiAppId -ObjectId $jobOid -What $TickJobName
         Grant-PimMiSqlHere -DbUserName $TickJobName -MiAppId $jobAppId
         Grant-PimMiGraph -MiObjectId $jobOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId
+        # ADMIN-DISABLE-PROTECTED-1 (b): the Entra role Privileged Authentication Administrator (active, directory scope /), read
+        # back; never fatal -- a refusal is a warning with the fix, and the install verify + the permission check report it
+        [void](Grant-PimEngineDirectoryRoles -MiObjectId $jobOid -Name $TickJobName -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId)
         # BUG-51 was MEASURED on THIS identity: the tick ran, the directory half returned
         # entra-roles=146 aus=36 pim-groups=332, and the Azure half returned azure-scopes=0
         # azure-rbac-roles=0. The tick is the workload that actually reconciles, so an

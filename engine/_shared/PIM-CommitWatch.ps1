@@ -21,6 +21,7 @@
 $script:PimCommitWatchMax      = 100     # commit records kept
 $script:PimCommitWatchKeepDays = 14
 $script:PimCommitWatchMaxKeys  = 500     # keys tracked per commit (a bulk import beyond that is summarised)
+$script:PimCommitWatchHistoryMax = 4     # engine outcomes kept per row (ADMIN-DISABLE-PROTECTED-1 d: each commit shows its own)
 
 # The entities the engine applies to the platform, and the engine PROVIDER scope(s) that APPLY each (PIM-Cutover.ps1's
 # entity -> scope map names more scopes per entity: those READ the rows -- AdminTap reads admin rows -- but do not apply
@@ -151,19 +152,36 @@ function ConvertTo-PimCommitOutcome {
 function Get-PimCommitWatchKeyState {
     <#
       PURE. The state of one committed key.
-        -Outcome   the engine's latest outcome for 'entity|key' { state; action; reason; atUtc } or $null
+        -Outcome   the engine's outcome for 'entity|key' that belongs to THIS commit { state; action; reason; atUtc } or $null
         -CoveredUtc the end of the latest CLEAN engine pass over the entity, or $null
-      Only engine results AFTER the commit count.
+        -SupersededUtc  ADMIN-DISABLE-PROTECTED-1 (d): when a LATER commit changed the same row again, its commit time. An
+                    engine result from then on is the result of THAT later change, never of this one (owner 2026-11-25: the
+                    CREATE row of an admin showed the later DISABLE's 403 as its own failure).
+        -LaterOutcome   the engine's newest outcome for the row from -SupersededUtc on (the later change's result), or $null
+      Only engine results AFTER the commit (and before a later commit of the same row) count.
     #>
-    param([Parameter(Mandatory)][object]$Record, [Parameter(Mandatory)][object]$Key, [AllowNull()][object]$Outcome, [AllowNull()][object]$CoveredUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([Parameter(Mandatory)][object]$Record, [Parameter(Mandatory)][object]$Key, [AllowNull()][object]$Outcome, [AllowNull()][object]$CoveredUtc, [datetime]$NowUtc = [datetime]::UtcNow,
+          [AllowNull()][object]$SupersededUtc = $null, [AllowNull()][object]$LaterOutcome = $null)
     if (-not $Record.platform) { return [pscustomobject]@{ state = 'stored'; reason = 'saved -- this list has no object in Entra or Azure of its own'; atUtc = $Record.committedUtc } }
     $at = ConvertFrom-PimCommitWatchUtc $Record.committedUtc
+    $sup = ConvertFrom-PimCommitWatchUtc $SupersededUtc
     $oAt = if ($Outcome) { ConvertFrom-PimCommitWatchUtc $Outcome.atUtc } else { $null }
+    # a result from after a later commit of the same row is that commit's result -- never shown as this one's
+    if ($Outcome -and $oAt -and $sup -and $oAt -ge $sup) { if ($null -eq $LaterOutcome) { $LaterOutcome = $Outcome }; $Outcome = $null; $oAt = $null }
     $cov = ConvertFrom-PimCommitWatchUtc $CoveredUtc
+    # the later change's engine result found the object this ADD created (it updated it, found it unchanged or removed it):
+    # the add itself is in place
+    $laterFound = $false
+    if ($sup -and $LaterOutcome -and "$($Key.op)" -eq 'add') {
+        $lAct = "$($LaterOutcome.action)".ToLowerInvariant()
+        $laterFound = ($lAct -and $lAct -notmatch 'create')
+    }
+    $supText = if ($sup) { $sup.ToString('yyyy-MM-dd HH:mm') + ' UTC' } else { '' }
     if ($Outcome -and $oAt -and $oAt -ge $at) {
         $st = "$($Outcome.state)"
         # an applied write that a LATER clean pass covered (and did not report again) is confirmed live
         if ($st -eq 'applied' -and $cov -and $cov -gt $oAt) { return [pscustomobject]@{ state = 'live'; reason = "applied ($($Outcome.action)) and confirmed by the next pass"; atUtc = $cov.ToString('o') } }
+        if ($st -eq 'applied' -and $laterFound) { return [pscustomobject]@{ state = 'live'; reason = "applied ($($Outcome.action)); the engine found it again for a later change of this row (committed $supText), which shows its own result"; atUtc = $oAt.ToString('o') } }
         $why = switch ($st) {
             'applied' { "applied ($($Outcome.action)) -- waiting for the next pass to read it back" }
             'live'    { 'live -- the platform matches' }
@@ -173,26 +191,88 @@ function Get-PimCommitWatchKeyState {
     }
     # no item for this key after the commit, but a clean pass covered the entity: nothing was left to do -> live
     if ($cov -and $at -and $cov -gt $at) { return [pscustomobject]@{ state = 'live'; reason = 'a clean pass after the commit found nothing to change'; atUtc = $cov.ToString('o') } }
+    if ($laterFound) { return [pscustomobject]@{ state = 'live'; reason = "in place: the engine found it for a later change of this row (committed $supText), which shows its own result"; atUtc = "$($LaterOutcome.atUtc)" } }
+    # a later commit changed this row again before the engine reported on this change: its result belongs to that change
+    if ($sup) { return [pscustomobject]@{ state = 'superseded'; reason = "a later change of this row (committed $supText) replaced it before the engine reported on it -- that change shows the result"; atUtc = $sup.ToString('o') } }
     $age = if ($at) { [int]($NowUtc.ToUniversalTime() - $at).TotalMinutes } else { 0 }
     return [pscustomobject]@{ state = 'saved'; reason = $(if ($age -ge 30) { "saved $age min ago -- the engine has not applied it yet (check the Jobs page)" } else { 'saved -- the engine applies it on its next run' }); atUtc = $Record.committedUtc }
+}
+
+function New-PimCommitWatchKeyIndex {
+    <#
+      PURE. ADMIN-DISABLE-PROTECTED-1 (d), performance (review of 3.1.69, owner rule "it must work with 1 million users"):
+      ONE pass over every record's keys -> a case-insensitive map 'entity|key' -> the SORTED commit times of the records
+      that changed that row. Built once per call and handed to Get-PimCommitWatchStatus (-KeyIndex), so finding "the next
+      later commit of this row" is one lookup per key -- never records x keys x records x keys.
+      A record without a readable commit time is left out (it can never be "later").
+    #>
+    param([object[]]$Records = @())
+    $idx = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[datetime]]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $Records) {
+        if ($null -eq $r) { continue }
+        $t = ConvertFrom-PimCommitWatchUtc $r.committedUtc
+        if (-not $t) { continue }
+        $ent = "$($r.entity)"
+        foreach ($k in $r.keys) {
+            if ($null -eq $k) { continue }
+            $id = $ent + '|' + "$($k.key)"
+            $lst = $null
+            if (-not $idx.TryGetValue($id, [ref]$lst)) { $lst = New-Object 'System.Collections.Generic.List[datetime]'; $idx[$id] = $lst }
+            $lst.Add($t)
+        }
+    }
+    foreach ($l in $idx.Values) { $l.Sort() }
+    return , $idx
+}
+
+function Get-PimCommitWatchNextCommitUtc {
+    <# PURE. The first commit time in -Index for -Id that is LATER than -AfterUtc, or $null (binary search over the sorted list). #>
+    param($Index, [string]$Id, [AllowNull()][object]$AfterUtc)
+    if ($null -eq $Index -or $null -eq $AfterUtc) { return $null }
+    $lst = $null
+    if (-not $Index.TryGetValue($Id, [ref]$lst) -or $null -eq $lst -or $lst.Count -eq 0) { return $null }
+    $lo = 0; $hi = $lst.Count
+    while ($lo -lt $hi) { $mid = [int][Math]::Floor(($lo + $hi) / 2); if ($lst[$mid] -le $AfterUtc) { $lo = $mid + 1 } else { $hi = $mid } }
+    if ($lo -lt $lst.Count) { return $lst[$lo] }
+    return $null
 }
 
 function Get-PimCommitWatchStatus {
     <#
       PURE. A commit record + the outcome store -> { id; entity; committedUtc; by; total; counts{state:n}; done; keys[] }.
       done = every key is live / stored / failed (nothing left to wait for).
-      -Outcomes = @{ items = @{ 'entity|key' = {state;action;reason;atUtc} }; covered = @{ entity = utc } }
+      -Outcomes = @{ items = @{ 'entity|key' = {state;action;reason;atUtc} }; history = @{ 'entity|key' = @( {..}, ... ) };
+                     covered = @{ entity = utc } }
+      -KeyIndex ADMIN-DISABLE-PROTECTED-1 (d): New-PimCommitWatchKeyIndex over every commit record (the CommitWatch document),
+                built ONCE by the caller. A key that a LATER record changed again shows only the engine results from between
+                its own commit and that later commit -- the later change's result is shown on the later change.
+      -Records  the same, for a single call: the index is built here from them (a caller that judges many records passes
+                -KeyIndex instead). Without either every result after the commit counts.
     #>
-    param([Parameter(Mandatory)][object]$Record, [AllowNull()][object]$Outcomes, [datetime]$NowUtc = [datetime]::UtcNow)
-    $items = $null; $covered = $null; $coveredFull = $null
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][object]$Outcomes, [datetime]$NowUtc = [datetime]::UtcNow, [object[]]$Records = @(), $KeyIndex = $null)
+    if ($null -eq $KeyIndex -and @($Records).Count) { $KeyIndex = New-PimCommitWatchKeyIndex -Records $Records }
+    $items = $null; $covered = $null; $coveredFull = $null; $history = $null
     $get = { param($bag, $name) if ($null -eq $bag) { return $null }; if ($bag -is [System.Collections.IDictionary]) { if ($bag.Contains($name)) { return $bag[$name] }; return $null }; $p = $bag.PSObject.Properties[$name]; if ($p) { return $p.Value }; return $null }
-    if ($Outcomes) { $items = & $get $Outcomes 'items'; $covered = & $get $Outcomes 'covered'; $coveredFull = & $get $Outcomes 'coveredFull' }
+    if ($Outcomes) { $items = & $get $Outcomes 'items'; $covered = & $get $Outcomes 'covered'; $coveredFull = & $get $Outcomes 'coveredFull'; $history = & $get $Outcomes 'history' }
     $cov = & $get $covered "$($Record.entity)"; $covFull = & $get $coveredFull "$($Record.entity)"
+    $at = ConvertFrom-PimCommitWatchUtc $Record.committedUtc
     $keys = @(foreach ($k in @($Record.keys)) {
-        $o = & $get $items ("$($Record.entity)|$($k.key)")
+        $id = "$($Record.entity)|$($k.key)"
+        # the next LATER commit that changed this same row (its commit time), if any -- one index lookup
+        $sup = Get-PimCommitWatchNextCommitUtc -Index $KeyIndex -Id $id -AfterUtc $at
+        # every outcome the engine kept for the row: the history (newest last), else the one latest item (older documents)
+        $all = @(@(& $get $history $id) | Where-Object { $_ })
+        if (-not $all.Count) { $one = & $get $items $id; if ($one) { $all = @($one) } }
+        $own = $null; $later = $null
+        foreach ($oc in $all) {
+            $ot = ConvertFrom-PimCommitWatchUtc $oc.atUtc
+            if (-not $ot) { continue }
+            if ($sup -and $ot -ge $sup) { if (-not $later -or $ot -ge (ConvertFrom-PimCommitWatchUtc $later.atUtc)) { $later = $oc } }
+            elseif (-not $own -or $ot -ge (ConvertFrom-PimCommitWatchUtc $own.atUtc)) { $own = $oc }
+        }
         # a REMOVED row has no item in a Delta pass: only a Full clean pass proves it is gone
         $c = if ("$($k.op)" -eq 'remove') { $covFull } else { $cov }
-        $s = Get-PimCommitWatchKeyState -Record $Record -Key $k -Outcome $o -CoveredUtc $c -NowUtc $NowUtc
+        $s = Get-PimCommitWatchKeyState -Record $Record -Key $k -Outcome $own -CoveredUtc $c -NowUtc $NowUtc -SupersededUtc $sup -LaterOutcome $later
         [pscustomobject]@{ key = "$($k.key)"; op = "$($k.op)"; fields = @(if ($k.PSObject.Properties["fields"]) { $k.fields }); state = $s.state; reason = $s.reason; atUtc = $s.atUtc }
     })
     $counts = [ordered]@{}; foreach ($k in $keys) { $counts[$k.state] = 1 + [int]$counts[$k.state] }
@@ -251,9 +331,11 @@ function Get-PimCommitWatchKeysWanted {
     # PURE. 'entity|key' for every key of a record that is still in flight -- the engine records outcomes for these only.
     param([object[]]$Records = @(), [AllowNull()][object]$Outcomes, [datetime]$NowUtc = [datetime]::UtcNow)
     $want = @{}
+    # the later-commit index ONCE for all records (never rebuilt per record -- 3.1.69 review, performance)
+    $kix = New-PimCommitWatchKeyIndex -Records $Records
     foreach ($r in @($Records)) {
         if (-not $r.platform) { continue }
-        $st = Get-PimCommitWatchStatus -Record $r -Outcomes $Outcomes -NowUtc $NowUtc
+        $st = Get-PimCommitWatchStatus -Record $r -Outcomes $Outcomes -NowUtc $NowUtc -KeyIndex $kix
         foreach ($k in @($st.keys | Where-Object { $_.state -in @('saved', 'applied', 'waiting') })) { $want["$($r.entity)|$($k.key)"] = $true }
     }
     return $want
@@ -285,8 +367,12 @@ function Update-PimCommitOutcomes {
             $cur = Read-PimCommitWatchDoc -ConnectionString $ConnectionString -Name 'CommitOutcomes'
             $wanted = Get-PimCommitWatchKeysWanted -Records $recs -Outcomes $cur.doc -NowUtc $NowUtc
             $kept = @{}; $covered = @{}; $coveredFull = @{}   # NOT $items: PowerShell names are case-insensitive, that IS the -Items parameter
+            # ADMIN-DISABLE-PROTECTED-1 (d): the last few outcomes per row (newest last), so a commit shows the result of ITS OWN
+            # change -- a later change of the same row (an admin created, then disabled) no longer overwrites the earlier one's
+            $hist = @{}
             if ($cur.doc) {
                 if ($cur.doc.items) { foreach ($p in $cur.doc.items.PSObject.Properties) { if ($wanted.ContainsKey($p.Name)) { $kept[$p.Name] = $p.Value } } }
+                if ($cur.doc.PSObject.Properties['history'] -and $cur.doc.history) { foreach ($p in $cur.doc.history.PSObject.Properties) { if ($wanted.ContainsKey($p.Name)) { $hist[$p.Name] = @(@($p.Value) | Where-Object { $_ }) } } }
                 if ($cur.doc.covered) { foreach ($p in $cur.doc.covered.PSObject.Properties) { $covered[$p.Name] = $p.Value } }
                 if ($cur.doc.PSObject.Properties['coveredFull'] -and $cur.doc.coveredFull) { foreach ($p in $cur.doc.coveredFull.PSObject.Properties) { $coveredFull[$p.Name] = $p.Value } }
             }
@@ -295,11 +381,20 @@ function Update-PimCommitOutcomes {
                 $id = "$($it.entity)|$($it.key)"
                 if (-not $wanted.ContainsKey($id)) { continue }
                 $o = ConvertTo-PimCommitOutcome -Action "$($it.action)" -Result "$($it.result)" -Reason "$($it.reason)"
-                if ($o) { $kept[$id] = [pscustomobject]@{ state = $o.state; action = $o.action; reason = $o.reason; atUtc = $now } }
+                if ($o) {
+                    $oc = [pscustomobject]@{ state = $o.state; action = $o.action; reason = $o.reason; atUtc = $now }
+                    $kept[$id] = $oc
+                    # an older document had no history: its one item starts the row's history
+                    $h0 = if ($hist.ContainsKey($id)) { @($hist[$id]) } elseif ($cur.doc -and $cur.doc.items -and $cur.doc.items.PSObject.Properties[$id]) { @($cur.doc.items.PSObject.Properties[$id].Value) } else { @() }
+                    $h1 = @(@($h0) + @($oc))
+                    if ($h1.Count -gt $script:PimCommitWatchHistoryMax) { $h1 = @($h1 | Select-Object -Last $script:PimCommitWatchHistoryMax) }
+                    $hist[$id] = $h1
+                }
             }
             # a Delta pass never removes: only a FULL clean pass confirms a removed row (coveredFull)
             foreach ($e in @($CleanEntities | Where-Object { "$_".Trim() } | Select-Object -Unique)) { $covered[$e] = $now; if ($Mode -eq 'Full') { $coveredFull[$e] = $now } }
-            $new = [pscustomobject]@{ items = [pscustomobject]$kept; covered = [pscustomobject]$covered; coveredFull = [pscustomobject]$coveredFull } | ConvertTo-Json -Depth 6 -Compress
+            $histOut = [ordered]@{}; foreach ($hk in @($hist.Keys | Sort-Object)) { $histOut[$hk] = @($hist[$hk]) }
+            $new = [pscustomobject]@{ items = [pscustomobject]$kept; history = [pscustomobject]$histOut; covered = [pscustomobject]$covered; coveredFull = [pscustomobject]$coveredFull } | ConvertTo-Json -Depth 6 -Compress
             if ($new -eq "$($cur.raw)") { return }
             if ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $ConnectionString -Name 'CommitOutcomes' -NewValueJson $new -ExpectedValueJson $cur.raw) -eq 1) { return }
         }

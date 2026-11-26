@@ -3,7 +3,7 @@
   "product": "pim",
   "title": "Set the PIM Manager SQL database tier and its 250 GB maximum size",
   "purpose": "Set the PIM Manager SQL database to the right Standard tier with a 250 GB maximum size, and optionally pin its tier so updates never change it.",
-  "whenToRun": "When the end-of-install check, the environment report or support says the database is below the product tier (S3) or below the 250 GB maximum size (for example after \"has reached its size quota\"), when an update reports \"database is pinned at <tier>, the new default is S3 - not changed\", when you want the database on a specific Standard tier, or to pin its tier. Installs and updates apply the same rule by themselves; this script does it now.",
+  "whenToRun": "When the end-of-install check, the System Documentation or support says the database is below the product tier (S3) or below the 250 GB maximum size (for example after \"has reached its size quota\"), when an update reports \"database is pinned at <tier>, the new default is S3 - not changed\", when you want the database on a specific Standard tier, or to pin its tier. Installs and updates apply the same rule by themselves; this script does it now.",
   "standalone": true,
   "sourcePath": "tools/setup/Set-PimSqlTier.ps1",
   "runAs": [

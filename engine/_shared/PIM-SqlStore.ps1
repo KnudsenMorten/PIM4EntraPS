@@ -3614,6 +3614,20 @@ function Import-PimSettingsFromStore {
     if ($global:PIM_NamingConventions.ContainsKey('SmtpRelay') -and $null -ne $global:PIM_NamingConventions['SmtpRelay']) {
         $global:PIM_SmtpRelay = $global:PIM_NamingConventions['SmtpRelay']
     }
+    # ONE-SENDER-1 point A (Invardia 2026-11-25; 3.1.69 review): ONE sender setting. The ONE-TIME migration: MailSender EMPTY
+    # and the relay record carries a valid 'from' -> MailSender takes that SAME address, written ONCE (a set MailSender is
+    # never overwritten). The relay's From is NOT changed by this (Get-PimSmtpFromAddress: the record's 'from' stays the From);
+    # a MailSender that already differs is drift, reported. A failed write only warns.
+    if ((Get-Command Resolve-PimMailSenderFromRelay -ErrorAction SilentlyContinue) -and $global:PIM_NamingConventions.ContainsKey('SmtpRelay')) {
+        $__mig = Resolve-PimMailSenderFromRelay -MailSender "$($global:PIM_NamingConventions['MailSender'])" -SmtpRelay $global:PIM_NamingConventions['SmtpRelay']
+        if ($__mig.migrate) {
+            try {
+                Set-PimSqlSetting -ConnectionString $cs -Name 'MailSender' -Value $__mig.sender
+                $global:PIM_NamingConventions['MailSender'] = $__mig.sender; $global:PIM_MailSender = $__mig.sender
+                Write-Host "  [settings] ONE-SENDER-1: $($__mig.reason)"
+            } catch { Write-Warning "  [settings] ONE-SENDER-1: MailSender could not be migrated from SmtpRelay.from (retried on the next start): $($_.Exception.Message)" }
+        }
+    }
     return $n
 }
 

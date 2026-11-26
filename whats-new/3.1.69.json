@@ -1,0 +1,7 @@
+{"version":"3.1.69","date":"2026-11-26","type":"feature",
+ "summary":"One mail sender everywhere, a security image overview, and admins in protected groups can be disabled again.",
+ "new":[{"title":"Security image release overview","text":"Operations has a new page that lists PIM Manager's security image releases: when each was detected, when work started and when it reached each ring, with the hours between. A missing time shows as not recorded."},
+        {"title":"Environment report is now System Documentation","text":"The page and its PDF are now called System Documentation. The content is the same."},
+        {"title":"One mail sender for every part","text":"Every part of PIM Manager, the access request portal included, now sends from the one sender you set. The setup gives every sending part its right in one run and checks every day that sending works."}],
+ "fixes":[{"title":"Disable admins in protected groups","text":"Admins in role-assignable groups can be disabled and enabled again. Microsoft protects these accounts, so the engine now holds the Microsoft role Privileged Authentication Administrator. Setup grants it, and the permission check reports it when missing."},
+          {"title":"Each change shows its own result","text":"In the commit view, a change no longer shows the error of a later change to the same row."}]}

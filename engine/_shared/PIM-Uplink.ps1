@@ -2231,7 +2231,7 @@ function Get-PimUplinkTenantCapabilities {
 #   Jobs            [ { name; state; lastStartUtc; lastEndUtc; durationMs; prevDurationMs; nextRunUtc; failStreak;
 #                     throttled24h } ]  -- enabled PRODUCT jobs only, at most 60
 #   Convergence     { unconverged; persistent; oldestFirstSeenUtc }
-#   Mail            { mode; engine: { ok; atUtc }; manager: { ok; atUtc } }
+#   Mail            { mode; engine: { ok; atUtc }; manager: { ok; atUtc }; sender?; restriction? (verified|pending|not-verified|failed); drift? }  (ONE-SENDER-1)
 #   UpdatePending   { approvedVersion; lastBuiltVersion; hold; waitingSinceUtc }   -- from UpdateState
 #                   + { signal; raisedAt; startedUtc } (framework 8.18 UPDATE-NOW, pim.Settings 'UpdateNowState') -- ON by
 #                   default since UPDATE-NOW-HEAD; PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no switches them off
@@ -2748,13 +2748,20 @@ function ConvertTo-PimUplinkMailMode {
 function New-PimUplinkMailField {
     <#
       PURE. Mail { mode; engine; manager } from pim.Settings 'MailMode' and 'MailSendProof' (each identity's last REAL send:
-      { ok; at; reason; mode; sender }). Only ok + the time leave -- never the sender address, the reason text or a host.
+      { ok; at; reason; mode; sender }). Only ok + the time leave per identity -- never the reason text or a host. (ONE-SENDER-1:
+      the ONE sender address leaves as Mail.sender, by Invardia's contract 4bf16e37.)
       An identity with no proof = null.
       MAIL-OFF-1 (2026-11-17): mode 'none' = mail switched off ON PURPOSE ("not set up (on purpose)") -> engine and manager are
       ALWAYS null: { mode = 'none'; engine = null; manager = null }. A proof stored before mail was switched off (e.g. an
       ok=false from a send attempt while no sender existed) never leaves, so a deliberate "no mail" is never "Mail does not work".
     #>
-    param([AllowNull()][object]$MailMode, [AllowNull()][object]$Proof)
+    # ONE-SENDER-1 point D (Invardia 2026-11-25; Invardia's side LIVE, commit 4bf16e37): + restriction = verified | pending |
+    # not-verified | failed (the daily Graph probe of every sending identity, pim.Settings 'MailSenderProbe'), sender (the
+    # ONE sender, pim.Settings 'MailSender') and drift (a component sends as another mailbox, or the setup check was made for
+    # another one). All three optional/soft: no probe record yet -> restriction / drift left out; mode none -> unchanged.
+    # 3.1.69 review: -SmtpRelay (pim.Settings 'SmtpRelay') -- in SMTP mode the relay's own From is the sender, and a different
+    # MailSender is drift (even before any probe record exists)
+    param([AllowNull()][object]$MailMode, [AllowNull()][object]$Proof, [AllowNull()][object]$Probe, [AllowNull()][object]$MailSender, [AllowNull()][object]$SetupCheck, [AllowNull()][object]$SmtpRelay)
     $mm = $MailMode; if ($mm -is [string] -and "$mm".Trim().StartsWith('"')) { try { $mm = $mm | ConvertFrom-Json } catch { } }
     $mode = ConvertTo-PimUplinkMailMode $mm
     if ($mode -eq 'none') { return [pscustomobject][ordered]@{ mode = 'none'; engine = $null; manager = $null } }
@@ -2767,7 +2774,29 @@ function New-PimUplinkMailField {
         if ($null -eq $ok) { return $null }
         [pscustomobject][ordered]@{ ok = [bool]("$ok" -match '^(?i)(true|1)$'); atUtc = (ConvertTo-PimUplinkIso (Get-PimUplinkField $x 'at')) }
     }
-    return [pscustomobject][ordered]@{ mode = $mode; engine = (& $one 'engine'); manager = (& $one 'manager') }
+    $o = [ordered]@{ mode = $mode; engine = (& $one 'engine'); manager = (& $one 'manager') }
+    $snd = "$MailSender".Trim().Trim('"')   # stored as a JSON string ("x@y") or plain text -- only the address leaves
+    $relayDrift = $false
+    if ($mode -eq 'smtp') {
+        $rf = "$(Get-PimUplinkField (ConvertFrom-PimUplinkStoredValue $SmtpRelay) 'from')".Trim()
+        if (-not $rf -and $SmtpRelay -isnot [string]) { $rf = "$(Get-PimUplinkField $SmtpRelay 'from')".Trim() }
+        if ($rf -and $snd -and $rf -ine $snd) { $relayDrift = $true }
+        if ($rf) { $snd = $rf }   # the address mail really goes out as
+    }
+    if ($snd) { $o['sender'] = $snd }
+    $pb = ConvertFrom-PimUplinkStoredValue $Probe
+    $rs = "$(Get-PimUplinkField $pb 'restriction')".Trim()
+    if ($rs -in @('verified', 'pending', 'not-verified', 'failed')) {
+        $o['restriction'] = $rs
+        $drift = ("$(Get-PimUplinkField $pb 'drift')" -match '^(?i)(true|1)$')
+        $pbS = "$(Get-PimUplinkField $pb 'sender')".Trim()
+        if ($snd -and $pbS -and $pbS -ine $snd) { $drift = $true }   # the probe was taken for another sender than today's
+        $sc = ConvertFrom-PimUplinkStoredValue $SetupCheck
+        $scS = "$(Get-PimUplinkField $sc 'sender')".Trim()
+        if ($snd -and $scS -and $scS -ine $snd) { $drift = $true }   # the mail-sender setup was made for another mailbox
+        $o['drift'] = [bool]($drift -or $relayDrift)
+    } elseif ($relayDrift) { $o['drift'] = $true }
+    return [pscustomobject]$o
 }
 
 function New-PimUplinkUpdatePendingField {
@@ -3225,7 +3254,8 @@ function Get-PimUplinkStateFields {
         catch { Write-Warning "[uplink] Convergence could not be read: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'Mail') -and $GetSetting) {
-        try { $out['Mail'] = New-PimUplinkMailField -MailMode (& $GetSetting 'MailMode') -Proof (& $GetSetting 'MailSendProof') }
+        # ONE-SENDER-1 point D: + the daily sender check (restriction), the ONE sender and the drift flag
+        try { $out['Mail'] = New-PimUplinkMailField -MailMode (& $GetSetting 'MailMode') -Proof (& $GetSetting 'MailSendProof') -Probe (& $GetSetting 'MailSenderProbe') -MailSender (& $GetSetting 'MailSender') -SetupCheck (& $GetSetting 'MailSenderSetupCheck') -SmtpRelay (& $GetSetting 'SmtpRelay') }
         catch { Write-Warning "[uplink] Mail could not be read: $($_.Exception.Message)" }
     }
     if ((& $__sfOn 'UpdatePending') -and $UpdateStateRead) {

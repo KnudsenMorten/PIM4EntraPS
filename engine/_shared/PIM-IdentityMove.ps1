@@ -408,7 +408,7 @@ function Get-PimIdentityMoveRoleNeeds {
         # RIGHTS-LIVE-1 (owner rights decision 2026-11-09 "approved with A"): + Container Apps Jobs Operator and Contributor, held
         # on the UPDATER job only -- the engine starts the updater (update-expedite) and the watchdog restores its image
         # (tools\setup\_PimSetupShared.ps1 Grant-PimEngineUpdaterJobAccess grants them, scope = that job)
-        'engine'   { @{ azure = @(@($rdr) + @(Get-PimIdentityMoveRootRoleIds) + @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c')); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c') } }
+        'engine'   { @{ azure = @(@($rdr) + @(Get-PimIdentityMoveRootRoleIds) + @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr, 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b', 'b24988ac-6180-42a0-ab88-20f7382dd24c')); groups = @('grp-pim-powerbi-admin-api'); dirRoles = @('a9ea8996-122f-4c74-9520-8edcd192826c', '7be44c8a-adaf-4e2a-84d6-ab2649e08a13') } }   # Fabric Administrator; Privileged Authentication Administrator (ADMIN-DISABLE-PROTECTED-1)
         'updater'  { @{ azure = @('b24988ac-6180-42a0-ab88-20f7382dd24c', $acr); groups = @(); dirRoles = @() } }
         'dbinit'   { @{ azure = @($acr); groups = @('grp-pim-sql-admins'); dirRoles = @() } }
         'requests' { @{ azure = @('0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3', $acr); groups = @(); dirRoles = @() } }

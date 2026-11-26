@@ -401,6 +401,21 @@ function ConvertFrom-PimUpdateNowHead {
     return $res
 }
 
+function Test-PimUpdateNowImageOnly {
+    <#
+      PURE. IMAGE-30MIN-1 / SEC-LANE-1 G5 (Invardia decision 2026-11-24, the same rule as EPS 2.1.64 and SI): is -Target a NEWER
+      image-only build (<x.y.z>.N) of the x.y.z this install runs? Then the 15-minute quick check applies it at once, without an
+      expedite mark and without waiting for the nightly slot. The SAME rule as Get-PimImageOnlyUpdateDecision
+      (PIM-UpdateLifecycle.ps1, loaded only later in the updater) -- Test-PimUpdateNow proves the two agree.
+    #>
+    param([AllowEmptyString()][string]$Running = '', [AllowEmptyString()][string]$Target = '')
+    $tm = [regex]::Match("$Target".Trim(), '^(\d+\.\d+\.\d+)\.(\d+)$'); if (-not $tm.Success) { return $false }
+    $rm = [regex]::Match("$Running".Trim(), '^(\d+\.\d+\.\d+)(?:\.(\d+))?$'); if (-not $rm.Success) { return $false }
+    if ($tm.Groups[1].Value -ne $rm.Groups[1].Value) { return $false }
+    $rN = $(if ($rm.Groups[2].Success) { [int]$rm.Groups[2].Value } else { 0 })
+    return ([int]$tm.Groups[2].Value -gt $rN)
+}
+
 function ConvertTo-PimUpdateNowHeadSignal {
     <#
       PURE. A parsed /head answer as the quick check's signal (the shape ConvertFrom-PimUpdateNowSignal returns, source
@@ -475,7 +490,7 @@ function Invoke-PimUpdateNowQuickCheck {
           [AllowEmptyString()][string]$RunningVersion = '', [bool]$Hold = $false, [bool]$StrictActive = $false, [AllowEmptyString()][string]$StrictUntil = '',
           [scriptblock]$Head, [scriptblock]$Signal, [scriptblock]$GetState, [scriptblock]$SetState, [scriptblock]$IsRunning,
           [AllowEmptyString()][string]$UpdateWindow = '', [AllowEmptyString()][string]$NightlyUtc = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false; source = '' }
+    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false; source = ''; imageOnly = $false }
     try {
         $now = $NowUtc.ToUniversalTime()
         $ringN = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$ringN)
@@ -512,6 +527,12 @@ function Invoke-PimUpdateNowQuickCheck {
                 $res.source = 'head'
                 if ($hCode -eq 200 -or $hCode -eq 204) {
                     $hp = $(if ($hCode -eq 200) { ConvertFrom-PimUpdateNowHead -Body (Get-PimUpdateNowField $hAns 'body') } else { @{ ok = $true; version = ''; sequence = [int64]0; wave = ''; apply = ''; until = $null; reason = '' } })
+                    # IMAGE-30MIN-1 (SEC-LANE-1 G5): a newer image-only build of the running release needs no expedite mark --
+                    # it is applied in THIS slot (once per version: the signal key is version#sequence#now). A code release
+                    # still waits for an expedite or the nightly slot. Running jobs are never stopped (images only).
+                    if ($hp.ok -and -not $hp.apply -and (Test-PimUpdateNowImageOnly -Running $RunningVersion -Target "$($hp.version)")) {
+                        $hp.apply = 'now'; $hp.reason = 'image-only security release (IMAGE-30MIN-1)'; $res.imageOnly = $true
+                    }
                     if ($hp.ok) { $sig = ConvertTo-PimUpdateNowHeadSignal -Head $hp -Previous $prevSig -NowUtc $now }
                     else { $sigNote = 'the quick-check answer could not be read' }
                 } elseif ($hCode -in @(401, 403, 422)) {
@@ -559,7 +580,7 @@ function Invoke-PimUpdateNowQuickCheck {
         if ($null -ne $handled -and $handled -eq $raised) {
             & $save ("update now: this signal (raised {0:u}) was acted on at {1} -- not again (a failed update is retried by the nightly run)" -f $raised, "$(Get-PimUpdateNowField $st 'startedUtc')"); return $res
         }
-        $who = $(if ($isHead) { "ring $ringN (expedite $($sig.apply))" } elseif ($sig.scope -eq 'environment') { 'this environment' } else { "ring $ringN" })
+        $who = $(if ($isHead -and $res.imageOnly) { "ring $ringN (image-only security release, applied at once)" } elseif ($isHead) { "ring $ringN (expedite $($sig.apply))" } elseif ($sig.scope -eq 'environment') { 'this environment' } else { "ring $ringN" })
         $cmp = Compare-PimUpdateNowVersion -A $sig.version -B $RunningVersion
         if ($null -eq $cmp) { & $save "update now: signal for $who, but the version ('$($sig.version)') or the installed version ('$RunningVersion') cannot be read -- not started"; return $res }
         if ($cmp -le 0) { & $save "update now: signal for $who names $($sig.version); this environment already runs $RunningVersion -- nothing to do"; return $res }

@@ -1,0 +1,5 @@
+{"version":"3.1.67","date":"2026-11-25","type":"feature",
+ "summary":"New admin no longer waits, and RFA works for every admin by default.",
+ "new":[{"title":"RFA approval by the department by default","text":"With the RFA portal on, a disabled admin can ask to be enabled without any setting, and an owner of the admin's department approves. Off or Auto can still be chosen."},
+        {"title":"RFA settings in Admin accounts and Departments","text":"The RFA mode, the address the PIN is sent to and the hours an admin may ask for are now set in the Manager. A department with no owner is flagged."}],
+ "fixes":[{"title":"New admin no longer waits for a lookup","text":"Add to pending changes now stages a new admin at once. PIM checks the name when the change is applied, and never creates over or changes an existing account that PIM did not create."}]}

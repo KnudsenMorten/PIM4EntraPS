@@ -1389,17 +1389,13 @@ $ring = "$($env:PIM_UPDATE_RING)".Trim()
 $updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
 $script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0; $script:PimInvardiaAhead = $false
 # SEC-95 (SECAUDIT-1, the cloud updater's half): WHICH source this run may read (PIM-UpdateSource.ps1 Resolve-PimUpdateSourceMode).
-# Invardia (signed) is the default; a storage container (channel.json + archives, NO signature) is read only when the job
-# names it as its source, and then every run says so -- here, in the outcome and in the Manager's update status. A
-# container ADDRESS without that choice is refused (no fallback from Invardia to a container, ever).
+# UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): Invardia (signed, Pro or Community) is the ONLY source. The unsigned storage
+# container (PIM_UPDATE_SOURCE=pim-src / blob) was removed: it is REFUSED below, like a container ADDRESS without a source
+# (no fallback from Invardia to a container, ever) -- nothing is fetched and nothing moves.
 $srcMode = Resolve-PimUpdateSourceMode -Source $updSource -SourceUrlTemplate $srcUrlTpl
 if ($srcMode.mode -eq 'invardia-community' -and -not $updSource) { $updSource = 'invardia-community' }
 elseif ($srcMode.mode -eq 'invardia' -and -not $updSource) { $updSource = 'invardia' }
-if ($srcMode.unsigned) {
-    Say '!! UNSIGNED UPDATE SOURCE: this environment takes its code from a storage container chosen for it (channel.json +' 'Red'
-    Say '!! source archives), not from the signed release service.' 'Red'
-    Say '!! Updates from the signed release service: re-run tools/setup/Deploy-PimUpdateJob.ps1 with -UpdateSource Invardia.' 'Red'
-} else { Say $srcMode.line 'DarkGray' }
+Say $srcMode.line 'DarkGray'
 
 # ---- framework 8.18 UPDATE-NOW -- WHICH KIND OF EXECUTION IS THIS? (engine/_shared/PIM-UpdateNow.ps1 has the rules) ------
 # The cron is every 15 minutes once UPDATE NOW is on (PIM_UPDATE_NIGHTLY_UTC keeps the nightly time). The nightly slot and
@@ -1454,15 +1450,7 @@ function Get-PimUpdateNowRingApproval {
             $seq = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring -Kind 'community'
             return (Get-PimInvardiaCommunityApproval -BaseUrl $b -Ring $ring -AppliedSequence ([int]$seq.applied) -RunningVersion "$($script:PimRunningVersion)")
         }
-        if ($ring -and $srcUrlTpl -and $srcMode.mode -eq 'pim-src') {   # SEC-95: only the CHOSEN (unsigned) container source
-            $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
-            $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-un-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0, 6)))
-            try {
-                Invoke-WebRequest -Uri $chUrl -OutFile $chFile -UseBasicParsing -TimeoutSec 60
-                $rv = Get-PimRingVersion -Channel ((Get-Content -LiteralPath $chFile -Raw) | ConvertFrom-Json) -Ring $ring -CurrentVersion $lastBuilt
-                return @{ version = "$($rv.version)".Trim(); reason = "$($rv.reason)" }
-            } finally { Remove-Item -LiteralPath $chFile -Force -ErrorAction SilentlyContinue }
-        }
+        # UPDATE-SIGNED-ONLY-1: the unsigned storage-container channel was removed -- only the signed Invardia manifests approve.
         return @{ version = ''; reason = 'this environment has no ring source to approve a version' }
     } catch { return @{ version = ''; reason = "the ring's approval could not be read ($((("$($_.Exception.Message)") -split "`n")[0]))" } }
 }
@@ -1886,35 +1874,9 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $script:PimRingApprovedReason = 'this environment has a ring but no update source, so the ring channel cannot be read'
     Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "PIM_UPDATE_RING=$ring without PIM_UPDATE_SOURCE_URL -- ring not readable, nothing rolled"
     exit 1
-} elseif ($ring -and $srcUrlTpl -and $srcMode.mode -eq 'pim-src') {
-    # SEC-95: reached ONLY when the job names the storage container as its source (said in red above, recorded below)
-    $chUrl = Get-PimUpdateChannelUrl -SourceTemplate $srcUrlTpl
-    $chFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-channel-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0,6)))
-    try {
-        Invoke-WebRequest -Uri $chUrl -OutFile $chFile -UseBasicParsing -TimeoutSec 120
-        $channel = (Get-Content -LiteralPath $chFile -Raw) | ConvertFrom-Json
-        $rv = Get-PimRingVersion -Channel $channel -Ring $ring -CurrentVersion $lastBuilt
-        Say "ring $ring -- $($rv.reason)" 'DarkGray'
-        # §71.43 -- the ring's ANSWER, in the ring's own words, recorded for the Manager. This is the
-        # only moment it exists: the channel is fetched to a temp file and deleted below.
-        $script:PimRingApproved       = "$($rv.version)".Trim()
-        $script:PimRingApprovedReason = "$($rv.reason)".Trim()
-        # 🪤 An unreadable or empty channel must NOT silently fall back to a local pin: that would
-        # let an environment keep taking a version the ring has since withdrawn. No answer means
-        # no move.
-        if ("$($rv.version)".Trim()) { $targetVer = "$($rv.version)".Trim() }
-        else { $targetVer = '' }
-    } catch {
-        Say "  could not read the ring channel: $($_.Exception.Message)" 'Yellow'
-        Say '  refusing to fall back to a local pin -- a ring-managed environment moves only when the ring says so.' 'Yellow'
-        $targetVer = ''
-        # §71.43 -- an unreadable channel is a REPORTABLE state, not a blank. Recorded with no approved
-        # version (so the Manager never claims one) and the reason, redacted: the channel URL carries a SAS.
-        $script:PimRingApproved       = ''
-        $script:PimRingApprovedReason = 'the ring channel could not be read: ' +
-            $(if (Get-Command Remove-PimTelemetrySecret -ErrorAction SilentlyContinue) { Remove-PimTelemetrySecret -Text "$($_.Exception.Message)" } else { 'see the update job log' })
-    } finally { Remove-Item -LiteralPath $chFile -Force -ErrorAction SilentlyContinue }
 }
+# UPDATE-SIGNED-ONLY-1: the unsigned storage-container ring channel (channel.json beside pim-src archives) was removed here --
+# PIM_UPDATE_SOURCE=pim-src / blob is REFUSED above (Resolve-PimUpdateSourceMode), before anything is fetched.
 
 $plan = Get-PimUpdateSourcePlan -TargetVersion $targetVer -SourceUrlTemplate $srcUrlTpl `
                                 -LastBuiltVersion $lastBuilt -LoginServer $loginServer -Repository $imageRepo
@@ -1993,14 +1955,9 @@ if ($plan.action -eq 'build') {
         Set-PimUpdTrackStage -Stage 'download' -Message 'the release archive named by the signed manifest'
         Set-PimUpdTrackStage -Stage 'verify' -Message 'manifest signature + archive SHA-256'
     } else {
-        $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
-        Say "fetching source for $($plan.version)$(if ($srcMode.unsigned) { ' from the storage container -- UNSIGNED (only its gzip header is checked)' })" $(if ($srcMode.unsigned) { 'Red' } else { 'Gray' })
-        Set-PimUpdTrackStage -Stage 'download'
-        $got = Get-PimUpdateSourceArchive -Url $srcUrl -OutFile $ctx
-        if ($got.ok) {
-            Set-PimUpdTrackStage -Stage 'verify'
-            if ($srcMode.unsigned) { Set-PimUpdTrackStage -Close warning -Message 'unsigned source: only its gzip header is checked' }
-        }
+        # UPDATE-SIGNED-ONLY-1: the only source is the verified Invardia archive. Without one nothing is fetched (the unsigned
+        # storage-container download that lived here was removed) and the run refuses below.
+        $got = @{ ok = $false; bytes = 0; reason = 'no verified Invardia release archive for this version -- the signed Invardia path is the only update source, nothing is fetched' }
     }
     if (-not $got.ok) {
         Say "  source NOT fetched: $($got.reason)" 'Red'

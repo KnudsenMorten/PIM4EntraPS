@@ -126,11 +126,29 @@ function Get-PimSingleWriterJobTypes { <# PURE. LITERAL. TRUST-1 round 4 item 1:
 #     stay due, hold no slot). The lease is an ordinary lock: it expires at its TTL unless the run's heartbeat renews it,
 #     and a holder whose execution the platform reports ENDED is taken over at once -- it never sticks.
 function Get-PimOwnSlotJobTypes { <# PURE. LITERAL. UPLINK-SLOT-1: job types with their OWN slot (outside the lane cap). #> return @('uplink') }
+# ---- LOOKUP-SLOT-1 (owner 2026-11-25, internal: New admin "still looking this up" -- "a big stability bug", "it must also work
+# in env with 1 mio users") ---------------------------------------------------------------------------------------------------
+# The web app reads the directory from PIM's SQL only; a name not stored yet is a 'tenant-cache' TRIGGER with scope
+# 'directory-lookup' that the engine answers (exact reads, at most 200 per run -- never a tenant-wide list). It used to wait
+#   * for a free slot (4 long runs in a big tenant = minutes to hours), and
+#   * for the scheduled full 'tenant-cache' refresh, because its Run-now name is 'tenant-cache' = the same lock job:tenant-cache.
+# Now the on-demand lookup has its OWN single-writer lock (job:directory-lookup: two lookup runs never overlap) and its OWN
+# slot (never counts against, never waits for, the lane cap) -- the UPLINK-SLOT-1 pattern for one bounded, small job.
+function Get-PimOwnSlotTriggerScopes { <# PURE. LITERAL. LOOKUP-SLOT-1: 'tenant-cache' scopes with their own lock + slot. #> return @('directory-lookup') }
+function Test-PimOwnSlotTrigger {
+    # PURE. LOOKUP-SLOT-1: is -Job a 'tenant-cache' run of an own-slot scope (the on-demand directory lookup)?
+    param([object]$Job)
+    if ($null -eq $Job) { return $false }
+    $type = "$($Job.type)".Trim().ToLowerInvariant()
+    $scope = if ($Job.PSObject.Properties['scope']) { "$($Job.scope)".Trim().ToLowerInvariant() } else { '' }
+    return ($type -eq 'tenant-cache' -and $scope -and ($scope -in @(Get-PimOwnSlotTriggerScopes)))
+}
 function Test-PimOwnSlotArea {
-    # PURE. True for a lock area that belongs to an own-slot job ('job:uplink'): such a lock never takes a slot.
+    # PURE. True for a lock area that belongs to an own-slot job ('job:uplink', 'job:directory-lookup'): such a lock never takes a slot.
     param([string]$Area)
     $a = "$Area".Trim().ToLowerInvariant()
     foreach ($t in @(Get-PimOwnSlotJobTypes)) { if ($a -eq "job:$t") { return $true } }
+    foreach ($s in @(Get-PimOwnSlotTriggerScopes)) { if ($a -eq "job:$s") { return $true } }
     return $false
 }
 function Get-PimFirstRunLeaseArea { <# PURE. LITERAL. UPLINK-SLOT-1 (b): the lock area of the first run after an update. #> return 'first-run-after-update' }
@@ -175,8 +193,11 @@ function Get-PimJobAreas {
     # TRIGGER ('trigger:<type>:All', no -JobName) take the SAME lock, 'job:<scheduled name>' (the shipped name = the type), so
     # two runs of one of them never write at the same time. Every other job keeps 'job:<its name>'.
     $jobKey = if ($type -in (Get-PimSingleWriterJobTypes)) { "job:$type" } else { "job:$name" }
+    # LOOKUP-SLOT-1: the on-demand directory lookup has its own lock, whatever name its trigger carries ('tenant-cache')
+    $ownTrig = Test-PimOwnSlotTrigger -Job $Job
+    if ($ownTrig) { $jobKey = "job:$("$($Job.scope)".Trim().ToLowerInvariant())" }
     # UPLINK-SLOT-1: ownSlot = this job never counts against, and never waits for, the lane cap.
-    return [pscustomobject]@{ job = $jobKey; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1); ownSlot = [bool]($type -in @(Get-PimOwnSlotJobTypes)) }
+    return [pscustomobject]@{ job = $jobKey; areas = $areas; perScope = [bool]($type -in @('engine-delta', 'engine-full') -and $areas.Count -gt 1); ownSlot = [bool](($type -in @(Get-PimOwnSlotJobTypes)) -or $ownTrig) }
 }
 
 function Get-PimLaneCap {

@@ -63,8 +63,25 @@ param(
     # "imageOnly": true with "imageDiff" { fromVersion = the version that ring runs now; files[{ path, removed, added }] }.
     # Refused HERE (nothing sent) when a changed file is product code; Invardia answering 422 imageOnly/imageDiff = the call is
     # sent once more WITHOUT the claim (it then needs the owner's per-version yes, as before).
-    [switch]$ImageOnly
+    [switch]$ImageOnly,
+    # DIGEST-PROOF-1 (framework, Invardia 2026-11-23; SEC-LANE-1 G8): an image patch of an OLDER build (e.g. 3.1.60.1 for the
+    # rings that run 3.1.60) never runs on rings 0/1 itself; it is proven by a NEWER version rings 0/1 run with the same base
+    # images. -ProvenBy <that version> (with -ImageOnly) adds "provenBy": { version; imageDiff { fromVersion; files } } -- the
+    # proving version's Dockerfile FROM lines against the release before it (it may carry code; only its FROM lines count).
+    # Refused HERE (nothing sent) when a FROM line the patch adds is not one the proving version added.
+    [string]$ProvenBy = '',
+    # RELEASE-DRYRUN-1: ask Invardia's check with the exact ring-call body and send NOTHING else (needs -Promote -Ring)
+    [switch]$CheckOnly,
+    # RELEASE-DRYRUN-1: the ring-2 APPROVAL REQUEST of a code release (ops ring2-request.ps1) WANTS the owner asked -- with
+    # -AskOwner the check's 'owner-asked' outcome is allowed too (ring 2 / 3 only); every other call still stops on it
+    [switch]$AskOwner,
+    # RELEASE-FLOW-1 / RELEASE-DRYRUN-1 (Invardia 2026-11-24, /check takes plan:true): the ring call judged BEFORE the gate, the
+    # tag and the publish. Implies -CheckOnly; needs no tag; the image-only diff is base tag -> the WORKING TREE (the fix is not
+    # committed yet in step 1); body { version; plan: true; imageOnly?; imageDiff?; provenBy? }. A not-yet-published version is
+    # a NOTE in Invardia's answer, never a refusal. Sends nothing else.
+    [switch]$PlanCheck
 )
+if ($PlanCheck) { $CheckOnly = [switch]$true }
 $ErrorActionPreference = 'Stop'
 function Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function ConvertTo-PimTestGateBody {
@@ -76,7 +93,26 @@ function ConvertTo-PimTestGateBody {
     $tg = $null; try { $tg = $Json | ConvertFrom-Json } catch { throw "-TestGateJson is not JSON; nothing was sent" }
     $at = if ($tg.at -is [datetime]) { $tg.at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { "$($tg.at)".Trim() }
     if ("$($tg.commit)" -notmatch '^[0-9a-f]{7,40}$' -or -not "$($tg.run)".Trim() -or "$($tg.result)" -notin @('green', 'red') -or $at -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') { throw "-TestGateJson malformed (commit 7-40 hex, run, result green|red, at ISO UTC): $Json; nothing was sent" }
-    return [ordered]@{ commit = "$($tg.commit)"; run = "$($tg.run)"; result = "$($tg.result)"; at = $at }
+    $out = [ordered]@{ commit = "$($tg.commit)"; run = "$($tg.run)"; result = "$($tg.result)"; at = $at }
+    # TWO-AGENT-CHECK-1 (owner via Invardia, framework bfbccf0f; wire 2026-11-26): reviews [{agent, verdict PASS|FAIL, at, commit}]
+    # (two PASS from two different agents) + findings {raised, agreedRight, agreedWrong}. Passed through when present, checked
+    # here (a malformed block = nothing sent). Invardia refuses a ring-0 call without them from 2026-12-01.
+    if ($tg.PSObject.Properties['reviews'] -and $null -ne $tg.reviews) {
+        $rv = New-Object System.Collections.ArrayList
+        foreach ($r in @($tg.reviews)) {
+            $rat = if ($r.at -is [datetime]) { $r.at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") } else { "$($r.at)".Trim() }
+            if (-not "$($r.agent)".Trim() -or "$($r.verdict)" -cnotin @('PASS', 'FAIL') -or $rat -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' -or "$($r.commit)" -notmatch '^[0-9a-f]{7,40}$') { throw "-TestGateJson reviews malformed (agent, verdict PASS|FAIL, at ISO UTC, commit 7-40 hex): $Json; nothing was sent" }
+            [void]$rv.Add([ordered]@{ agent = "$($r.agent)".Trim(); verdict = "$($r.verdict)"; at = $rat; commit = "$($r.commit)" })
+        }
+        $out['reviews'] = $rv
+    }
+    if ($tg.PSObject.Properties['findings'] -and $null -ne $tg.findings) {
+        $f = $tg.findings; $fo = [ordered]@{}
+        foreach ($k in 'raised', 'agreedRight', 'agreedWrong') { $n = 0; if (-not [int]::TryParse("$($f.$k)", [ref]$n) -or $n -lt 0) { throw "-TestGateJson findings.$k must be a whole number >= 0; nothing was sent" }; $fo[$k] = $n }
+        if ($fo.agreedRight + $fo.agreedWrong -ne $fo.raised) { throw "-TestGateJson findings: agreedRight + agreedWrong must equal raised (every finding agreed by all); nothing was sent" }
+        $out['findings'] = $fo
+    }
+    return $out
 }
 function Test-PimImageOnlyPath {
     <# PURE (IMAGE-ONLY-SEND). Is a changed file one an image-only release may touch? 'image' = a Dockerfile / lock file /
@@ -88,6 +124,13 @@ function Test-PimImageOnlyPath {
     if ($leaf -match '(?i)^(Dockerfile|Containerfile)(\..+)?$|\.dockerfile$') { return 'image' }
     if ($leaf -match '(?i)^(packages\.lock\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Directory\.Packages\.props|Directory\.Build\.props)$|\.(csproj|fsproj|vbproj)$') { return 'image' }
     if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/(VERSION|RELEASENOTES\.md|tools/setup/install-parameters\.json)$' -or $p -match '(?i)(^|/)sync/release-map\.json$') { return 'bookkeeping' }
+    # DOCS-FRESH (2026-11-23, 3.1.60.1): the release step moves the docs-version marker with VERSION -- engine/docs-version.txt
+    # and the one 'Docs-Live-Version:' line of docs/REQUIREMENTS.md (an internal file the release zip refuses to carry). The
+    # same two paths EPS's accepted image patch (2.1.60.1) leaves out. docs-version.txt is a version stamp (sent; Invardia judges
+    # the line). docs/REQUIREMENTS.md is 'internal': never in the image or the package, so NOT listed in the imageDiff at all
+    # (Invardia decision 6840227f refused it: "not a Dockerfile, package pin, lock file, version stamp or release notes").
+    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/engine/docs-version\.txt$') { return 'bookkeeping' }
+    if ($p -match '(?i)(^|/)SOLUTIONS/PIM4EntraPS/docs/REQUIREMENTS\.md$') { return 'internal' }
     # Invardia 2026-11-11 (868a703f, kind "version-string"): the sign-in front's version constant and VERSION file may move
     # too -- Invardia accepts ONLY lines that differ in their version numbers (any other change refuses the claim there).
     if ($p -match '(?i)(^|/)signin-front/(src/SecurityHeaders\.cs|VERSION)$' -or $leaf -match '(?i)\.version$') { return 'bookkeeping' }
@@ -101,17 +144,19 @@ function Get-PimImageOnlyDiff {
     <# IMAGE-ONLY-SEND. The imageDiff of -FromTag..-ToTag (repo-wide: the sign-in front and the release map live outside
        the solution) -> @{ ok; reason; files = @( [ordered]@{ path; removed = @(); added = @() } ) }. ok=$false when a changed
        file is product code (nothing is claimed then). Limits per framework: 300 files, 20,000 lines, 1,000 chars a line. #>
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$FromTag, [Parameter(Mandatory)][string]$ToTag)
-    $names = @(& git -C $RepoRoot diff --name-only $FromTag $ToTag 2>$null | Where-Object { "$_".Trim() })
+    # -ToTag '' = the WORKING TREE (a plan check in step 1, before the fix is committed and tagged)
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$FromTag, [AllowEmptyString()][string]$ToTag = '')
+    $refs = @($FromTag) + @(if ("$ToTag".Trim()) { "$ToTag".Trim() })
+    $names = @(& git -C $RepoRoot diff --name-only @refs 2>$null | Where-Object { "$_".Trim() })
     if ($LASTEXITCODE -ne 0) { return @{ ok = $false; reason = "git diff $FromTag..$ToTag failed"; files = @() } }
     $code = @($names | Where-Object { -not (Test-PimImageOnlyPath -Path $_) })
     if ($code.Count) { return @{ ok = $false; reason = ("not image-only: product code changed ({0}{1})" -f (($code | Select-Object -First 5) -join ', '), $(if ($code.Count -gt 5) { ", +$($code.Count - 5) more" } else { '' })); files = @() } }
     if ($names.Count -gt 300) { return @{ ok = $false; reason = "more than 300 files changed ($($names.Count))"; files = @() } }
     $files = New-Object System.Collections.Generic.List[object]; $lines = 0
-    foreach ($n in $names) {
+    foreach ($n in @($names | Where-Object { (Test-PimImageOnlyPath -Path $_) -ne 'internal' })) {   # 'internal' = not in the image: not listed
         $rem = New-Object System.Collections.Generic.List[string]; $add = New-Object System.Collections.Generic.List[string]
         if ("$n" -notmatch '(?i)(lock\.json|shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$') {   # a lock file may come with no lines
-            foreach ($l in @(& git -C $RepoRoot diff -U0 $FromTag $ToTag -- $n 2>$null)) {
+            foreach ($l in @(& git -C $RepoRoot diff -U0 @refs -- $n 2>$null)) {
                 if ($l -match '^(\+\+\+|---) ') { continue }
                 $t = "$l"; if ($t.Length -gt 1001) { $t = $t.Substring(0, 1001) }
                 if ($t.StartsWith('-')) { $rem.Add($t.Substring(1)); $lines++ } elseif ($t.StartsWith('+')) { $add.Add($t.Substring(1)); $lines++ }
@@ -121,6 +166,35 @@ function Get-PimImageOnlyDiff {
     }
     if ($lines -gt 20000) { return @{ ok = $false; reason = "more than 20,000 changed lines ($lines)"; files = @() } }
     return @{ ok = $true; reason = ''; files = @($files.ToArray()) }
+}
+function Get-PimProvenByBody {
+    <# DIGEST-PROOF-1. The "provenBy" body for an image patch -PatchFiles (Get-PimImageOnlyDiff files) proven by -ProvenByVersion:
+       its Dockerfile FROM lines vs the release tag before it -> @{ ok; reason; body = { version; imageDiff { fromVersion; files } } }.
+       ok=$false (nothing is sent) when the proving version is not tagged, has no earlier release, or does not ADD every FROM
+       line the patch adds. -Tags: the release versions (tests); default = this repository's PIM4EntraPS-v* tags. #>
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ProvenByVersion, [object[]]$PatchFiles = @(), [string[]]$Tags = @())
+    $all = if ($Tags.Count) { @($Tags) } else { @(& git -C $RepoRoot tag -l 'PIM4EntraPS-v*' | ForEach-Object { "$_" -replace '^PIM4EntraPS-v', '' }) }
+    $vs = @($all | ForEach-Object { try { [version]"$_" } catch { } } | Where-Object { $_ } | Sort-Object)
+    $pv = $null; try { $pv = [version]$ProvenByVersion } catch { return @{ ok = $false; reason = "-ProvenBy '$ProvenByVersion' is not a version"; body = $null } }
+    if (-not @($vs | Where-Object { $_ -eq $pv }).Count) { return @{ ok = $false; reason = "-ProvenBy: no tag PIM4EntraPS-v$ProvenByVersion"; body = $null } }
+    $prev = @($vs | Where-Object { $_ -lt $pv }) | Select-Object -Last 1
+    if (-not $prev) { return @{ ok = $false; reason = "-ProvenBy: no release before $ProvenByVersion"; body = $null } }
+    $from = "PIM4EntraPS-v$prev"; $to = "PIM4EntraPS-v$ProvenByVersion"
+    $names = @(& git -C $RepoRoot diff --name-only $from $to 2>$null | Where-Object { "$_".Trim() -and (Test-PimImageOnlyPath -Path "$_") -eq 'image' -and "$_" -match '(?i)(^|/)(Dockerfile|Containerfile)(\.[^/]+)?$|\.dockerfile$' })
+    $files = New-Object System.Collections.Generic.List[object]; $provAdded = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $names) {
+        $rem = New-Object System.Collections.Generic.List[string]; $add = New-Object System.Collections.Generic.List[string]
+        foreach ($l in @(& git -C $RepoRoot diff -U0 $from $to -- $n 2>$null)) {
+            if ($l -match '^(\+\+\+|---) ') { continue }
+            if ($l -match '^-\s*FROM\s') { $rem.Add("$l".Substring(1)) } elseif ($l -match '^\+\s*FROM\s') { $add.Add("$l".Substring(1)); $provAdded.Add("$l".Substring(1).Trim()) }
+        }
+        if ($rem.Count -or $add.Count) { $files.Add([ordered]@{ path = "$n"; removed = @($rem.ToArray()); added = @($add.ToArray()) }) }
+    }
+    $need = @(@($PatchFiles) | Where-Object { $_ } | ForEach-Object { @($_.added) } | Where-Object { "$_" -match '^\s*FROM\s' } | ForEach-Object { "$_".Trim() } | Select-Object -Unique)
+    $miss = @($need | Where-Object { $provAdded -notcontains $_ })
+    if (-not $need.Count) { return @{ ok = $false; reason = 'the patch adds no FROM line -- nothing for -ProvenBy to prove'; body = $null } }
+    if ($miss.Count) { return @{ ok = $false; reason = "-ProvenBy $ProvenByVersion did not add the patch's FROM line(s): $($miss -join ' | ')"; body = $null } }
+    return @{ ok = $true; reason = ''; body = [ordered]@{ version = "$ProvenByVersion"; imageDiff = [ordered]@{ fromVersion = "$prev"; files = @($files.ToArray()) } } }
 }
 # PIM 100.158 / framework 12.11e CR3 -- changedScopes on the publish call (&changedScopes=a,b | *) and the ring call
 # ("changedScopes": [..] | ["*"]), from the files this release changed since the previous release tag (PIM-ReleaseControl.ps1
@@ -217,7 +291,10 @@ $tag = "PIM4EntraPS-v$Version"
 
 Step "release $Version (tag $tag)"
 & git -C $repo rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "the tag $tag does not exist -- publish only a tagged release" }
+if ($LASTEXITCODE -ne 0) {
+    if ($PlanCheck -and $Promote) { Write-Host "    plan check: $tag is not cut yet -- the working tree is judged" -ForegroundColor DarkGray; $tag = '' }
+    else { throw "the tag $tag does not exist -- publish only a tagged release" }
+}
 
 if ($Promote) {
     if ($Ring -lt 0) { throw '-Promote needs -Ring <0-3>' }
@@ -226,15 +303,16 @@ if ($Promote) {
     Write-Host ("    promote: {0} -> ring {1}{2}" -f $Version, $Ring, $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
     # PIM 100.158 CR3: changedScopes on the ring call (switch + 24 h hold, see the top of this file)
     $pScopes = @()
-    $pScopesOn = (Test-PimChangedScopesOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES") -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark))
+    $pScopesOn = (Test-PimChangedScopesOn -Value "$env:PIM_PUBLISH_CHANGEDSCOPES") -and -not (Test-PimChangedScopesHeld -RefusedUtc (Get-PimScopesMark $scopesMark)) -and -not $PlanCheck   # a plan check sends no changedScopes (no tag yet)
     if ($pScopesOn) { $pScopes = @(Get-PimReleaseScopes -RepoRoot $repo -Tag $tag -PrevTag (Get-PimPreviousReleaseTag -RepoRoot $repo -Version $Version)) }
     Write-Host ("    changedScopes: {0}" -f $(if ($pScopes.Count) { $pScopes -join ',' } elseif ($pScopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
-    $pBody = [ordered]@{ version = $Version }; if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
+    $pBody = [ordered]@{ version = $Version }; if ($PlanCheck) { $pBody['plan'] = $true }; if ($pScopes.Count) { $pBody['changedScopes'] = @($pScopes) }
     if ("$TestGateJson".Trim()) {
         $pBody['testGate'] = ConvertTo-PimTestGateBody -Json $TestGateJson
         Write-Host ("    testGate: commit {0} run {1} result {2} at {3}" -f $pBody.testGate.commit, $pBody.testGate.run, $pBody.testGate.result, $pBody.testGate.at)
     }
-    if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl $($pBody | ConvertTo-Json -Compress)." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl; changedScopes = @($pScopes) } }
+    # -CheckOnly passes the plan return to reach the dry-run check, and returns right after it (before any ring POST -- W5)
+    if (-not $Apply) { if (-not $CheckOnly) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl $($pBody | ConvertTo-Json -Compress). -CheckOnly asks Invardia's dry-run check with the exact body." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl; changedScopes = @($pScopes) } } }
     if (-not $ClientId -or -not $CertThumbprint) {
         if (-not $KeyVault -or -not $KeyVaultSubscription) { throw "pass -ClientId and -CertThumbprint, or -KeyVault and -KeyVaultSubscription to read them" }
         $kvArgs = @('keyvault', 'secret', 'show', '--vault-name', $KeyVault, '--subscription', $KeyVaultSubscription, '--query', 'value', '-o', 'tsv')
@@ -269,13 +347,33 @@ if ($Promote) {
         $pBody['imageOnly'] = $true
         $pBody['imageDiff'] = [ordered]@{ fromVersion = $ioBase; files = @($io.files) }
         Write-Host ("    imageOnly: {0} -> {1}, {2} file(s): {3}" -f $ioBase, $Version, @($io.files).Count, ((@($io.files) | ForEach-Object { $_.path }) -join ', '))
-    }
+        if ("$ProvenBy".Trim()) {
+            $pb = Get-PimProvenByBody -RepoRoot $repo -ProvenByVersion "$ProvenBy".Trim() -PatchFiles @($io.files)
+            if (-not $pb.ok) { throw "-ProvenBy refused: $($pb.reason) -- nothing was sent" }
+            $pBody['provenBy'] = $pb.body
+            Write-Host ("    provenBy: {0} (FROM lines vs {1}, {2} file(s))" -f $pb.body.version, $pb.body.imageDiff.fromVersion, @($pb.body.imageDiff.files).Count)
+        }
+    } elseif ("$ProvenBy".Trim()) { throw '-ProvenBy goes with -ImageOnly only -- nothing was sent' }
+    # RELEASE-DRYRUN-1 (Invardia 2026-11-23, owner yes in the PIM session): the EXACT body goes to .../rings/<ring>/check first;
+    # it answers { outcome; problems[]; imageOnly; standing; proof } and changes nothing. Anything but releases / standing-* =
+    # STOP, nothing sent (an owner-asked outcome would open his approval mail; a refused one is a wasted round).
+    $ckUrl = "$purl/check"
+    Step "CHECK $ckUrl"
+    $ck = Invoke-PimInvardiaCall -Method POST -Url $ckUrl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
+    $ckBody = $null; try { $ckBody = "$($ck.content)" | ConvertFrom-Json } catch { $ckBody = $null }
+    $ckOutcome = "$(if ($ckBody) { $ckBody.outcome })"
+    $ckProblems = @(if ($ckBody) { @($ckBody.problems) | Where-Object { $_ } | ForEach-Object { if ($_ -is [string]) { $_ } else { $_ | ConvertTo-Json -Compress -Depth 4 } } })
+    Write-Host ("    CHECK ring {0} {1}: outcome={2}{3}" -f $Ring, $Version, $(if ($ckOutcome) { $ckOutcome } else { "(none; HTTP $($ck.status))" }), $(if ($ckProblems.Count) { "; problems: $($ckProblems -join ' | ')" } else { '' }))
+    $ckOk = ([int]$ck.status -ge 200 -and [int]$ck.status -lt 300 -and $ckOutcome -match '^(releases|standing-approves|standing-waits-for-proof)$')
+    if (-not $ckOk -and $AskOwner -and -not $ImageOnly -and $Ring -ge 2 -and [int]$ck.status -ge 200 -and [int]$ck.status -lt 300 -and $ckOutcome -eq 'owner-asked') { $ckOk = $true; Write-Host '    (-AskOwner: the approval request -- owner-asked is the wanted outcome; his click releases)' -ForegroundColor DarkGray }
+    if ($CheckOnly) { return [pscustomobject]@{ promoted = $false; checked = $true; ok = $ckOk; outcome = $ckOutcome; problems = @($ckProblems); version = $Version; ring = $Ring; url = $ckUrl } }
+    if (-not $ckOk) { throw "CHECK refused the ring $Ring call for ${Version}: outcome '$ckOutcome' (HTTP $($ck.status))$(if ($ckProblems.Count) { " -- $($ckProblems -join ' | ')" }) -- nothing was sent" }
     Step "POST $purl"
     $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
     if ($ImageOnly -and [int]$pr.status -eq 422 -and "$($pr.content)" -match '(?i)imageOnly|imageDiff') {
         # framework IMAGE-PATCH-1 point 8 / 12.22 3b: a claim Invardia does not accept -> once more WITHOUT it (a normal ring call)
         Write-Host ("    Invardia did not accept the image-only claim (HTTP 422: {0}) -- sent once more as a normal ring call" -f ("$($pr.content)" -replace '\s+', ' ').Substring(0, [Math]::Min(200, ("$($pr.content)").Length))) -ForegroundColor Yellow
-        $pBody.Remove('imageOnly'); $pBody.Remove('imageDiff')
+        $pBody.Remove('imageOnly'); $pBody.Remove('imageDiff'); $pBody.Remove('provenBy')
         $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
     }
     if ($pBody.Contains('changedScopes') -and (Test-PimChangedScopesRefusal -Status $pr.status -Content $pr.content)) {
@@ -288,7 +386,7 @@ if ($Promote) {
     $status = [int]$pr.status; $content = "$($pr.content)"
     $ok = ($status -in 200, 201, 202)
     Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
-    $na = Get-PimNotApprovedText -Status $status -Content $content -Version $Version -Ring $Ring
+    $na = Get-PimNotApprovedText -Status $status -Content $content -Version $Version -Ring $Ring -ImageOnly:([bool]$ImageOnly)
     if ($na) { throw $na }
     if (-not $ok -and $status -ge 500) {
         # §12.22 3(c): a 5xx is "unknown" -- read the ring back before any retry or failure report

@@ -11,7 +11,7 @@
       "kind": "entraRole",
       "name": "Privileged Role Administrator",
       "scope": "tenant",
-      "why": "Granting an application permission (an app role assignment) to a service principal needs a Privileged Role Administrator or a Global Administrator. Only needed for -GraphPermissions / -AppRoles."
+      "why": "Granting an application permission (an app role assignment) or an Entra directory role to a service principal needs a Privileged Role Administrator or a Global Administrator. Only needed for -GraphPermissions / -AppRoles / -DirectoryRoles."
     },
     {
       "kind": "azureRbac",
@@ -24,6 +24,12 @@
       "name": "delegated Microsoft Graph scopes AppRoleAssignment.ReadWrite.All and Application.Read.All",
       "scope": "the browser sign-in (first-party public client 'Microsoft Graph Command Line Tools')",
       "why": "What the browser sign-in asks for: read the engine identity and the API's permissions, and create the app role assignment. No PowerShell module, no certificate, no secret."
+    },
+    {
+      "kind": "other",
+      "name": "delegated Microsoft Graph scope RoleManagement.ReadWrite.Directory",
+      "scope": "the same browser sign-in, only with -DirectoryRoles",
+      "why": "Reads the engine identity's directory role assignments and creates the missing one as you."
     },
     {
       "kind": "other",
@@ -50,6 +56,15 @@
       "scope": "the scope you pass: the tenant root management group, a management group, a subscription or a resource group",
       "why": "Discovery reads Azure with Reader; assigning delegated Azure resource roles needs User Access Administrator. PIM Manager never asks for Owner or Contributor.",
       "undo": "Azure portal > the scope > Access control (IAM) > Role assignments > remove the engine identity's assignment."
+    },
+    {
+      "target": "Microsoft Graph",
+      "action": "grant",
+      "object": "Entra directory role assignment for the engine identity (POST roleManagement/directory/roleAssignments, directory scope /, active and permanent) for each role in -DirectoryRoles",
+      "permission": "Privileged Authentication Administrator only (by name or its role template id); any other directory role is refused. The role itself is never created or changed",
+      "scope": "the whole directory (/)",
+      "why": "Entra protects admin accounts that are members of role-assignable groups: PIM can disable and re-enable them (offboarding, a disabled admin, the request-for-access portal) only with this role.",
+      "undo": "Entra admin center > Roles & admins > Privileged Authentication Administrator > Assignments > remove the engine identity (or DELETE roleManagement/directory/roleAssignments/{id})."
     }
   ],
   "parameters": [
@@ -58,6 +73,7 @@
     { "name": "GraphPermissions", "required": false, "default": null, "help": "Microsoft Graph application permissions to grant, e.g. 'Group.ReadWrite.All','RoleManagement.ReadWrite.Directory'." },
     { "name": "AppRoles", "required": false, "default": null, "help": "Application permissions of other APIs as '<permission>@<API application id>'." },
     { "name": "AzureRoleAssignments", "required": false, "default": null, "help": "Azure roles as '<role name or role definition id>@<scope>'." },
+    { "name": "DirectoryRoles", "required": false, "default": null, "help": "Entra directory roles for the engine identity: only 'Privileged Authentication Administrator' (by name or role template id) is accepted." },
     { "name": "UseEdge", "required": false, "default": "$true", "help": "$true opens Microsoft Edge for the sign-in; $false the default browser." },
     { "name": "GraphAccessToken", "required": false, "default": null, "help": "Automation: a Microsoft Graph token (delegated AppRoleAssignment.ReadWrite.All + Application.Read.All) instead of the browser sign-in." },
     { "name": "ArmAccessToken", "required": false, "default": null, "help": "Automation: an Azure Resource Manager token instead of the second browser sign-in." },
@@ -67,10 +83,11 @@
   "readsOnly": [
     "the engine identity's service principal (name, type) and the application permissions it already holds",
     "each API's service principal and the application permissions it offers (Microsoft Graph, or the API in -AppRoles)",
-    "Azure role definitions (by name) and the engine identity's role assignments at and above each scope"
+    "Azure role definitions (by name) and the engine identity's role assignments at and above each scope",
+    "the engine identity's Entra directory role assignments (only with -DirectoryRoles)"
   ],
   "network": [ "login.microsoftonline.com", "graph.microsoft.com", "management.azure.com", "localhost (the browser returns the sign-in to a local port on this computer)" ],
   "whatIf": "Signs in and reads, prints the plan (already there / would grant / refused per permission), then one \"What if:\" line per grant: the application permission and the API, or the Azure role and its scope. Nothing is granted.",
-  "undo": "Remove each app role assignment from the engine identity (Entra admin center > Enterprise applications > the engine identity > Permissions) and each Azure role assignment (Access control (IAM) at the scope). The script creates nothing else.",
+  "undo": "Remove each app role assignment from the engine identity (Entra admin center > Enterprise applications > the engine identity > Permissions), each Azure role assignment (Access control (IAM) at the scope) and the directory role assignment (Entra admin center > Roles & admins > the role > Assignments). The script creates nothing else.",
   "docUrl": "https://invardia.com/docs/pim/scripts/Grant-PimEnginePermissions/"
 }

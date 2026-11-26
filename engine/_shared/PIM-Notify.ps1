@@ -26,6 +26,9 @@ if ($PSScriptRoot) {
     # MAIL-1: the transport (shared mailbox | SMTP relay | none) -- the one setting every mail of this environment follows.
     $__pimMailTransport = Join-Path $PSScriptRoot 'PIM-MailTransport.ps1'
     if (Test-Path -LiteralPath $__pimMailTransport) { . $__pimMailTransport }
+    # ONE-SENDER-1 point D: the daily Graph probe of every sending identity (PIM-MailSenderProbe.ps1)
+    $__pimMailProbe = Join-Path $PSScriptRoot 'PIM-MailSenderProbe.ps1'
+    if (Test-Path -LiteralPath $__pimMailProbe) { . $__pimMailProbe }
     # MAIL-2 (framework §12.11, PIM §100.5): the designed layout (logo, summary, blue audience button, footer) and the
     # per-recipient notification preferences the senders read at send time.
     foreach ($__pimMail2 in 'PIM-MailLayout.ps1', 'PIM-MailNotifications.ps1', 'PIM-GetStartedReminder.ps1') {
@@ -129,6 +132,9 @@ function Get-PimPortalLink {
     param([string]$Type, [hashtable]$Tokens = @{})
     # A credential delivery goes to a sponsor / department owner who usually has no Manager access -- no link there.
     if ("$Type" -match '^(tap-delivery|ad-password-delivery)$') { return [pscustomobject]@{ base = ''; tab = ''; url = '' } }
+    # RFA-MAIL-2 (owner 2026-11-25): an RFA mail carries its OWN button (the access portal for the requester, Access requests
+    # for an owner) -- never the generic "Open in PIM Manager" (a consultant has no Manager access)
+    if ("$Type" -eq 'rfa-notice') { return [pscustomobject]@{ base = ''; tab = ''; url = '' } }
     $base = Get-PimPortalBaseUrl
     $tab = ''
     foreach ($k in 'PortalTab', 'AlertTab') { if (-not $tab -and $Tokens -and $Tokens.ContainsKey($k) -and "$($Tokens[$k])".Trim() -match '^[a-z0-9-]+$') { $tab = "$($Tokens[$k])".Trim() } }
@@ -640,7 +646,21 @@ function Send-PimNotifyMail {
             $Tokens['AlertSubject'] = "$($Tokens['AlertTitle'])"
         }
     }
+    # RFA-MAIL-2: an RFA mail whose sender passed only the old tokens (Headline / Detail / Action) gets the designed layout
+    if ("$Type" -eq 'rfa-notice' -and -not "$($Tokens['RfaMailHtml'])".Trim() -and (Get-Command New-PimRfaMailHtml -ErrorAction SilentlyContinue)) {
+        try {
+            $rm = ConvertTo-PimRfaMailModelFromTokens -Tokens $Tokens
+            if (-not "$($rm.environment)".Trim()) { $rm.environment = "$($envF.displayName)" }
+            if (-not "$($rm.company)".Trim()) { $rm.company = $(if ("$($envF.displayName)".Trim()) { "$($envF.displayName)" } else { "$($envF.tenantName)" }) }
+            if (-not "$($rm.tenantName)".Trim()) { $rm.tenantName = "$($envF.tenantName)" }
+            $rm.tenantId = "$($envF.tenantId)"; $rm.version = "$($envF.version)"
+            $Tokens = @{} + $Tokens; $Tokens['RfaMailHtml'] = New-PimRfaMailHtml -Model $rm
+        } catch { Write-Verbose "  [Mail] the RFA layout could not be built ($($_.Exception.Message))" }
+    }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
+    # RFA-MAIL-2: the designed RFA mail's text part reads as plain text (&middot; / &rarr; and the like decoded)
+    # and the template's notes (subject / tokens / comments) are not sent in the body
+    if ("$Type" -eq 'rfa-notice' -and "$($Tokens['RfaMailHtml'])".Trim()) { $r.BodyText = [System.Net.WebUtility]::HtmlDecode("$($r.BodyText)"); $r.BodyHtml = [regex]::Replace("$($r.BodyHtml)", '(?s)<!--.*?-->', '').Trim() }
     if ($alertModel -and "$($tpl.text)" -match '\{\{AlertTable\}\}') {
         # the plain-text part carries the same content, in the same order
         try { $r.BodyText = "$($alertModel.mail.text)" } catch { }
@@ -751,9 +771,12 @@ function Send-PimNotifyMail {
         }
         if (-not $rcpt) { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }
         if (-not $rcptList.Count) { $rcptList = @($rcpt) }
-        $sm = Send-PimSmtpMail -Config $relay.config -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments
+        # ONE-SENDER-1 (3.1.69 review): the relay's From is its own proven 'from' when set, else pim.Settings MailSender; a
+        # different MailSender is DRIFT (reported by the mail check / heartbeat), never switched to unproven
+        $smtpFrom = if (Get-Command Get-PimSmtpFromAddress -ErrorAction SilentlyContinue) { Get-PimSmtpFromAddress -MailSender $sender -Config $relay.config } else { "$($relay.config.from)" }
+        $sm = Send-PimSmtpMail -Config $relay.config -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments -From $smtpFrom
         if (-not $sm.sent) { Write-Warning "  [Mail] send failed ($Type -> $rcpt) via SMTP relay: $($sm.reason)" }
-        Save-PimMailSendProof -Ok ([bool]$sm.sent) -Reason "$($sm.reason)" -Mode 'smtp' -Sender "$($relay.config.from)"
+        Save-PimMailSendProof -Ok ([bool]$sm.sent) -Reason "$($sm.reason)" -Mode 'smtp' -Sender "$smtpFrom"
         return @{ sent = [bool]$sm.sent; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($sm.reason)"; sentAs = 'smtp' }
     }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
@@ -769,6 +792,9 @@ function Send-PimNotifyMail {
         $ga })
     if ($att.Count) { $body.message['attachments'] = $att }
     $sendAs = Resolve-PimMailSendIdentity
+    # ONE-SENDER-1 point D: before the FIRST send of this (hosted) process, the sender check runs when the stored one is due
+    # (the daily job keeps it fresh) -- once per process, never fatal, never in -WhatIf (returned above)
+    if ($env:IDENTITY_ENDPOINT -and (Get-Command Invoke-PimMailSenderProbeScheduled -ErrorAction SilentlyContinue)) { try { [void](Invoke-PimMailSenderProbeScheduled -BeforeFirstSend) } catch { } }
     # Splat the switch only when it is set: offline suites stub Invoke-PimGraph with a fixed
     # parameter list, and an unconditional -UseManagedIdentity would break every one of them.
     $graphArgs = @{ Method = 'POST'; Path = "/users/$sender/sendMail"; Body = $body }

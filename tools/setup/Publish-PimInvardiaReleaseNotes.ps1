@@ -283,7 +283,8 @@ function Get-PimKeyVaultSecretValue {
 # ---- main ------------------------------------------------------------------------------------------------------------
 $sol = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not "$Version".Trim()) { $Version = (Get-Content -LiteralPath (Join-Path $sol 'VERSION') -Raw).Trim() }
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "not a release version: '$Version'" }
+# 2026-11-23: a 4-part version (an image patch, e.g. 3.1.62.1) is a release version too -- its ask carries the fix list
+if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw "not a release version: '$Version'" }
 Step "release notes for $Version"
 
 $fixIn = @()

@@ -225,12 +225,23 @@ function Get-PimNotApprovedText {
       PURE. Invardia's 409 { error: "notApproved"; reason } in plain words for the publish tool, or '' when the answer is not
       that refusal. framework 12.11e item 7: the product's publish tooling shows it plainly.
     #>
-    param([int]$Status, [AllowNull()][string]$Content, [string]$Version = '', [int]$Ring = -1)
+    param([int]$Status, [AllowNull()][string]$Content, [string]$Version = '', [int]$Ring = -1, [switch]$ImageOnly)
     if ($Status -ne 409) { return '' }
     $j = $null; try { $j = "$Content" | ConvertFrom-Json } catch { $j = $null }
     $err = if ($j -and $j.PSObject.Properties['error']) { "$($j.error)" } else { '' }
     if ($err -ne 'notApproved' -and "$Content" -notmatch 'notApproved') { return '' }
     $why = if ($j -and $j.PSObject.Properties['reason'] -and "$($j.reason)".Trim()) { " (Invardia: $("$($j.reason)".Trim()))" } else { '' }
+    # SECURITY-NO-ASK-1 (framework, Invardia 2026-11-23): an IMAGE-ONLY call's 409 is the standing yes at work, never an owner
+    # question. Invardia's 409 carries "standing": waits-for-ring-0-1-proof | claim-refused and "ownerAsked": false.
+    $standing = if ($j -and $j.PSObject.Properties['standing']) { "$($j.standing)".Trim() } else { '' }
+    if ($ImageOnly -or $standing) {
+        $next = switch -Regex ($standing) {
+            '^waits-for-ring-0-1-proof$' { 'it releases by itself on the standing yes once rings 0/1 prove the image' }
+            '^claim-refused$' { 'fix the image-only claim (the refusal arrives as a board task, dedupe imageclaim:...) and re-send' }
+            default { 'read the standing state with Invardia' }
+        }
+        return ("IMAGE-ONLY HELD: ring {0} for {1} -- standing: {2}; ownerAsked: false{3}. Do not ask the owner: {4}." -f $Ring, $Version, $(if ($standing) { $standing } else { '(not given)' }), $why, $next)
+    }
     return ("NOT APPROVED: ring {0} for {1} needs the owner's approval in Invardia's back office{2}. This refused call opens his approval mail (once per version). Do not retry -- release again when release.approved for {1} arrives." -f $Ring, $Version, $why)
 }
 

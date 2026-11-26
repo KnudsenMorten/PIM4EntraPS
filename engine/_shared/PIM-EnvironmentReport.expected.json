@@ -1,6 +1,6 @@
 {
   "schema": "pim-environment-report-expected/1",
-  "about": "Framework §12.8 ENV-REPORT-1: the permissions PIM Manager DECLARES for each of its identities. The environment report reads what each identity really holds and marks every grant expected / missing / extra against this file. The Graph sets must equal the setup maps in tools/setup/_PimSetupShared.ps1 (Engine and Manager role sets) -- tests/Test-PimEnvironmentReport.ps1 fails if they drift. When SCRIPT-DOC-1 manifests (tools/setup/script-docs/*.doc.json) exist, the report lists them as a second source; this file stays the one the comparison uses.",
+  "about": "Framework §12.8 ENV-REPORT-1: the permissions PIM Manager DECLARES for each of its identities. The System Documentation reads what each identity really holds and marks every grant expected / missing / extra against this file. The Graph sets must equal the setup maps in tools/setup/_PimSetupShared.ps1 (Engine and Manager role sets) -- tests/Test-PimEnvironmentReport.ps1 fails if they drift. When SCRIPT-DOC-1 manifests (tools/setup/script-docs/*.doc.json) exist, the report lists them as a second source; this file stays the one the comparison uses.",
   "azureScopes": {
     "tenantRoot": "the tenant root management group",
     "resourceGroup": "the resource group PIM Manager runs in",
@@ -45,7 +45,9 @@
         { "permission": "DeviceManagementRBAC.ReadWrite.All", "why": "Intune role and scope-tag delegations" }
       ],
       "graphForbidden": [ { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" } ],
-      "directoryRoles": [],
+      "directoryRoles": [
+        { "role": "Privileged Authentication Administrator", "required": true, "why": "Disable and re-enable admin accounts that are members of role-assignable groups (Entra protects them; needed for RFA and offboarding)" }
+      ],
       "azure": [
         { "role": "Reader", "scope": "tenantRoot", "required": true, "coveredBy": [ "User Access Administrator", "Owner", "Contributor", "Role Based Access Control Administrator" ], "why": "Discovery lists management groups and subscriptions (read-only)" },
         { "role": "User Access Administrator", "scope": "tenantRoot", "required": false, "coveredBy": [ "Owner", "Role Based Access Control Administrator" ], "why": "Only needed when Azure resource role delegations are defined: assigns Azure resource roles" },
@@ -80,7 +82,7 @@
       ],
       "directoryRoles": [],
       "azure": [
-        { "role": "Reader", "scope": "resourceGroup", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "The Environment report reads the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) -- the PIM resource group only (PIM 100.22 b)" },
+        { "role": "Reader", "scope": "resourceGroup", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "The System Documentation reads the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) -- the PIM resource group only (PIM 100.22 b)" },
         { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the Manager image when the registry is reached with the managed identity" },
         { "role": "Storage Blob Data Contributor", "scope": "storage", "required": false, "why": "Microsoft's built-in sign-in in front of the web app keeps its sign-in tokens in ONE blob container (pim-auth-tokens, the token store) -- that container only, never the storage account. The web app holds NO Key Vault role (SECURE-WEB-1, 3.1.26): the emergency passphrase check is kept in the PIM database" }
       ],

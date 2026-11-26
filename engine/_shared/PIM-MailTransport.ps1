@@ -109,9 +109,11 @@ function ConvertTo-PimSmtpRelayConfig {
     if ($sec -notin @('starttls', 'none')) { $errors['security'] = "Choose STARTTLS or none (not '$sec')." }
     if ($port -eq 465 -and -not $errors.Contains('port')) { $errors['port'] = 'Port 465 (implicit TLS) is not supported -- use 587 with STARTTLS (every relay offers it).' }
     $user = "$(& $get $rec 'username')".Trim()
+    # ONE-SENDER-1 point A (Invardia 2026-11-25): pim.Settings 'MailSender' is the ONLY From -- the relay record no longer
+    # asks for its own. An older record's 'from' is still read (validated when present) as the one-time migration source
+    # (Resolve-PimMailSenderFromRelay) and as the From only while MailSender is empty (Get-PimSmtpFromAddress).
     $from = "$(& $get $rec 'from')".Trim()
-    if (-not $from) { $errors['from'] = 'Enter the From address the mail is sent as.' }
-    elseif (-not (Test-PimMailAddress -Value $from)) { $errors['from'] = "Not a mail address: $from" }
+    if ($from -and -not (Test-PimMailAddress -Value $from)) { $errors['from'] = "Not a mail address: $from" }
     $vault = "$(& $get $rec 'vaultName')".Trim()
     $secretName = "$(& $get $rec 'secretName')".Trim()
     if (-not $secretName) { $secretName = Get-PimSmtpRelayDefaultSecretName }
@@ -125,6 +127,51 @@ function ConvertTo-PimSmtpRelayConfig {
 function Get-PimSmtpRelayConfig {
     # The stored relay record of THIS environment, validated (ConvertTo-PimSmtpRelayConfig).
     return (ConvertTo-PimSmtpRelayConfig -Value (Get-PimMailSettingValue -Name 'SmtpRelay'))
+}
+
+function Get-PimSmtpFromAddress {
+    <#
+      PURE. ONE-SENDER-1 point A, CORRECTED after the 3.1.69 review (agreed by both reviewers): the From of an SMTP relay mail
+      is the relay record's own 'from' WHEN IT IS SET -- it is the address the relay is proven to accept. A different
+      pim.Settings 'MailSender' (e.g. an old shared mailbox from before the move to a relay) never switches it unproven: relays
+      that enforce the sender would refuse every mail (TAP codes, alerts). That difference is DRIFT (Get-PimSmtpSenderDrift),
+      reported, never acted on. MailSender is the From only while the record has no 'from'. Neither -> ''.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$MailSender, [AllowNull()][object]$Config)
+    $f = ''
+    if ($null -ne $Config) { $f = "$(if ($Config -is [System.Collections.IDictionary]) { $Config['from'] } elseif ($Config.PSObject.Properties['from']) { $Config.from } else { '' })".Trim() }
+    if ($f) { return $f }
+    return "$MailSender".Trim().Trim('"')
+}
+
+function Get-PimSmtpSenderDrift {
+    <#
+      PURE (ONE-SENDER-1, 3.1.69 review). SMTP relay mode: the relay's From and pim.Settings 'MailSender' both set and
+      DIFFERENT = drift -- the relay keeps sending as its From; the plain line says what differs and how to make them one
+      (send a test mail through the relay with the new address, then save it). Returns @{ drift; relayFrom; mailSender; text }.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$MailSender, [AllowNull()][object]$Config)
+    $f = ''
+    if ($null -ne $Config) { $f = "$(if ($Config -is [System.Collections.IDictionary]) { $Config['from'] } elseif ($Config.PSObject.Properties['from']) { $Config.from } else { '' })".Trim() }
+    $s = "$MailSender".Trim().Trim('"')
+    if (-not $f -or -not $s -or $f -ieq $s) { return @{ drift = $false; relayFrom = $f; mailSender = $s; text = '' } }
+    return @{ drift = $true; relayFrom = $f; mailSender = $s
+              text = "the SMTP relay sends as $f, but the mail sender setting is $s -- mail keeps going out as $f (the address the relay accepts). To use one sender, put $s in the relay's From and send a test mail; only a successful test proves the relay accepts it." }
+}
+
+function Resolve-PimMailSenderFromRelay {
+    <#
+      PURE. ONE-SENDER-1 point A: the ONE-TIME migration of SmtpRelay.from into MailSender. Returns @{ migrate; sender; reason }:
+      migrate = $true only when MailSender is EMPTY and the relay record carries a valid 'from' -- the caller then writes
+      MailSender once (after that MailSender is set, so it never runs again). A set MailSender is never overwritten.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$MailSender, [AllowNull()][object]$SmtpRelay)
+    if ("$MailSender".Trim().Trim('"')) { return @{ migrate = $false; sender = "$MailSender".Trim().Trim('"'); reason = 'MailSender is set (the ONE sender) -- nothing to migrate' } }
+    $rel = ConvertTo-PimSmtpRelayConfig -Value $SmtpRelay
+    $f = "$($rel.config.from)".Trim()
+    if (-not $f) { return @{ migrate = $false; sender = ''; reason = 'no SmtpRelay.from to migrate' } }
+    if (-not (Test-PimMailAddress -Value $f)) { return @{ migrate = $false; sender = ''; reason = "SmtpRelay.from '$f' is not a mail address -- not migrated" } }
+    return @{ migrate = $true; sender = $f; reason = "MailSender was empty -- SmtpRelay.from '$f' becomes the ONE sender (one-time migration)" }
 }
 
 function Get-PimSmtpRelayPassword {
@@ -188,14 +235,18 @@ function Send-PimSmtpMail {
       notify path reports, it does not crash a run). The reason never carries the password.
     #>
     param([Parameter(Mandatory)][object]$Config, [Parameter(Mandatory)][string[]]$Recipients, [string]$Subject, [string]$BodyHtml, [string]$BodyText,
-          [object[]]$Attachments = @())
+          [object[]]$Attachments = @(),
+          # ONE-SENDER-1 point A: the From = pim.Settings MailSender (Get-PimSmtpFromAddress); '' = the record's own 'from'
+          [string]$From = '')
+    $fromAddr = Get-PimSmtpFromAddress -MailSender $From -Config $Config
+    if (-not $fromAddr) { return @{ sent = $false; sentAs = 'smtp'; reason = 'no From address: set the mail sender (pim.Settings MailSender, Settings > Mail & alerting) -- the SMTP relay sends as it' } }
     $pw = ''
     try { $pw = Get-PimSmtpRelayPassword -Config $Config }
     catch { return @{ sent = $false; sentAs = 'smtp'; reason = "the SMTP relay password could not be read from Key Vault '$($Config.vaultName)' (secret '$($Config.secretName)'): $(($_.Exception.Message -split "`n")[0]) -- the sending identity needs 'Key Vault Secrets User' on that secret" } }
     if ("$($Config.username)".Trim() -and -not "$pw") { return @{ sent = $false; sentAs = 'smtp'; reason = "the SMTP relay password secret '$($Config.secretName)' in Key Vault '$($Config.vaultName)' is empty" } }
     $msg = $null; $client = $null
     try {
-        $msg = New-PimSmtpMailMessage -From "$($Config.from)" -To $Recipients -Subject $Subject -BodyHtml $BodyHtml -BodyText $BodyText -Attachments $Attachments
+        $msg = New-PimSmtpMailMessage -From $fromAddr -To $Recipients -Subject $Subject -BodyHtml $BodyHtml -BodyText $BodyText -Attachments $Attachments
         $client = New-PimSmtpClient -Config $Config -Password $pw
         $client.Send($msg)
         return @{ sent = $true; sentAs = 'smtp'; reason = '' }
@@ -217,7 +268,9 @@ function Get-PimMailTestFingerprint {
     # stale, so the Get Started step goes back to "not done" until the new settings are proven.
     param([string]$Mode, [string]$Sender, [object]$Smtp)
     $m = ConvertTo-PimMailMode -Value $Mode
-    if ($m -eq 'smtp') { return ('smtp|{0}|{1}|{2}|{3}' -f "$($Smtp.host)".ToLowerInvariant(), "$($Smtp.port)", "$($Smtp.from)".ToLowerInvariant(), "$($Smtp.username)".ToLowerInvariant()) }
+    # ONE-SENDER-1 (3.1.69 review): the From of a relay mail = the record's own 'from' when set (else MailSender) -- the same
+    # address as before ONE-SENDER-1, so an older proof stays valid
+    if ($m -eq 'smtp') { return ('smtp|{0}|{1}|{2}|{3}' -f "$($Smtp.host)".ToLowerInvariant(), "$($Smtp.port)", (Get-PimSmtpFromAddress -MailSender $Sender -Config $Smtp).ToLowerInvariant(), "$($Smtp.username)".ToLowerInvariant()) }
     if ($m -eq 'sharedMailbox') { return ('sharedMailbox|{0}' -f "$Sender".Trim().ToLowerInvariant()) }
     return "$m"
 }
@@ -262,10 +315,13 @@ function Get-PimMailSetupState {
         # MAIL-OFF-1 (2026-11-17): switched off ON PURPOSE = a finished choice (done), not a missing step; 'off' says so
         'none' { return @{ mode = $m; done = $true; off = $true; note = (Get-PimMailOffNote); sender = $s; proven = $null } }
         'smtp' {
-            if (-not $smtp.ok) { return @{ mode = $m; done = $false; note = 'SMTP relay: ' + (@($smtp.errors.Values) -join ' '); sender = "$($smtp.config.from)"; proven = $null } }
-            if ($proof -eq $true) { return @{ mode = $m; done = $true; note = "SMTP relay $($smtp.config.host):$($smtp.config.port) as $($smtp.config.from) -- test mail sent"; sender = "$($smtp.config.from)"; proven = $true } }
-            if ($proof -eq $false) { return @{ mode = $m; done = $false; note = "SMTP relay configured, but the test mail failed: $($LastTest.reason)"; sender = "$($smtp.config.from)"; proven = $false } }
-            return @{ mode = $m; done = $false; note = 'SMTP relay configured -- send a test mail to prove it'; sender = "$($smtp.config.from)"; proven = $null }
+            # ONE-SENDER-1 (3.1.69 review): the relay's own From when set, else MailSender; a different MailSender is drift
+            $sf = Get-PimSmtpFromAddress -MailSender $s -Config $smtp.config
+            if (-not $smtp.ok) { return @{ mode = $m; done = $false; note = 'SMTP relay: ' + (@($smtp.errors.Values) -join ' '); sender = $sf; proven = $null } }
+            if (-not $sf) { return @{ mode = $m; done = $false; note = 'SMTP relay configured, but no mail sender is set -- the relay sends as the mail sender'; sender = ''; proven = $null } }
+            if ($proof -eq $true) { return @{ mode = $m; done = $true; note = "SMTP relay $($smtp.config.host):$($smtp.config.port) as $sf -- test mail sent"; sender = $sf; proven = $true } }
+            if ($proof -eq $false) { return @{ mode = $m; done = $false; note = "SMTP relay configured, but the test mail failed: $($LastTest.reason)"; sender = $sf; proven = $false } }
+            return @{ mode = $m; done = $false; note = 'SMTP relay configured -- send a test mail to prove it'; sender = $sf; proven = $null }
         }
         default {
             if (-not $s) { return @{ mode = 'sharedMailbox'; done = $false; note = 'no sender: TAP codes and notifications are not sent'; sender = ''; proven = $null } }
@@ -370,8 +426,14 @@ function Get-PimMailCheck {
     if ($mode -eq 'smtp') {
         $relay = ConvertTo-PimSmtpRelayConfig -Value (& $f 'smtp')
         $c = $relay.config
-        if ($relay.ok) { & $add 'smtp-settings' 'SMTP relay: server, port, user' 'ok' ("$($c.host):$($c.port) ($($c.security)) as $($c.from)" + $(if ($c.username) { ", user $($c.username)" } else { ', no sign-in' })) '' }
+        # ONE-SENDER-1 (3.1.69 review): the relay sends as its own From when set (else MailSender); a different MailSender is drift
+        $smtpFrom = Get-PimSmtpFromAddress -MailSender $sender -Config $c
+        if ($relay.ok) { & $add 'smtp-settings' 'SMTP relay: server, port, user' 'ok' ("$($c.host):$($c.port) ($($c.security)) as $(if ($smtpFrom) { $smtpFrom } else { '(no mail sender set)' })" + $(if ($c.username) { ", user $($c.username)" } else { ', no sign-in' })) '' }
         else { & $add 'smtp-settings' 'SMTP relay: server, port, user' 'missing' ((@($relay.errors.Values) | ForEach-Object { "$_" }) -join ' ') 'PIM Manager > Get Started > Mail sender > SMTP relay: fill in the server, port, From address and user name' }
+        # ONE-SENDER-1 (3.1.69 review): the relay's From and the mail sender setting differ -> an INFO line (mail still works
+        # as the relay's From; nothing is switched unproven), shown in Get Started / Home and counted as drift by the heartbeat
+        $dr = Get-PimSmtpSenderDrift -MailSender $sender -Config $c
+        if ($dr.drift) { & $add 'smtp-sender-drift' 'One mail sender' 'info' $dr.text '' }
         $pwFix = (Get-PimMailSetupCommand -Kind smtpPassword -Setup $setup -Smtp $c) -join "`n"
         if ($relay.ok -and -not "$($c.username)".Trim()) { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'ok' 'the relay needs no sign-in -- no password' '' }
         else {
@@ -383,7 +445,7 @@ function Get-PimMailCheck {
             else { & $add 'smtp-password' 'SMTP password in Key Vault, readable by the sender' 'unknown' "not checked yet$(if ("$(& $gv $pw 'reason')".Trim()) { ': ' + "$(& $gv $pw 'reason')".Trim() } else { ' (the relay settings are incomplete)' })" $pwFix }
         }
         $lt = & $f 'lastTest'
-        $fp = Get-PimMailTestFingerprint -Mode 'smtp' -Sender '' -Smtp $c
+        $fp = Get-PimMailTestFingerprint -Mode 'smtp' -Sender $sender -Smtp $c   # ONE-SENDER-1: the From is MailSender
         $ltOk = & $gv $lt 'ok'
         if ($lt -and "$(& $gv $lt 'fingerprint')" -eq $fp -and $ltOk -eq $true) { & $add 'smtp-test' 'Test mail sent through these settings' 'ok' "sent $("$(& $gv $lt 'at')".Trim()) to $("$(& $gv $lt 'to')".Trim())" '' }
         elseif ($lt -and "$(& $gv $lt 'fingerprint')" -eq $fp -and $ltOk -eq $false) { & $add 'smtp-test' 'Test mail sent through these settings' 'failed' "the test mail FAILED: $("$(& $gv $lt 'reason')".Trim())" 'PIM Manager > Get Started > Mail sender: correct the relay settings, then Save and send a test mail' }
@@ -456,7 +518,8 @@ function Get-PimMailCheck {
     # MAIL-TENANTWIDE-UNKNOWN (owner 2026-11-10 "this will also not complete even though mail is working"): the tenant-wide
     # Mail.Send line NOT CHECKED (the permissions could not be read) is information -- it never holds the step open. Only a
     # tenant-wide Mail.Send that IS found ('failed') does.
-    $notOk = @($lines | Where-Object { $_.state -ne 'ok' -and $_.state -ne 'waiting' -and -not ($_.id -eq 'mail-no-tenantwide' -and $_.state -eq 'unknown') })
+    # ONE-SENDER-1 (3.1.69 review): 'info' (the relay's From differs from the mail sender) is information -- mail works
+    $notOk = @($lines | Where-Object { $_.state -ne 'ok' -and $_.state -ne 'waiting' -and $_.state -ne 'info' -and -not ($_.id -eq 'mail-no-tenantwide' -and $_.state -eq 'unknown') })
     $waiting = @($lines | Where-Object { $_.state -eq 'waiting' })
     $summary = if (-not $notOk.Count -and -not $waiting.Count) { 'mail: every prerequisite is in place and proven' }
                elseif (-not $notOk.Count) { "mail: every prerequisite is in place -- waiting for the engine's first send to prove its send right (not a problem)" }

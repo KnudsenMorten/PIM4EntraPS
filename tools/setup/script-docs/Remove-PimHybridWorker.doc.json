@@ -17,7 +17,7 @@
   ],
   "changes": [
     { "target": "Microsoft Graph (the worker identity)", "action": "remove", "object": "the application permission grants Grant-PimHybridWorkerAccess.ps1 gives: Group.Read.All, User.Read.All, PrivilegedAssignmentSchedule.Read.AzureADGroup, Mail.Send (when granted)", "why": "the worker no longer reads the directory", "undo": "Grant-PimHybridWorkerAccess.ps1" },
-    { "target": "the source container", "action": "remove", "object": "Storage Blob Data Reader of the worker identity", "why": "the worker no longer fetches PIM code", "undo": "Grant-PimHybridWorkerAccess.ps1" },
+    { "target": "the source container", "action": "remove", "object": "Storage Blob Data Reader of the worker identity (granted by an earlier version)", "why": "the worker no longer fetches PIM code", "undo": "none needed: the worker installs only the signed Invardia release of its ring" },
     { "target": "the PIM database", "action": "remove", "object": "the contained user -SqlUserName (database user), only when it carries the worker identity's SID", "why": "no database access is left behind", "undo": "Grant-PimHybridWorkerAccess.ps1" },
     { "target": "the PIM SQL server", "action": "remove", "object": "VNet rule 'pimhybridwrk' (only when it names the worker subnet) / firewall rules 'pimhybridwrk-arc-<server>-<n>'", "why": "created for the worker", "undo": "New-PimHybridWorkerInfra.ps1" },
     { "target": "privatelink.database.windows.net (with -PrivateSqlDnsZoneId)", "action": "remove", "object": "the zone's link to the worker VNet; links to other VNets and the zone itself are kept and listed", "why": "created for the worker", "undo": "New-PimHybridWorkerInfra.ps1 -PrivateSqlDnsZoneId" },

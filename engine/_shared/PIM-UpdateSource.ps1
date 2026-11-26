@@ -140,33 +140,38 @@ function Test-PimInvardiaSourceAddress {
     return [bool]($u -match '^(?i)invardia://' -or $u -match '^(?i)https://([a-z0-9-]+\.)*invardia\.com/api/updates/')
 }
 
+function Get-PimUnsignedUpdateSourceRemovedReason {
+    <# PURE. UPDATE-SIGNED-ONLY-1: the ONE sentence every surface says when the removed unsigned source is still configured. #>
+    'the unsigned storage-container update source was removed in this version; set the update source to invardia (Pro) or invardia-community (Community) with tools/setup/Deploy-PimUpdateJob.ps1'
+}
+
 function Resolve-PimUpdateSourceMode {
     <#
       PURE. SEC-95 (SECAUDIT-1, cloud-updater half): WHERE this update run may take its code, from the job's
       PIM_UPDATE_SOURCE and PIM_UPDATE_SOURCE_URL. Returns @{ mode; signed; unsigned; refused; reason; line }:
         mode 'invardia'            the signed Pro manifest (PIM_UPDATE_SOURCE=invardia, or no source + Invardia's address)
              'invardia-community'  the signed Community channel (same rule, the Community address)
-             'pim-src'             a storage container's channel.json + archives -- ONLY when the job names it
-                                   (PIM_UPDATE_SOURCE=pim-src, or its alias 'blob'). Not signed: unsigned = $true, and
-                                   the run + the Manager say so on every run.
              'roll-only'           no source at all: nothing is fetched (the registry's own images are rolled, as before)
-             'refused'             a storage-container address with NO source named, or a source this version does not
-                                   know -- nothing is fetched, nothing moves, and the reason says what to set.
+             'refused'             a storage-container address with NO source named, the REMOVED unsigned storage-container
+                                   source (PIM_UPDATE_SOURCE=pim-src, or its alias 'blob' -- UPDATE-SIGNED-ONLY-1), or a
+                                   source this version does not know -- nothing is fetched, nothing moves, and the reason
+                                   says what to set.
       🔒 There is no fallback between them: a job set to Invardia never reads the container, and a container address is
       never used because Invardia could not be reached. Default = Invardia.
+      🔒 UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): the signed Invardia path is the ONLY update source. 'unsigned' is kept in
+      the answer for callers that read it, and is always $false.
     #>
     param([AllowEmptyString()][AllowNull()][string]$Source, [AllowEmptyString()][AllowNull()][string]$SourceUrlTemplate)
     $s = "$Source".Trim().ToLowerInvariant()
     $t = "$SourceUrlTemplate".Trim()
     $isInv = Test-PimInvardiaSourceAddress -SourceUrl $t
     $mk = { param($mode, $signed, $reason, $line)
-        @{ mode = $mode; signed = [bool]$signed; unsigned = ($mode -eq 'pim-src'); refused = ($mode -eq 'refused'); reason = $reason; line = $line } }
+        @{ mode = $mode; signed = [bool]$signed; unsigned = $false; refused = ($mode -eq 'refused'); reason = $reason; line = $line } }
     switch ($s) {
         'invardia'           { return (& $mk 'invardia' $true 'signed Pro release (Invardia)' 'update source: Invardia -- signed releases') }
         'invardia-community' { return (& $mk 'invardia-community' $true 'signed Community release (Invardia)' 'update source: Invardia Community channel -- signed releases') }
         { $_ -in @('pim-src', 'blob') } {
-            if ($t -and $isInv) { return (& $mk 'refused' $false "PIM_UPDATE_SOURCE=$s names a storage container, but the source address is Invardia's update service -- nothing is fetched (set the source to invardia)" 'update source: REFUSED -- the source setting and the source address disagree') }
-            return (& $mk 'pim-src' $false 'UNSIGNED source: a storage container chosen for this environment (its archives and channel file carry no signature)' 'update source: storage container (UNSIGNED -- chosen for this environment; the archives carry no signature)')
+            return (& $mk 'refused' $false (Get-PimUnsignedUpdateSourceRemovedReason) "update source: REFUSED -- the unsigned storage-container source ('$s') was removed")
         }
         '' {
             if (-not $t) { return (& $mk 'roll-only' $false 'no update source -- only images already in the registry are rolled' 'update source: none (roll only)') }
@@ -727,7 +732,7 @@ function Get-PimUpdateSchemaLoginRefusal {
     $g = if ("$GroupName".Trim()) { "$GroupName".Trim() } else { 'grp-pim-sql-admins' }
     $oid = "$PrincipalObjectId".Trim()
     $who = if ($oid) { "$UpdateJobName's managed identity (object id $oid$(if ("$PrincipalAppId".Trim()) { ", app id $("$PrincipalAppId".Trim())" }))" }
-           else { "$UpdateJobName's managed identity (the identity it signs in as -- id-pim-updater after the identity move; object id not readable here, see the Environment report)" }
+           else { "$UpdateJobName's managed identity (the identity it signs in as -- id-pim-updater after the identity move; object id not readable here, see the System Documentation)" }
     $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } else { 'the SQL server' }
     $msg = "the updater's identity cannot log in to $srv -- schema NOT checked"
     $detail = ("$who was refused by $srv. Add it to the SQL admin group '$g' (tools/setup/Initialize-PimSqlAdminGroup.ps1, " +

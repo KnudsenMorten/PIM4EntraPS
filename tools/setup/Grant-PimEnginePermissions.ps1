@@ -35,6 +35,11 @@
 .PARAMETER AzureRoleAssignments
     Azure roles as '<role name or role definition id>@<scope>',
     e.g. 'User Access Administrator@/providers/Microsoft.Management/managementGroups/<tenant id>'.
+.PARAMETER DirectoryRoles
+    Microsoft Entra directory roles for the engine identity, by name or role template id. Only
+    'Privileged Authentication Administrator' is accepted: PIM needs it to disable and re-enable admin accounts that are
+    members of role-assignable groups (Entra protects those accounts). It is assigned at the whole directory, active and
+    permanent; the role itself is never changed.
 .PARAMETER UseEdge
     $true (default): open Microsoft Edge for the sign-in. $false: the default browser.
 .PARAMETER GraphAccessToken
@@ -59,14 +64,18 @@
     ,'User Access Administrator@/providers/Microsoft.Management/managementGroups/<tenant id>' only when the engine must
     assign the Azure resource roles you delegate (optional).
 .EXAMPLE
+    .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -DirectoryRoles 'Privileged Authentication Administrator'
+    The Entra role the engine needs to disable and re-enable admins that are members of role-assignable groups (sign in as a
+    Global Administrator or Privileged Role Administrator).
+.EXAMPLE
     .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -GraphPermissions 'Group.ReadWrite.All' -WhatIf
     Signs in and reads, then prints what it would grant ("What if: ...") -- nothing is changed.
 
 .NOTES
     Requirements:
       PowerShell: 7.0 or later (pwsh). Windows PowerShell 5.1 is not supported.
-      Role: Privileged Role Administrator (Microsoft Entra) for the application permissions; for an Azure role, User
-            Access Administrator or Owner at that role's scope (only with -AzureRoleAssignments).
+      Role: Privileged Role Administrator (Microsoft Entra) for the application permissions and the directory role; for an
+            Azure role, User Access Administrator or Owner at that role's scope (only with -AzureRoleAssignments).
       Hosts: login.microsoftonline.com, graph.microsoft.com, management.azure.com
 
 .LINK
@@ -79,6 +88,7 @@ param(
     [string[]]$GraphPermissions = @(),
     [string[]]$AppRoles = @(),
     [string[]]$AzureRoleAssignments = @(),
+    [string[]]$DirectoryRoles = @(),
     [bool]$UseEdge = $true,
     [string]$GraphAccessToken,
     [string]$ArmAccessToken,
@@ -108,7 +118,9 @@ foreach ($a in @(ConvertTo-PimEpList $AppRoles)) {
 }
 $azSpecs = New-Object System.Collections.Generic.List[object]
 foreach ($z in @(ConvertTo-PimEpList $AzureRoleAssignments)) { $azSpecs.Add((ConvertTo-PimEpAzureRoleSpec -Spec $z)) }
-if (-not $appSpecs.Count -and -not $azSpecs.Count) { throw 'Nothing to grant: pass -GraphPermissions, -AppRoles and/or -AzureRoleAssignments.' }
+$dirSpecs = New-Object System.Collections.Generic.List[object]
+foreach ($dr in @(ConvertTo-PimEpList $DirectoryRoles)) { $dirSpecs.Add((ConvertTo-PimEpDirectoryRoleSpec -Spec $dr)) }
+if (-not $appSpecs.Count -and -not $azSpecs.Count -and -not $dirSpecs.Count) { throw 'Nothing to grant: pass -GraphPermissions, -AppRoles, -AzureRoleAssignments and/or -DirectoryRoles.' }
 
 $tenant = if ($TenantId) { $TenantId } else { 'organizations' }
 $assertTenant = {
@@ -123,11 +135,12 @@ $assertTenant = {
 # ---- Microsoft Graph sign-in + the engine identity ------------------------------------------------------------------
 $account = $null
 $results = New-Object System.Collections.Generic.List[object]
-if ($appSpecs.Count) {
+if ($appSpecs.Count -or $dirSpecs.Count) {
     if ($GraphAccessToken) { $gTok = $GraphAccessToken }
     else {
-        Write-Host "Signing in to Microsoft Graph (permissions asked: $((Get-PimEpGraphScopes) -join ', '))..." -ForegroundColor Yellow
-        try { $gTok = "$((Get-PimEpInteractiveToken -ClientId (Get-PimEpGraphCliClientId) -Scopes (Get-PimEpGraphScopes) -Tenant $tenant -UseEdge $UseEdge).access_token)" }
+        $gScopes = @(Get-PimEpGraphScopes) + @(if ($dirSpecs.Count) { Get-PimEpGraphDirectoryRoleScopes })
+        Write-Host "Signing in to Microsoft Graph (permissions asked: $($gScopes -join ', '))..." -ForegroundColor Yellow
+        try { $gTok = "$((Get-PimEpInteractiveToken -ClientId (Get-PimEpGraphCliClientId) -Scopes $gScopes -Tenant $tenant -UseEdge $UseEdge).access_token)" }
         catch { throw ("Sign-in failed: $($_.Exception.Message)`n$(Get-PimEpBrokenAuthHelp)") }
     }
     $claims = & $assertTenant $gTok 'Microsoft Graph'
@@ -142,7 +155,9 @@ if ($appSpecs.Count) {
         throw "Could not read the engine identity: $_"
     }
     Write-Host "Engine identity: $($eng.displayName) ($($eng.servicePrincipalType), object id $EngineObjectId)" -ForegroundColor Cyan
-    foreach ($r in @(Invoke-PimEpAppRoleGrant -EngineObjectId $EngineObjectId -Specs $appSpecs.ToArray() -PlanOnly:$previewOnly)) { $results.Add($r) }
+    if ($appSpecs.Count) { foreach ($r in @(Invoke-PimEpAppRoleGrant -EngineObjectId $EngineObjectId -Specs $appSpecs.ToArray() -PlanOnly:$previewOnly)) { $results.Add($r) } }
+    # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra directory role (Privileged Authentication Administrator only)
+    if ($dirSpecs.Count) { foreach ($r in @(Invoke-PimEpDirectoryRoleGrant -EngineObjectId $EngineObjectId -Specs $dirSpecs.ToArray() -PlanOnly:$previewOnly)) { $results.Add($r) } }
 }
 
 # ---- Azure role assignments -------------------------------------------------------------------------------------------
@@ -169,7 +184,7 @@ if ($WhatIfPreference) {
     # PowerShell's own "What if:" line for every grant the run would make (ShouldProcess answers $false under -WhatIf).
     foreach ($w in @($results | Where-Object { $_.status -eq 'would grant' })) {
         $target = if ($w.kind -eq 'Azure role') { "engine identity $EngineObjectId at Azure scope $($w.where)" } else { "engine identity $EngineObjectId on $($w.where)" }
-        $action = if ($w.kind -eq 'Azure role') { "assign Azure role '$($w.what)'" } else { "grant application permission $($w.what)" }
+        $action = if ($w.kind -eq 'Azure role') { "assign Azure role '$($w.what)'" } elseif ($w.kind -eq 'directory role') { "assign Entra directory role '$($w.what)'" } else { "grant application permission $($w.what)" }
         [void]$PSCmdlet.ShouldProcess($target, $action)
     }
     if (-not @($results | Where-Object { $_.status -eq 'would grant' }).Count) { Write-Host 'What if: nothing to grant -- the engine identity already holds everything asked for (or it was refused above).' }

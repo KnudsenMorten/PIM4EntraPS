@@ -56,7 +56,7 @@
     {
       "target": "Microsoft Entra ID",
       "action": "grant",
-      "object": "the directory role assignments of the old identity, given to the new one (for example Fabric Administrator for the engine's Power BI reads)",
+      "object": "the directory role assignments of the old identity, given to the new one (for the engine: Fabric Administrator for its Power BI reads, and Privileged Authentication Administrator to disable and re-enable admins in role-assignable groups)",
       "permission": "the same directory role",
       "scope": "the same directory scope",
       "why": "No regression in the move.",

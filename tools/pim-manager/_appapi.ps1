@@ -286,14 +286,16 @@ function Invoke-PimManagerAppChangeExecute {
 function Get-PimManagerSupportLedgerName { 'SupportChangeLedger' }
 
 function Get-PimManagerSupportFixMode {
-    # owner 2026-11-16 ("On by default" / "maybe 1 will enforce approve"): pim.Settings SupportFixMode = 'auto' (default) | 'approve'.
-    # Person only (tier 3: "who may act without approval"). An unreadable value is 'approve' (fail closed: a person decides).
+    # SUPPORT-FIX-APPROVE-1 (owner 2026-11-24 via Invardia, "Customer approves first"): pim.Settings SupportFixMode =
+    # 'approve' (DEFAULT) | 'auto'. Only a value a SuperAdmin explicitly saved as 'auto' applies fixes directly; a value never
+    # set (every install that never chose) is 'approve'. Person only (tier 3: "who may act without approval"). An unreadable
+    # value is 'approve' (fail closed: a person decides). Was: unset = 'auto' (owner 2026-11-16).
     try {
         $v = Get-PimManagerSetting -Name 'SupportFixMode'
-        if ($null -eq $v) { return 'auto' }
+        if ($null -eq $v) { return 'approve' }
         $s = if ($v -is [string]) { $v } elseif ($v.PSObject.Properties['mode']) { "$($v.mode)" } else { "$v" }
         $s = "$s".Trim().Trim('"').ToLowerInvariant()
-        if ($s -in @('', 'auto')) { return 'auto' }
+        if ($s -eq 'auto') { return 'auto' }
         return 'approve'
     } catch { return 'approve' }
 }

@@ -90,6 +90,60 @@ function Get-PimRequiredGraphCapabilities {
     )
 }
 
+# ---------------------------------------------------------------------------------------------
+# ADMIN-DISABLE-PROTECTED-1 (b) (OWNER DECISION 2026-11-25: "Yes - internal and customers" / "we must ensure the necessary
+# permissions at all env. it is core in the solution"). The ONE Entra directory role the engine identity holds at every install:
+# Privileged Authentication Administrator. Microsoft protects a user that is a member (eligible or active) of a role-assignable
+# group: its accountEnabled is a protected property, and User.ReadWrite.All is not enough -- Graph answers 403
+# Authorization_RequestDenied. Without it PIM cannot disable (offboarding, AccountStatus=Disabled, RFA auto-disable) or re-enable
+# (the RFA portal) such an admin. PIM only ASSIGNS this existing built-in role; it never creates or changes a role definition.
+# The same role id + why text is in engine\_shared\PIM-RightsList.ps1 (the rights list), PIM-EnvironmentReport.expected.json
+# (System Documentation), tools\setup\_PimSetupShared.ps1 (the install grant) and tools\setup\_PimEnginePermissions.ps1 (the
+# published fix script, standalone) -- tests\Test-PimAdminDisableProtected.ps1 holds them together.
+# ---------------------------------------------------------------------------------------------
+$script:PimRolePrivAuthAdmin = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'
+
+function Get-PimRequiredDirectoryRoles {
+    <# PURE. The Entra directory roles the engine identity needs (built-in role template ids), each with what it unlocks. #>
+    @(
+        @{ role = 'Privileged Authentication Administrator'; roleTemplateId = $script:PimRolePrivAuthAdmin; tier = 'mandatory'
+           capability = 'Disable and re-enable admin accounts that are members of role-assignable groups (Entra protects them; needed for RFA and offboarding)' }
+    )
+}
+
+function Get-PimHeldDirectoryRoleIds {
+    <#
+      PURE. The role template ids an identity holds, from its roleManagement/directory/roleAssignments (optionally with
+      $expand=roleDefinition). Only assignments at the whole directory ('/' or none) count -- a role scoped to an
+      administrative unit does not protect-unlock every admin. A built-in role's definition id IS its template id.
+    #>
+    param([object[]]$Assignments = @())
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @($Assignments | Where-Object { $_ })) {
+        $sc = "$($a.directoryScopeId)".Trim()
+        if ($sc -and $sc -ne '/') { continue }
+        $ids = @("$($a.roleDefinitionId)")
+        if ($a.PSObject.Properties['roleDefinition'] -and $a.roleDefinition) { $ids += "$($a.roleDefinition.templateId)"; $ids += "$($a.roleDefinition.id)" }
+        foreach ($i in $ids) { $t = "$i".Trim().ToLowerInvariant(); if ($t -and -not $out.Contains($t)) { $out.Add($t) } }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimEngineDirectoryRoleFixCommand {
+    <#
+      PURE. The grant for missing engine directory roles: the published Grant-PimEnginePermissions script with -DirectoryRoles
+      (download line + run line). Only the roles of Get-PimRequiredDirectoryRoles are accepted. '' when there is nothing to grant.
+    #>
+    param([string]$TenantId, [string]$EngineObjectId, [string[]]$Roles = @())
+    $ok = @(Get-PimRequiredDirectoryRoles | ForEach-Object { $_.role })
+    $rl = @(@($Roles) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    foreach ($r in $rl) { if ($ok -notcontains $r) { throw "Get-PimEngineDirectoryRoleFixCommand: the directory role '$r' is refused -- the engine is given only: $($ok -join ', ')." } }
+    if (-not $rl.Count) { return '' }
+    $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } else { '<tenant id>' }
+    $oid = if ("$EngineObjectId".Trim()) { "$EngineObjectId".Trim() } else { '<engine object id>' }
+    (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid' -DirectoryRoles " + (@($rl | ForEach-Object { "'$_'" }) -join ','))) -join "`n"
+}
+
 function Get-PimWorkloadConnectorRequirements {
     <#
       The workload connectors and how each is AUTHORISED. All optional -- a tenant grants only the
@@ -297,7 +351,11 @@ function Get-PimPermissionHealth {
         [object]$RootReaderHeld      = $null,
         [object]$RootUaaHeld         = $null,
         [string]$TenantId            = '',
-        [string]$EngineObjectId      = ''
+        [string]$EngineObjectId      = '',
+        # ADMIN-DISABLE-PROTECTED-1 (b): the role template ids of the Entra directory roles the engine identity holds
+        # (Get-PimHeldDirectoryRoleIds). $null (the default, and every caller that does not pass it) = NOT CHECKED: never
+        # reported missing, never held. An empty list = checked, none held.
+        [AllowNull()][object]$DirectoryRoleIds = $null
     )
 
     $required = @(Get-PimRequiredGraphCapabilities)
@@ -337,6 +395,12 @@ function Get-PimPermissionHealth {
     $rootReaderMissing = ($RootReaderHeld -is [bool] -and -not $RootReaderHeld)
     $rootUaaMissing    = ($RootUaaHeld -is [bool] -and -not $RootUaaHeld)
     $stateOf = { param($v) if ($v -is [bool]) { if ($v) { 'held' } else { 'missing' } } else { 'unknown' } }
+    # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra directory roles. Only an explicit list is judged ($null = not checked).
+    $dirChecked = ($null -ne $DirectoryRoleIds)
+    $dirHeld = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if ($dirChecked) { foreach ($x in @($DirectoryRoleIds)) { if ("$x".Trim()) { [void]$dirHeld.Add("$x".Trim()) } } }
+    $dirMissing = @(if ($dirChecked) { @(Get-PimRequiredDirectoryRoles | Where-Object { -not $dirHeld.Contains("$($_.roleTemplateId)") }) })
+    $dirFix = Get-PimEngineDirectoryRoleFixCommand -TenantId $TenantId -EngineObjectId $EngineObjectId -Roles @($dirMissing | ForEach-Object { $_.role })
     $azureRoot = [pscustomobject]@{
         scope                 = (Get-PimTenantRootScope -TenantId $TenantId)
         reader                = (& $stateOf $RootReaderHeld)
@@ -360,7 +424,7 @@ function Get-PimPermissionHealth {
     # 🪤 OPTIONAL MUST NOT DRAG THE VERDICT RED. `ok` means "core PIM works" -- a tenant that never
     # bought Intune or Defender is HEALTHY, and saying otherwise trains people to ignore the banner.
     # The optional set is reported separately as "these workloads are off".
-    $ok = ($missingReq.Count -eq 0 -and $azureOk -and $mailOk -and -not $rootReaderMissing)
+    $ok = ($missingReq.Count -eq 0 -and $azureOk -and $mailOk -and -not $rootReaderMissing -and -not $dirMissing.Count)
     # §97: no Reader at the root = Discovery is blind to Azure. AMBER while no Azure delegation is defined (nothing the
     # engine must apply depends on it), RED once one is (or the count is unknown -- a gap is never hidden by a failed read).
     $rootReaderRed = ($rootReaderMissing -and -not $azureNotNeeded)
@@ -377,12 +441,13 @@ function Get-PimPermissionHealth {
         if ($ok -and -not $missingOpt.Count) { 'ok' }
         # MAIL CHECK (owner 2026-10-08: "mail is optional"): mail -- missing, unproven or FAILING -- is AMBER, never red. Only a
         # missing permission, no Azure scope where one is needed, or a red root Reader turn the banner red.
-        elseif ($missingReq.Count -or -not $azureOk -or $rootReaderRed) { 'error' }
+        elseif ($missingReq.Count -or -not $azureOk -or $rootReaderRed -or $dirMissing.Count) { 'error' }
         else { 'warning' }   # core fine; an optional connector is off, or mail is unproven
 
-    $caps = @($missingReq | ForEach-Object { $_.capability } | Sort-Object -Unique)
+    $caps = @(@($missingReq | ForEach-Object { $_.capability }) + @($dirMissing | ForEach-Object { $_.capability }) | Sort-Object -Unique)
     $parts = @()
     if ($missingReq.Count)  { $parts += ("{0} REQUIRED Graph permission(s) missing" -f $missingReq.Count) }
+    if ($dirMissing.Count)  { $parts += ('the Entra role ' + (@($dirMissing | ForEach-Object { $_.role }) -join ', ') + ' is missing') }
     if (-not $azureOk)      { $parts += 'no Azure role-management scope' }
     if ($rootReaderMissing) { $parts += 'Discovery cannot see Azure (no Reader at the tenant root)' }
     if (-not $mailConfigured) { $parts += 'no mail sender configured' }
@@ -393,6 +458,8 @@ function Get-PimPermissionHealth {
         if ($ok -and -not $missingOpt.Count) { 'Permissions OK' }
         elseif ($ok) { ("Core PIM OK -- {0} optional workload(s) unavailable" -f $offConnectors.Count) }
         # §97: the only gap is the root Reader and nothing Azure is delegated -> amber, said as what it is, not BLOCKED.
+        # ADMIN-DISABLE-PROTECTED-1 (b): a missing engine directory role is never "Core PIM OK" -- every branch below asks for none
+        elseif ($dirMissing.Count) { ("Core functionality is BLOCKED -- " + ($parts -join ', ')) }
         elseif (-not $missingReq.Count -and $azureOk -and $rootReaderMissing -and -not $rootReaderRed -and -not $mailBroken -and -not $mailUnknown) { 'Core PIM OK -- Discovery: Azure not visible (grant Reader at the tenant root)' }
         # Operator 2026-10-04 (internal: "critical Core functionality is BLOCKED -- mail not verified" while every permission
         # was held): a sender that is configured but not yet PROVEN is a warning by design (above), so the headline must not
@@ -409,7 +476,7 @@ function Get-PimPermissionHealth {
         $d
     } else {
         # Say "missing permissions" only when a permission IS missing -- a mail-only problem is not a permission gap.
-        $d = if ($missingReq.Count -or -not $azureOk -or $rootReaderRed) { "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled." }
+        $d = if ($missingReq.Count -or -not $azureOk -or $rootReaderRed -or $dirMissing.Count) { "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled." }
              else { "$IdentityName holds every required Graph and Azure permission." }
         if ($caps.Count)   { $d += "  Blocked: " + ($caps -join '; ') + "." }
         if (-not $azureOk) { $d += "  Azure resource roles cannot be assigned at any scope (needs User Access Administrator, typically at the tenant root management group)." }
@@ -420,12 +487,18 @@ function Get-PimPermissionHealth {
         $d
     }
 
+    if ($dirMissing.Count) {
+        # ADMIN-DISABLE-PROTECTED-1 (b): said where it is read, with the exact grant (two lines + the doc line, never a one-liner)
+        $detail += "  $IdentityName does not hold the Entra role " + (@($dirMissing | ForEach-Object { $_.role }) -join ', ') +
+                   ": PIM cannot disable or re-enable an admin that is a member of a role-assignable group (Entra protects those accounts; RFA and offboarding depend on it). A Global Administrator or Privileged Role Administrator grants it with:`n" +
+                   (Add-PimSupportScriptDocLines -Text $dirFix) + "`n"
+    }
     if ($rootReaderMissing) {
         $detail += "  Discovery cannot see Azure: $IdentityName has no Reader at the tenant root management group ($($azureRoot.scope)), so management groups and subscriptions are not listed. Grant Reader at the tenant root (read-only; the install does this by default) -- run:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.readerFix) + "`n"
     }
     # REQUIREMENTS 100.77 + framework 12.10 item 11: the command stays its own two lines (never joined into a ' ; '
     # one-liner) and its doc page is ONE plain line under them -- this detail also leaves the page as plain text (the
-    # environment report, a copied banner).
+    # System Documentation, a copied banner).
     if ($rootUaaMissing -and -not $azureNotNeeded) {
         # UAA-QUIET (owner 2026-11-10): said only when Azure resource delegations are defined and need it.
         $detail += "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with:`n" + (Add-PimSupportScriptDocLines -Text $azureRoot.userAccessAdminFix) + "`n"
@@ -444,6 +517,13 @@ function Get-PimPermissionHealth {
         azureOk = $azureOk
         azureNeeded = (-not $azureNotNeeded)
         azureRoot = $azureRoot
+        # ADMIN-DISABLE-PROTECTED-1 (b): checked = the roles were read; missing = the required roles not held; fix = the grant
+        directoryRoles = [pscustomobject]@{
+            checked  = $dirChecked
+            required = @(Get-PimRequiredDirectoryRoles | ForEach-Object { [pscustomobject]@{ role = $_.role; roleTemplateId = $_.roleTemplateId; capability = $_.capability; state = $(if (-not $dirChecked) { 'unknown' } elseif ($dirHeld.Contains("$($_.roleTemplateId)")) { 'held' } else { 'missing' }) } })
+            missing  = @($dirMissing | ForEach-Object { [pscustomobject]@{ role = $_.role; roleTemplateId = $_.roleTemplateId; capability = $_.capability } })
+            fix      = "$dirFix"
+        }
         mail = [pscustomobject]@{ sender = "$MailSender"; configured = $mailConfigured; ok = $mailOk; verified = (-not $mailUnknown) }
         headline = $headline
         detail = $detail

@@ -65,9 +65,10 @@ param(
     [string]$TargetVersion,                             # the approved version, e.g. 2.4.307 (preferred over -TargetImage)
     # §95.4 -- WHERE a Pro install's updates come from. 'Invardia' = Invardia's update platform (a signed manifest for the
     # ring Invardia has set for this environment; needs the install key -- PIM_UPLINK_KEY or the 'install-key' job -- and an
-    # Invardia-issued Pro licence). 'pim-src' = the source archives + channel.json (the default). Omitted on a redeploy =
-    # the job keeps what it has.
-    [ValidateSet('pim-src', 'Invardia', 'InvardiaCommunity')][string]$UpdateSource,
+    # Invardia-issued Pro licence). 'InvardiaCommunity' = the signed Community channel. Omitted on a redeploy = the job keeps
+    # what it has. UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): the unsigned 'pim-src' choice was removed -- a job that still
+    # carries PIM_UPDATE_SOURCE=pim-src / blob is REFUSED on a redeploy until -UpdateSource names a signed source.
+    [ValidateSet('Invardia', 'InvardiaCommunity')][string]$UpdateSource,
     # 2026-09-13 -- THE UPDATE RING (operator: "nothing releases to ring 2 without my approve").
     # Every updater this installs ends with PIM_UPDATE_RING set. DEFAULT 2 = the safe customer ring;
     # internal and test environments pass 1 explicitly. NOT passing it on a redeploy KEEPS the ring the
@@ -285,15 +286,21 @@ foreach ($k in @($storePlan.writes.Keys)) { $envVars += "$k=$($storePlan.writes[
 
 # SEC-95 (SECAUDIT-1): INVARDIA IS THE DEFAULT SOURCE. A job that carries no PIM_UPDATE_SOURCE of its own, deployed without
 # -UpdateSource, gets Invardia's signed releases (the Community channel when the address given is the Community one). A
-# storage-container address given without -UpdateSource pim-src is NOT used -- the updater would refuse it (no source named),
-# and an updater that silently took unsigned archives is exactly what this closes. A redeploy of a job that already names
-# its source keeps it, unchanged.
+# storage-container address is NOT used -- the updater would refuse it, and an updater that silently took unsigned archives
+# is exactly what this closes. A redeploy of a job that already names a SIGNED source keeps it, unchanged.
+# UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): a job that still names the REMOVED unsigned source (pim-src / blob) is REFUSED here,
+# before anything is created or changed -- keeping it would deploy an updater that refuses every run.
+$exSrc = "$($existingEnv['PIM_UPDATE_SOURCE'])".Trim().ToLowerInvariant()
+if (-not "$UpdateSource".Trim() -and $exSrc -in @('pim-src', 'blob')) {
+    throw ("Deploy-PimUpdateJob: '$JobName' carries PIM_UPDATE_SOURCE=$exSrc -- " + (Get-PimUnsignedUpdateSourceRemovedReason) +
+           ' (-UpdateSource Invardia or -UpdateSource InvardiaCommunity). Nothing was changed.')
+}
 if (-not "$UpdateSource".Trim() -and -not "$($existingEnv['PIM_UPDATE_SOURCE'])".Trim()) {
     $givenSrc = @("$SourceUrlTemplate".Trim(), "$($env:PIM_UPDATE_SOURCE_URL)".Trim(), "$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim()) | Where-Object { $_ } | Select-Object -First 1
     $UpdateSource = $(if ("$givenSrc" -match '^https://([a-z0-9-]+\.)*invardia\.com/api/updates/[^/]+/community/') { 'InvardiaCommunity' } else { 'Invardia' })
     if ($givenSrc -and -not (Test-PimInvardiaUpdateSource -SourceUrl "$givenSrc")) {
         Warn 'update source: the storage-container address given is NOT used -- this updater takes signed releases from Invardia (the default).'
-        Warn '  A storage container is used only when it is chosen as the update source for this environment.'
+        Warn '  The unsigned storage-container update source was removed in this version -- only signed releases are taken.'
         $SourceUrlTemplate = ''
         if ("$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim() -or "$($env:PIM_UPDATE_SOURCE_URL)".Trim()) {
             # the ring plan prefers the explicit template: point it at Invardia's address so the container link is not kept

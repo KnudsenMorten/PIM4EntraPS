@@ -61,6 +61,7 @@ $script:PimTableExportViews = [ordered]@{
     drift = 'Reader'; coverage = 'Reader'; commithistory = 'Reader'; reports = 'Reader'; conformance = 'Reader'
     downlink = 'Reader'; msptenants = 'Reader'; replication = 'Reader'; jobs = 'Reader'; enginelogs = 'Reader'; jobschedule = 'Reader'
     discovery = 'Reader'; save = 'Reader'; queue = 'Reader'; validate = 'Reader'; map = 'Reader'
+    secimagereleases = 'Reader'   # SEC-IMAGE-OVERVIEW-1: Operations > Security image release overview (read-only, every role)
     # the audit trail export is Admin (GET /api/audit/export) and Pro evidence (reports.evidence) -- the route checks both
     audit = 'Admin'
     configbackups = 'Admin'; envreport = 'Admin'

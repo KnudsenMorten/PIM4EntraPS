@@ -163,6 +163,7 @@
   "GET /api/role-permissions/by-action": "The roles that grant one action, narrowest first.",
   "POST /api/scheduler/kick": "Start the engine now to apply the latest commit.",
   "GET /api/search": "Search admins, groups, roles and definitions.",
+  "GET /api/security-image-releases": "PIM's own security image releases of the last 7, 30, 90 or 365 days: detected, work started, the first time on each ring and the hours between recorded steps.",
   "GET /api/settings": "The settings of this environment.",
   "GET /api/settings/ai-chat": "The AI chat settings: on or off, the Azure OpenAI endpoint and the deployment.",
   "PUT /api/settings/ai-chat": "Save the AI chat settings (on or off, endpoint, deployment).",

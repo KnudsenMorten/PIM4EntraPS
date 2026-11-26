@@ -13,8 +13,8 @@
       "text": "Admin accounts now has filter chips for type, privilege, platform, department and status, and each admin shows a High-priv or Day-to-day badge."
     },
     {
-      "title": "Environment report",
-      "text": "Operations > Environment report shows your PIM Manager setup live: identities and their permissions, Azure resources, network exposure and findings with the fix. Export it as PDF."
+      "title": "System Documentation",
+      "text": "Operations > System Documentation shows your PIM Manager setup live: identities and their permissions, Azure resources, network exposure and findings with the fix. Export it as PDF."
     },
     {
       "title": "Clear choices for extras in Drift",

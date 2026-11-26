@@ -19,9 +19,10 @@
       mailsender          a mail sender is set AND every sending identity (engine job + Manager) is InScope
                           (Exchange Test-ServicePrincipalAuthorization; WARNING only when Exchange is not reachable)
       alerting            the alert recipients are not empty                                               REPAIRS (Set-PimAlertRecipients)
-      engine-graph        the engine job holds every required Microsoft Graph app role
+      engine-graph        the engine job holds every required Microsoft Graph app role and the Entra role
+                          Privileged Authentication Administrator (read-only check; the fix names the grant)
       engine-root-reader  the engine job holds Reader at the tenant root management group                    REPAIRS (one grant attempt)
-      manager-rg-reader   the Manager holds Reader on the PIM resource group only (the Environment report)   REPAIRS (one grant attempt; a WARNING, never a stop)
+      manager-rg-reader   the Manager holds Reader on the PIM resource group only (the System Documentation)   REPAIRS (one grant attempt; a WARNING, never a stop)
       engine-size         the engine job is at least the size its tenant count needs (framework 12.15; WARNING with the az
                           command for that tier -- 2.0 CPU / 4Gi / 7200 s from 5,000 objects, 4.0 / 8Gi / 14400 s from 15,000);
                           the same line shows + checks the Manager web app against the product size (4 CPU / 8 GiB) and
@@ -337,7 +338,16 @@ function Get-CvFact([string]$Id) {
                 $map = Get-PimGraphAppRoleMap -RoleSet Engine
                 $have = @(Invoke-CvGraph "servicePrincipals/$oid/appRoleAssignments" -All | ForEach-Object { "$($_.appRoleId)".ToLowerInvariant() })
                 $miss = @($map.Keys | Where-Object { "$($map[$_])".ToLowerInvariant() -notin $have } | Sort-Object)
-                return @{ readable = $true; missing = $miss; required = $map.Count; objectId = $oid }
+                # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra directory role (Privileged Authentication Administrator).
+                # An unreadable read = $null = not checked (never "missing"); the line then reports the app roles only.
+                $dirMiss = $null
+                if (Get-Command Get-PimEngineDirectoryRolePlan -ErrorAction SilentlyContinue) {
+                    try {
+                        $dra = @(Invoke-CvGraph "roleManagement/directory/roleAssignments?`$filter=principalId eq '$oid'" -All)
+                        $dirMiss = @(Get-PimEngineDirectoryRolePlan -Assignments $dra | Where-Object { $_.action -eq 'grant' } | ForEach-Object { "$($_.role)" })
+                    } catch { $dirMiss = $null }
+                }
+                return @{ readable = $true; missing = $miss; required = $map.Count; objectId = $oid; dirRolesReadable = ($null -ne $dirMiss); dirRolesMissing = @($dirMiss | Where-Object { $_ }) }
             }
             'engine-root-reader' {
                 # (Get-PimRootAzureHoldings is loaded at the top: PIM-PermissionHealth.ps1)
@@ -620,6 +630,12 @@ foreach ($id in $lineIds) { $facts[$id] = Get-CvFact $id }
 # The engine identity's object id for the root fix command (the fact carries it when it was read).
 $eoid = "$(Get-PimFactValue $facts['engine-root-reader'] 'objectId')"
 $fix['engine-root-reader'] = (Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $eoid -Roles @('Reader')) + "`n(a Global Administrator, browser sign-in; first turn on Microsoft Entra ID > Properties > Access management for Azure resources)"
+# ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role, when the line found it missing -- its own grant (the same published script)
+$egDirMiss = @(if ($facts['engine-graph'] -and (Get-PimFactValue $facts['engine-graph'] 'dirRolesReadable') -eq $true) { @(Get-PimFactValue $facts['engine-graph'] 'dirRolesMissing' | Where-Object { "$_".Trim() }) })
+if ($egDirMiss.Count) {
+    $fix['engine-graph'] = (@($fix['engine-graph'], 'The Entra role for the engine (a Global Administrator or Privileged Role Administrator, browser sign-in):') +
+        @(Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -DirectoryRoles " + (@($egDirMiss | ForEach-Object { "'$_'" }) -join ',')))) -join "`n"
+}
 if ($eoid) { $fix['engine-graph'] = $fix['engine-graph'].Replace('<engine job object id>', $eoid) }
 $moid = "$(Get-PimFactValue $facts['manager-rg-reader'] 'objectId')"
 if ($moid) { $fix['manager-rg-reader'] = $fix['manager-rg-reader'].Replace('<Manager managed identity object id>', $moid) }

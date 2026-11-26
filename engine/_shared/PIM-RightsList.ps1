@@ -16,7 +16,7 @@
           downlink  the engine set (Deploy-PimDownlinkJob.ps1: Grant-PimMiGraph -RoleSet Engine)
         _PimSetupShared.ps1 is PARSED (its hashtable literals), never dot-sourced: it is a setup helper with load-time side
         effects (the same reason engine\_shared\PIM-WorkloadPrereqSelfCheck.ps1 parses it). PIM-UpdaterGraphRoles.ps1 is pure.
-      * Azure role assignments + the one Entra directory role -- a table below, ONE row per grant the setup / updater code
+      * Azure role assignments + the Entra directory roles -- a table below, ONE row per grant the setup / updater code
         makes, each with its source. tests\Test-PimRightsList.ps1 holds the table against the identity move's code-read
         rights map (engine\_shared\PIM-IdentityMove.ps1 Get-PimIdentityMoveRoleNeeds): every Azure role that map gives a role
         is in the list for that identity, and nothing else.
@@ -193,7 +193,7 @@ function Get-PimRightsAzureTable {
     $acr = '7f951dda-4ed3-4680-a7ca-43fe172d538d'; $stdc = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
     $jobsOp = 'b9a307c4-5aa3-4b52-ba60-2b17c136cd7b'; $kvCseu = 'e147488a-f6f5-4113-8e2d-b22465e65bf6'
     $contrib = 'b24988ac-6180-42a0-ab88-20f7382dd24c'; $sbdc = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'; $kvcu = '12338af0-0e69-4776-bea7-57ae8d297424'
-    $fabric = 'a9ea8996-122f-4c74-9520-8edcd192826c'
+    $fabric = 'a9ea8996-122f-4c74-9520-8edcd192826c'; $paa = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'
     $r = { param($identity, $key, $kind, $role, $roleId, $scope, $scopeNote, $when, $featureKey, $feature, $source)
         [ordered]@{ identity = $identity; key = $key; kind = $kind; role = $role; roleId = $roleId; scope = $scope; scopeNote = $scopeNote
                     when = $when; featureKey = $featureKey; feature = $feature; source = $source } }
@@ -214,8 +214,11 @@ function Get-PimRightsAzureTable {
         (& $r 'engine' 'bundle-store-network-rules@bundle-store' 'azure-rbac' 'PIM Manager bundle store network rules - <account>' '' 'resource' 'the managing tenant''s bundle store (one storage account) only, and only when that store is reached over the internet (access publicSigned); a custom role with Microsoft.Storage/storageAccounts/read + write only -- no data access, no keys. Its id differs per install: matched by the name prefix' 'feature' 'msp.downlink' 'The enrolled-tenants job reads the bundle store and sets its network rules, so each enrolled managed tenant can reach the signed bundle' 'tools\setup\Publish-PimEnrollmentFacts.ps1 (step enrollment, -Access publicSigned: creates the custom role and assigns it to the engine); used by engine\msp\PIM-InvardiaEnrollment.ps1 Invoke-PimEnrolledTenantsJob')
         (& $r 'engine' 'acrpull@registry' 'azure-rbac' 'AcrPull' $acr 'resource' 'the install''s container registry' 'feature' 'own-registry-pull' 'Pulls the engine image' 'tools\setup\Setup-PimContainers.ps1 (AcrPull per workload identity); engine\_shared\PIM-IdentityMove.ps1 Get-PimIdentityMoveRoleNeeds')
         (& $r 'engine' 'fabric-administrator@tenant' 'entra-directory-role' 'Fabric Administrator' $fabric 'tenant' 'directory scope / (active, permanent); older tenants show it as Power BI Administrator' 'feature' 'connectors.powerbi' 'Gives Power BI workspace roles through the Fabric admin API' 'tools\setup\_PimWorkloadPrereqRunner.ps1 (powerbi.fabricAdmin, Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -GrantFabricAdministrator)')
+        # ADMIN-DISABLE-PROTECTED-1 (b) (OWNER DECISION 2026-11-25: every install, "it is core in the solution"): Entra protects an
+        # admin that is a member (eligible or active) of a role-assignable group -- its accountEnabled needs this role
+        (& $r 'engine' 'privileged-authentication-administrator@tenant' 'entra-directory-role' 'Privileged Authentication Administrator' $paa 'tenant' 'directory scope / (active, permanent); the built-in role is only assigned, never changed' 'always' '' 'Disable and re-enable admin accounts that are members of role-assignable groups (Entra protects them; needed for RFA and offboarding)' 'tools\setup\_PimSetupShared.ps1 $script:PimEngineDirectoryRoles / Grant-PimEngineDirectoryRoles (Setup-PimContainers.ps1, Initialize-PimHostingAccess.ps1); the fix: tools\setup\Grant-PimEnginePermissions.ps1 -DirectoryRoles')
         # ---- web (the web app's identity)
-        (& $r 'web' 'reader@install-rg' 'azure-rbac' 'Reader' $reader 'install-rg' 'the PIM resource group only (never the subscription)' 'always' '' 'The Environment report reads the installation''s own architecture' 'tools\setup\_PimSetupShared.ps1 Get-PimManagerRgReaderScope / Grant-PimManagerRgReader (PIM 100.22 b, RIGHTS-1 B)')
+        (& $r 'web' 'reader@install-rg' 'azure-rbac' 'Reader' $reader 'install-rg' 'the PIM resource group only (never the subscription)' 'always' '' 'The System Documentation reads the installation''s own architecture' 'tools\setup\_PimSetupShared.ps1 Get-PimManagerRgReaderScope / Grant-PimManagerRgReader (PIM 100.22 b, RIGHTS-1 B)')
         # SECURE-WEB-1 (framework 12.11f, 2026-11-14): the web identity holds NO job right any more (it was 'Container Apps Jobs
         # Operator' on the engine job: a job start accepts a container override, so the internet-facing app could run a command
         # as the engine). Commit / Run now wait for the next scheduled start of the engine job.

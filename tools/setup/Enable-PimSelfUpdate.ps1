@@ -26,12 +26,13 @@
     The version to become self-updating ON. Defaults to this tree's VERSION.
 
 .PARAMETER SourceUrlTemplate
-    Where this environment fetches source, with {version} in it. From Publish-PimSourceArchive.ps1.
-    Falls back to $env:PIM_UPDATE_SOURCE_URL.
+    The update source address, with {version} in it. Falls back to $env:PIM_UPDATE_SOURCE_URL.
+    UPDATE-SIGNED-ONLY-1 (owner 2026-11-24): the only update source is Invardia's signed release service -- a
+    storage-container address is NOT used (Deploy-PimUpdateJob takes signed releases instead and says so).
 
 .EXAMPLE
     .\Enable-PimSelfUpdate.ps1 -SubscriptionId <sub> -ResourceGroup <rg> -EnvName cae-pim `
-        -AcrName <acr> -SourceUrlTemplate 'https://<store>/pim-src/pim-src-{version}.tar.gz?<sas>'
+        -AcrName <acr> -SourceUrlTemplate 'https://invardia.com/api/updates/pim-manager/code/{version}/archive'
 
 .EXAMPLE
     .\Enable-PimSelfUpdate.ps1 -SubscriptionId <sub> -ResourceGroup <rg> -EnvName cae-pim `

@@ -620,7 +620,7 @@ function Test-PimJobUndersized {
 }
 
 function Get-PimTenantSizingTags {
-    <# PURE. The tags that RECORD a sizing on the job (Azure resource tags: the update, the verify and the environment report read them). #>
+    <# PURE. The tags that RECORD a sizing on the job (Azure resource tags: the update, the verify and the System Documentation read them). #>
     param([AllowNull()]$Counts, [Parameter(Mandatory)][object]$Size, [string]$CountSource = 'graph', [datetime]$NowUtc = [datetime]::UtcNow)
     $g = { param($k) $v = $null; if ($Counts -is [System.Collections.IDictionary]) { if ($Counts.Contains($k)) { $v = $Counts[$k] } } elseif ($Counts -and $Counts.PSObject.Properties[$k]) { $v = $Counts.$k }; if ($null -eq $v) { '' } else { "$v" } }
     $p = $script:PimTenantSizingTagPrefix

@@ -308,7 +308,7 @@ if (Test-Path -LiteralPath $_updPermLib) { . $_updPermLib }
 # checksum list live -- handed to the page at boot (window.PIM_SCRIPT_DOCS) so every command it shows carries the doc link.
 . (Join-Path $solutionRoot 'tools\setup\_PimScriptDoc.ps1')
 # §12.8 ENV-REPORT-1: the architecture & security report of THIS environment (GET /api/environment-report, Operations >
-# Environment report). Pure builder; the Manager binds its live sources in Get-PimManagerEnvironmentReport.
+# System Documentation). Pure builder; the Manager binds its live sources in Get-PimManagerEnvironmentReport.
 $_envReportLib = Join-Path $solutionRoot 'engine\_shared\PIM-EnvironmentReport.ps1'
 if (Test-Path -LiteralPath $_envReportLib) { . $_envReportLib }
 # PIM 100.10 (framework 8.7 UPLINK-SETUP): THE control list -- the uplink setup report and Home's health lines evaluate the
@@ -338,6 +338,10 @@ if (Test-Path -LiteralPath $_invUpdLib) { . $_invUpdLib }
 # 100.91 GET SUPPORT: a support ticket at Invardia, opened by the SERVER with the install key (never handed to the page) --
 # GET /api/support/ticket, POST /api/support/ticket/draft, POST /api/support/ticket, GET /api/support/tickets.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SupportTicket.ps1')
+# SEC-IMAGE-OVERVIEW-1: Operations > Security image release overview -- PIM's own security image releases, read from Invardia
+# by the SERVER with the install key (the Get support mechanism above; never handed to the page) -- GET /api/security-image-releases.
+$_secImgLib = Join-Path $solutionRoot 'engine\_shared\PIM-SecImageReleases.ps1'
+if (Test-Path -LiteralPath $_secImgLib) { . $_secImgLib }
 # 100.68 SHOWCASE: the impact counters (GET /api/impact) and the demo dataset of the flagged demo environment (pimdemo schema;
 # never loaded by the engine or the scheduler -- the engine cannot read demo data, PIM-SqlStore refuses it outside this module).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-ImpactCounters.ps1')
@@ -6795,7 +6799,7 @@ function Request-PimManagerMailEngineTest {
         if ($mode -eq 'sharedMailbox' -and -not "$($st.sender)".Trim()) { $o.detail = 'no sender mailbox is set yet -- save the mail sender first'; $o.note = "Not queued: $($o.detail)"; return $o }
         if ($mode -eq 'smtp' -and -not $st.smtp) { $o.detail = 'the SMTP relay is not saved yet -- save it first'; $o.note = "Not queued: $($o.detail)"; return $o }
         if ($mode -notin @('sharedMailbox', 'smtp')) { $o.detail = 'mail is switched off -- choose a shared mailbox or an SMTP relay first'; $o.note = "Not queued: $($o.detail)"; return $o }
-        $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode $mode -Sender $(if ($mode -eq 'smtp') { "$($st.smtp.from)" } else { "$($st.sender)" })
+        $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode $mode -Sender $(if ($mode -eq 'smtp') { Get-PimSmtpFromAddress -MailSender "$($st.sender)" -Config $st.smtp } else { "$($st.sender)" })   # ONE-SENDER-1: the From is MailSender
         Set-PimManagerSetting -Name 'MailEngineTest' -Value $rec
         $script:PimMailCheckCache = $null
         $o.queued = $true
@@ -7352,6 +7356,12 @@ function Get-PimFeatureGates {
     }
     $effective = [ordered]@{}
     $catByKey = @{}; foreach ($c in $catalog) { $catByKey["$($c.key)"] = $c }
+    # MSP-SINGLE-OFF-1 (owner 2026-11-25: "this should not be enabled on single tenant"): a multi-tenant feature
+    # (scope 'multi', today msp.downlink) does nothing on a single tenant, so there it reads OFF and not applicable,
+    # whatever the stored value. The stored value is left alone: it applies again if the tenant becomes a managing
+    # or managed tenant. Same role source as the header mode badge (Get-PimManagerMspLicenseRole).
+    $mspRole = ''; try { $mspRole = "$(Get-PimManagerMspLicenseRole)" } catch { $mspRole = '' }
+    $notApplicableKeys = @()
     foreach ($k in $res.effective.Keys) {
         $e = $res.effective[$k]
         # autoEnableWhenData (v1 parity): a feature nobody stored a value for is EFFECTIVELY on while its
@@ -7375,16 +7385,25 @@ function Get-PimFeatureGates {
             autoEnableWhenData=@($autoEnts); autoEnabled=[bool]$autoEnabled; autoRows=[int]$autoRows; explicit=[bool]$isExplicit
             effectiveEnabled=[bool]([bool]$e.enabled -or $autoEnabled -or ("$($e.tier)" -eq 'core'))
         }
+        $scope = ''; if ($catByKey.ContainsKey("$k")) { $scope = "$($catByKey["$k"].scope)" }
+        $effective[$k].scope = $scope
+        $effective[$k].notApplicable = $false
+        if ($scope -eq 'multi' -and -not $mspRole -and "$($e.tier)" -ne 'core') {
+            $effective[$k].notApplicable = $true
+            $effective[$k].enabled = $false; $effective[$k].available = $false; $effective[$k].effectiveEnabled = $false
+            $notApplicableKeys += "$k"
+        }
     }
     return [ordered]@{
         gates            = $res.gates
         effective        = $effective
         catalog          = $catalog
         edition          = $edition
+        tenantMode       = $(if ($mspRole -eq 'Master') { 'managing' } elseif ($mspRole -eq 'Slave') { 'managed' } else { 'single' })
         # Surfaced so the GUI can stop inventing a restriction the engine does not apply.
         licenseEnforced  = [bool]$licenseEnforced
         editions         = @($script:PimEditionNames)
-        dependencyIssues = @(Get-PimFeatureDependencyIssues -GateState $res -Edition $edition)
+        dependencyIssues = @(Get-PimFeatureDependencyIssues -GateState $res -Edition $edition | Where-Object { $notApplicableKeys -notcontains "$($_.feature)" })
         warnings         = @($res.warnings)
     }
 }
@@ -9012,9 +9031,17 @@ function Get-PimManagerDepartments {
             }
             # Owners are pipe-joined per the Manager UX; ; and , accepted for safety (Split-PimOwners).
             $owners = @($ownRaw -split '[|;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            # RFA-MODE-GUI-1: the department's RFA mode -- the first row of the department that carries one (the engine's
+            # Get-PimRfaDepartmentIndex rule: one department can have several rows)
+            $__rfa = "$($r.RfaMode)".Trim()
+            $__prev = $byName[$n.ToLowerInvariant()]
+            if (-not $__rfa -and $__prev) { $__rfa = "$($__prev.rfaMode)" }
+            elseif ($__rfa -and $__prev -and "$($__prev.rfaMode)".Trim()) { $__rfa = "$($__prev.rfaMode)" }
+            $__dur = "$($r.RfaDurations)".Trim()
+            if ($__prev -and "$($__prev.rfaDurations)".Trim()) { $__dur = "$($__prev.rfaDurations)" }
             $byName[$n.ToLowerInvariant()] = [ordered]@{
                 name = $n; owners = $owners
-                contact = "$($r.Contact)".Trim(); notes = "$($r.Notes)".Trim(); source = 'entity'
+                contact = "$($r.Contact)".Trim(); notes = "$($r.Notes)".Trim(); rfaMode = $__rfa; rfaDurations = $__dur; source = 'entity'
             }
         }
     } catch {
@@ -9113,6 +9140,7 @@ function Merge-PimManagerDepartmentRows {
         if ($f -and $t -and $f.ToLowerInvariant() -ne $t.ToLowerInvariant()) { $renameFrom[$t.ToLowerInvariant()] = $f.ToLowerInvariant() }
     }
     $used = @{}
+    $rfaByName = @{}   # RFA-MODE-GUI-1: department (lower case) -> the RfaMode sent, applied to its duplicate rows below
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($d in @($Departments)) {
         if ($null -eq $d) { continue }
@@ -9130,6 +9158,18 @@ function Merge-PimManagerDepartmentRows {
             elseif ($d.PSObject.Properties[$f]) { $v = "$($d.PSObject.Properties[$f].Value)" }
             $row[$f] = $v
         }
+        # RFA-MODE-GUI-1: RfaMode only when the caller SENT it (an older page / an import never wipes it). It is set on EVERY row
+        # of this department (a department can have several rows; the engine takes the first one that carries a mode).
+        foreach ($rf in @('RfaMode', 'RfaDurations')) {
+            $rfaSent = $false; $rfaV = ''
+            if ($d -is [System.Collections.IDictionary]) { if ($d.Contains($rf)) { $rfaSent = $true; $rfaV = "$($d[$rf])".Trim() } }
+            elseif ($d.PSObject.Properties[$rf]) { $rfaSent = $true; $rfaV = "$($d.PSObject.Properties[$rf].Value)".Trim() }
+            if ($rfaSent) {
+                $row[$rf] = $rfaV
+                if (-not $rfaByName.ContainsKey($k)) { $rfaByName[$k] = @{} }
+                $rfaByName[$k][$rf] = $rfaV
+            }
+        }
         $out.Add([pscustomobject]$row)
     }
     $renamedAway = @{}
@@ -9140,7 +9180,12 @@ function Merge-PimManagerDepartmentRows {
             $out.Add($byName[$k])
         }
     }
-    foreach ($u in $unnamed) { $out.Add($u) }
+    foreach ($u in $unnamed) {
+        # RFA-MODE-GUI-1: a second row of a department whose RFA mode was just set carries the same mode
+        $un = & $nameOf $u
+        if ($un -and $rfaByName.ContainsKey($un.ToLowerInvariant())) { $uo = & $toOrdered $u; foreach ($rk in @($rfaByName[$un.ToLowerInvariant()].Keys)) { $uo[$rk] = $rfaByName[$un.ToLowerInvariant()][$rk] }; $out.Add([pscustomobject]$uo); continue }
+        $out.Add($u)
+    }
     return ,($out.ToArray())
 }
 
@@ -9168,17 +9213,35 @@ function Save-PimManagerDepartments {
         [AllowNull()][object]$GuardApproval
     )
 
+    # RFA-MODE-GUI-1: an invalid RFA mode / window length refuses the whole save with its plain reason (nothing written)
+    try {
     $rows = @($Departments | ForEach-Object {
         if ($null -eq $_) { return }
         $n = "$($_.name)".Trim(); if (-not $n) { $n = "$($_.Name)".Trim() }
         if (-not $n) { return }
-        [pscustomobject]@{
+        $o = [ordered]@{
             Department = $n
             Owners     = (@($_.owners | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join '|')
             Contact    = "$($_.contact)".Trim()
             Notes      = "$($_.notes)".Trim()
         }
+        # RFA-MODE-GUI-1: only when the page sent it; one spelling (Off / Approval / Auto) or blank = off
+        if ($_.PSObject.Properties['rfaMode']) {
+            $rv = "$($_.rfaMode)".Trim()
+            $canon = @('Off', 'Approval', 'Auto') | Where-Object { $_ -ieq $rv } | Select-Object -First 1
+            if ($rv -and -not $canon) { throw "department '$n': RFA mode must be Off, Approval or Auto, or blank (got '$rv')" }
+            $o['RfaMode'] = $(if ($canon) { $canon } else { '' })
+        }
+        # RFA-MODE-GUI-1: the window lengths a requester may pick, in hours (1-744), pipe-joined; blank = 8|24|72
+        if ($_.PSObject.Properties['rfaDurations']) {
+            $dv = @("$($_.rfaDurations)" -split '[|;, ]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            $bad = @($dv | Where-Object { $_ -notmatch '^\d{1,3}$' -or [int]$_ -lt 1 -or [int]$_ -gt 744 })
+            if ($bad.Count) { throw "department '$n': RFA window lengths must be whole hours from 1 to 744 (got '$($bad -join ', ')')" }
+            $o['RfaDurations'] = (@($dv | ForEach-Object { [int]$_ } | Sort-Object -Unique) -join '|')
+        }
+        [pscustomobject]$o
     } | Where-Object { $_ })
+    } catch { return @{ ok = $false; count = 0; error = "$($_.Exception.Message) -- nothing was saved." } }
 
     if (@($rows).Count -eq 0) {
         return @{ ok = $false; count = 0; error = 'no department with a name was supplied -- refusing to write an empty department set (it carries the approval owner chain).' }
@@ -13180,7 +13243,7 @@ function Get-PimBreakGlassIdentifiers {
     return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
 }
 
-# §12.8 ENV-REPORT-1: the /api/permissions-health body as a function, so the environment report reuses the SAME check (one
+# §12.8 ENV-REPORT-1: the /api/permissions-health body as a function, so the System Documentation reuses the SAME check (one
 # implementation: the identity resolution, the Graph app-role read, the Azure / tenant-root reads and the engine's own refusals).
 # Returns the body (cached 5 minutes unless -Refresh), or $null when engine/_shared/PIM-PermissionHealth.ps1 is not loaded.
 function Get-PimManagerWhoNeedsWhat {
@@ -13352,7 +13415,8 @@ function Get-PimManagerPermissionHealthBody {
     $mailSender = "$($global:PIM_MailSender)".Trim()
     # MAIL-1: an SMTP relay environment sends as the relay's From address -- it has no sender MAILBOX to report.
     if ((Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) -and (Get-PimMailMode) -eq 'smtp') {
-        $rl = Get-PimSmtpRelayConfig; $mailSender = if ($rl.ok) { "$($rl.config.from)" } else { '' }
+        # ONE-SENDER-1 point A: the relay sends as MailSender (its record's 'from' only before the one-time migration)
+        $rl = Get-PimSmtpRelayConfig; $mailSender = if ($rl.ok) { Get-PimSmtpFromAddress -MailSender $mailSender -Config $rl.config } else { '' }
     }
     # Mail: the PROOF is the alert feed -- every alert records how many recipients it was actually sent to. The latest
     # real (not dry-run) attempt decides: delivered -> proven; attempted and failed -> broken; none recorded -> unknown.
@@ -13392,9 +13456,16 @@ function Get-PimManagerPermissionHealthBody {
             $rootReader = $rh.reader; $rootUaa = $rh.userAccessAdmin
         }
     }
+    # ADMIN-DISABLE-PROTECTED-1 (b): the engine identity's Entra directory roles -- the ENGINE's recorded read of its own role
+    # assignments (WEB-GRAPH-MIN-1: the web app reads nothing itself). Not recorded / refused = $null = "not checked", never "missing".
+    $dirRoleIds = $null
+    if ($oid -and $readable -and (Get-Command Get-PimHeldDirectoryRoleIds -ErrorAction SilentlyContinue)) {
+        try { $dirRoleIds = @(Get-PimHeldDirectoryRoleIds -Assignments @(Invoke-PimEngineRecordedGraph -All -Path ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '{0}'&`$expand=roleDefinition" -f $oid))) } catch { $dirRoleIds = $null }
+    }
     $health = Get-PimPermissionHealth -GrantedGraphRoles $granted -AzureRoleScopes $azScopes `
                 -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof `
-                -AzureDelegationCount $azDefs -RootReaderHeld $rootReader -RootUaaHeld $rootUaa -TenantId $permTid -EngineObjectId $oid
+                -AzureDelegationCount $azDefs -RootReaderHeld $rootReader -RootUaaHeld $rootUaa -TenantId $permTid -EngineObjectId $oid `
+                -DirectoryRoleIds $dirRoleIds
     # Say WHY the check failed -- "could not be checked" with no cause left the operator nothing to act on.
     if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
     $identities = @()
@@ -13475,6 +13546,8 @@ function Get-PimManagerPermissionHealthBody {
         azureNeeded = $health.azureNeeded
         # §97: Reader + User Access Administrator at the tenant root, each with its exact fix (Get Started + Home).
         azureRoot  = $health.azureRoot
+        # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra directory role (Privileged Authentication Administrator), with its fix
+        directoryRoles = $health.directoryRoles
         azureNotVisible = [ordered]@{ count = @($azNotVisible).Count; amber = [bool]$azNotVisibleAmber }
         mail       = $health.mail
         # MAIL CHECK: every mail prerequisite as its own line (amber, never red -- mail is optional); Verify permissions re-reads it
@@ -15042,11 +15115,11 @@ function Invoke-PimManagerGetRouteEnvironmentReport {
 
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "The environment report is for an Admin or a SuperAdmin -- it names every identity and permission of this environment. Your role is '$((Get-PimManagerRole).role)'." }
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "The System Documentation is for an Admin or a SuperAdmin -- it names every identity and permission of this environment. Your role is '$((Get-PimManagerRole).role)'." }
                 return 403
             }
             if (-not (Get-Command Get-PimEnvironmentReport -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the environment report builder is not loaded'; hint = 'engine/_shared/PIM-EnvironmentReport.ps1 is missing from this build' }
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the System Documentation builder is not loaded'; hint = 'engine/_shared/PIM-EnvironmentReport.ps1 is missing from this build' }
                 return 501
             }
             $erRefresh = $false; try { $erRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
@@ -15056,9 +15129,44 @@ function Invoke-PimManagerGetRouteEnvironmentReport {
                 Write-JsonResponse -Response $resp -Status 200 -Body $er
                 return 200
             } catch {
-                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the environment report could not be built: $($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the System Documentation could not be built: $($_.Exception.Message)" }
                 return 500
             }
+}
+function Invoke-PimManagerGetRouteSecurityImageReleases {
+    # SEC-IMAGE-OVERVIEW-1 (owner 2026-11-25 / Invardia 2026-11-26): the body of GET /api/security-image-releases?days=7|30|90|365
+    # (default 90; ?refresh=1 reads again, otherwise kept 5 minutes). READ-ONLY, every signed-in role (as Jobs and the update
+    # ring: PIM's own release times, nothing of this tenant). The Manager SERVER asks Invardia with the install key, the same
+    # way Get support does (PIM-SecImageReleases.ps1); the key is in no answer. No key / a 401 / no network = ONE plain
+    # message, never a crash. The route and the MCP read tool security_image_releases run this same code.
+    param($path, $req, $resp, $method = 'GET')
+    $script:lastHeartbeat = Get-Date
+    if (-not (Test-PimManagerRoleAtLeast -Minimum 'Reader')) {
+        Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'Sign in to PIM Manager to read the security image releases.' }
+        return 403
+    }
+    if (-not (Get-Command Get-PimSecImageReleaseOverview -ErrorAction SilentlyContinue)) {
+        Write-JsonResponse -Response $resp -Status 501 -Body @{ ok = $false; error = 'PIM Manager could not read the security image releases from Invardia: this build does not carry the reader (engine/_shared/PIM-SecImageReleases.ps1).' }
+        return 501
+    }
+    $siQ = ''; try { $siQ = "$($req.Url.Query)" } catch { $siQ = '' }
+    $siRaw = $null
+    if ($siQ -match '(?:^|[?&])days=([^&]*)') { $siRaw = [uri]::UnescapeDataString($Matches[1]) }
+    $siDays = ConvertTo-PimSecImageReleaseDays -Value $siRaw
+    if ($null -eq $siDays) {
+        Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'days must be 7, 30, 90 or 365.' }
+        return 400
+    }
+    $siRefresh = ($siQ -match '(?:^|[?&])refresh=1(?:&|$)')
+    try {
+        $si = Get-PimSecImageReleaseOverview -Days $siDays -Refresh:$siRefresh -GetSetting { param($n) Get-PimManagerSetting -Name $n }
+        Write-JsonResponse -Response $resp -Status ([int]$si.status) -Body $si.body
+        return ([int]$si.status)
+    } catch {
+        # a plain message, never the page broken -- and never a detail that could carry a header
+        Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = 'PIM Manager could not read the security image releases from Invardia: the request could not be handled. Try again in a moment.' }
+        return 500
+    }
 }
 function Invoke-PimManagerGetRouteOwnerPeople {
     # 93.4 MCP-GAP-2 (owner 2026-10-31): the body of GET /api/owner/people, MOVED here unchanged -- the route and the MCP read tool
@@ -16489,7 +16597,7 @@ function Handle-Request {
         if ($path -eq '/api/app-proposals' -and $method -eq 'GET') { return (Invoke-PimManagerAppProposalsRoute -Mode 'list' -Request $req -Response $resp) }
         if ($path -eq '/api/app-proposals/decide' -and $method -eq 'POST') { return (Invoke-PimManagerAppProposalsRoute -Mode 'decide' -Request $req -Response $resp) }
         if ($path -eq '/api/app-proposals/execute' -and $method -eq 'POST') { return (Invoke-PimManagerAppProposalsRoute -Mode 'execute' -Request $req -Response $resp) }
-        # owner 2026-11-16 "maybe 1 will enforce approve": SupportFixMode = auto (default) | approve. GET any role; PUT SuperAdmin
+        # SUPPORT-FIX-APPROVE-1 (owner 2026-11-24): SupportFixMode = approve (default) | auto. GET any role; PUT SuperAdmin
         # (person only, tier 3 "who may act without approval"), audited.
         if ($path -eq '/api/settings/support-fix-mode' -and $method -eq 'GET') {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ mode = (Get-PimManagerSupportFixMode); canWrite = [bool](-not $script:CurrentRequestApp -and (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) })
@@ -19538,7 +19646,16 @@ function Handle-Request {
                 foreach ($k in @($relay.errors.Keys)) { $errors["smtp.$k"] = $relay.errors[$k] }
             } elseif ($wantMode -eq 'smtp') {
                 try { $relay = ConvertTo-PimSmtpRelayConfig -Value (Get-PimManagerSetting -Name 'SmtpRelay') } catch { $relay = $null }
-                if (-not $relay -or -not $relay.ok) { $errors['smtp.host'] = 'Fill in the SMTP relay (server, port, From address).' }
+                if (-not $relay -or -not $relay.ok) { $errors['smtp.host'] = 'Fill in the SMTP relay (server, port).' }
+            }
+            # ONE-SENDER-1 (Invardia 2026-11-25; CORRECTED after the 3.1.69 review): the relay keeps its OWN From -- the address
+            # it is proven to accept -- and the save NEVER blanks it. A MailSender that differs is drift (the mail check says so);
+            # it is never switched to unproven. One-time migration: no MailSender yet -> it takes the relay's From (same address).
+            if ($wantMode -eq 'smtp' -and -not $errors.Count) {
+                $curSender = ''; try { $curSender = "$(Get-PimManagerSetting -Name 'MailSender')".Trim().Trim('"') } catch { $curSender = '' }
+                $relayFrom = if ($relay -and $relay.ok) { "$($relay.config.from)".Trim() } else { '' }
+                if (-not $wantSender -and -not $curSender -and $relayFrom) { $wantSender = $relayFrom }
+                if (-not $relayFrom -and -not $wantSender -and -not $curSender) { $errors['smtp.from'] = 'Enter the From address the relay sends as.' }
             }
             if ($pw -and $relay -and $relay.ok -and -not $relay.config.username) { $errors['smtp.username'] = 'A password needs a user name.' }
             if ($pw -and $relay -and $relay.ok -and -not $relay.config.vaultName) { $errors['smtp.vaultName'] = 'Enter the Key Vault the password is kept in.' }
@@ -21006,6 +21123,11 @@ function Handle-Request {
                 targetUsage          = 'TargetUsage'
                 forwardMailsToContact= 'ForwardMailsToContact'
                 mailForwardAddress   = 'MailForwardAddress'
+                # RFA-MODE-GUI-1 (owner 2026-11-25: "fix it in the gui so i can config this"): who may use the RFA portal --
+                # '' = the department decides, Off, Approval (a department owner approves), Auto (the PIN alone re-enables).
+                rfaMode              = 'RfaMode'
+                # RFA-MODE-GUI-1: where the RFA PIN goes (blank = the mail forwarding address, REQUIREMENTS 82.5 #9)
+                contactEmail         = 'ContactEmail'
                 # 68.6 row 35 -- the MSP downlink definition, set where the admin is defined.
                 managementMode       = 'ManagementMode'
                 ring                 = 'Ring'
@@ -21036,6 +21158,15 @@ function Handle-Request {
             if ($changes.Contains('ForwardMailsToContact') -and "$($changes['ForwardMailsToContact'])" -and
                 "$($changes['ForwardMailsToContact'])" -notin @('TRUE','FALSE')) {
                 $badField = "ForwardMailsToContact must be TRUE or FALSE (got '$($changes['ForwardMailsToContact'])')."
+            }
+            # RFA-MODE-GUI-1: one spelling (Off / Approval / Auto), or blank = the department decides
+            if ($changes.Contains('RfaMode') -and "$($changes['RfaMode'])") {
+                $__rm = @('Off', 'Approval', 'Auto') | Where-Object { $_ -ieq "$($changes['RfaMode'])" } | Select-Object -First 1
+                if ($__rm) { $changes['RfaMode'] = $__rm; if ("$($before['RfaMode'])" -ceq $__rm) { $changes.Remove('RfaMode'); $before.Remove('RfaMode') } }
+                else { $badField = "RFA mode must be Off, Approval or Auto -- or blank, so the department decides (got '$($changes['RfaMode'])')." }
+            }
+            if ($changes.Contains('ContactEmail') -and "$($changes['ContactEmail'])" -and "$($changes['ContactEmail'])" -notmatch $mailRx) {
+                $badField = "The RFA contact e-mail must be an e-mail address (got '$($changes['ContactEmail'])'), or blank to use the forwarding address."
             }
             foreach ($mc in @('MailForwardAddress','ManagerEmail')) {
                 if (-not $badField -and $changes.Contains($mc) -and "$($changes[$mc])" -and "$($changes[$mc])" -notmatch $mailRx) {
@@ -21432,6 +21563,9 @@ function Handle-Request {
                     # "nowhere to deliver the TAP" and had no field anywhere to fix it.
                     mailForwardAddress    = "$($r.MailForwardAddress)".Trim()
                     forwardMailsToContact = "$($r.ForwardMailsToContact)".Trim()
+                    rfaMode               = "$($r.RfaMode)".Trim()   # RFA-MODE-GUI-1: '' = the department decides
+                    contactEmail          = "$($r.ContactEmail)".Trim()      # RFA-MODE-GUI-1: where the RFA PIN goes ('' = the forwarding address)
+                    rfaWindowEndUtc       = "$($r.RfaWindowEndUtc)".Trim()   # RFA-MODE-GUI-1: engine-written; shown, never edited
                     managementMode    = "$($r.ManagementMode)".Trim()
                     ring              = "$($r.Ring)".Trim()
                     target            = "$($r.Target)".Trim()
@@ -22995,11 +23129,16 @@ function Handle-Request {
                 $w = Read-PimCommitWatchDoc -ConnectionString $cs -Name 'CommitWatch'
                 $o = Read-PimCommitWatchDoc -ConnectionString $cs -Name 'CommitOutcomes'
                 $recs = @(if ($w.doc -and $w.doc.PSObject.Properties['commits']) { $w.doc.commits })
+                # ADMIN-DISABLE-PROTECTED-1 (d): every record, BEFORE the filters -- a row a later commit changed again shows only
+                # the engine result of its own change (the later change's result is shown on the later change)
+                $allRecs = @($recs)
+                # 3.1.69 review (performance): the later-commit index is built ONCE per request, never per record or key
+                $recIdx = New-PimCommitWatchKeyIndex -Records $allRecs
                 $since = $null; $sq = "$($req.QueryString['since'])".Trim(); if ($sq) { $since = ConvertFrom-PimCommitWatchUtc $sq }
                 $idq = "$($req.QueryString['id'])".Trim()
                 if ($idq) { $recs = @($recs | Where-Object { "$($_.id)" -eq $idq }) }
                 if ($since) { $recs = @($recs | Where-Object { (ConvertFrom-PimCommitWatchUtc $_.committedUtc) -ge $since }) }
-                $out = @($recs | Select-Object -First 30 | ForEach-Object { Get-PimCommitWatchStatus -Record $_ -Outcomes $o.doc })
+                $out = @($recs | Select-Object -First 30 | ForEach-Object { Get-PimCommitWatchStatus -Record $_ -Outcomes $o.doc -KeyIndex $recIdx })
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ commits = $out; readable = $true; nowUtc = [datetime]::UtcNow.ToString('o') }
                 return 200
             } catch {
@@ -24053,6 +24192,15 @@ function Handle-Request {
         # -------------------------------------------------------------------
         if ($path -eq '/api/environment-report' -and $method -eq 'GET') {
             $__getSt = Invoke-PimManagerGetRouteEnvironmentReport -path $path -req $req -resp $resp -method $method
+            if ($null -ne $__getSt) { return $__getSt }
+        }
+
+        # -------------------------------------------------------------------
+        # SEC-IMAGE-OVERVIEW-1: GET /api/security-image-releases?days=7|30|90|365 -- Operations > Security image release
+        # overview. Read-only, every signed-in role. The server asks Invardia with the install key (never in an answer).
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/security-image-releases' -and $method -eq 'GET') {
+            $__getSt = Invoke-PimManagerGetRouteSecurityImageReleases -path $path -req $req -resp $resp -method $method
             if ($null -ne $__getSt) { return $__getSt }
         }
 

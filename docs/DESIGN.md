@@ -1020,7 +1020,7 @@ objects** (users + groups + service principals, counted with Microsoft Graph `$c
 The installer applies these; every update converges an existing install **raise-only** (`Get-PimContainerJobResources`,
 `Get-PimManagerAppResources`) — a bigger size is never lowered, and a size the customer set
 (`PIM_Bootstrap_Cpu_<Job>` / `PIM_Bootstrap_Memory_<Job>`, recorded on the job / app so a later update keeps it) always
-wins and is never called undersized by the end-of-install check or the environment report.
+wins and is never called undersized by the end-of-install check or the System Documentation.
 
 **Persistent SQL compute + resilient `/health`.** The hosted SQL compute MUST run persistent
 (serverless **auto-pause disabled** / provisioned) so neither the health probe nor the first
@@ -2276,12 +2276,12 @@ server is reached differ:
   never to Administrators.
 - **The same rights.** `Grant-PimHybridWorkerAccess.ps1 -ArcMachineResourceId` reads the machine's identity from ARM and
   grants exactly what the VM worker's identity gets: a contained SQL user created from its application id
-  (db_datareader + db_datawriter), the Graph read roles, Storage Blob Data Reader on the source container.
+  (db_datareader + db_datawriter), the Graph read roles. (No storage role: the worker installs only the signed Invardia release of its ring.)
 - **Delivery.** Run-command on the Arc machine (`Microsoft.HybridCompute/machines/<server>/runCommands`), the same
   helper as for the VM; fallback: a self-contained script the server's administrator runs locally, elevated.
 - **Network: outbound HTTPS only, nothing inbound.** The Arc agent's endpoints, Entra sign-in and Graph, the PIM store
   (a private endpoint over VPN / ExpressRoute, or the public endpoint with a firewall rule for the site's egress address
-  — `-SqlAllowedPublicIp`), the source store, github.com for PowerShell 7 during Configure, and the domain controllers on
+  — `-SqlAllowedPublicIp`), the Invardia update service (the signed release), github.com for PowerShell 7 during Configure, and the domain controllers on
   the customer's own network.
 - **Tier 0.** The server can write Tier-0 groups, so it is a Tier-0 machine: no inbound management beyond what the
   customer's Tier-0 model allows, administrators only, kept out of the servers OU whose GPO makes the Tier-1 server
@@ -5014,6 +5014,7 @@ is decided by its **release ring**, never by "newest available":
 > table and the rules. The mechanics described in the rest of this section — the environment asks, forward only, no
 > approved version means no move, build in the environment's own registry, verify, roll back — are the same for both.
 
+- **The in-cloud updater and the hybrid worker no longer read `channel.json`;** a ring's version comes from the signed Invardia manifest for that ring (UPDATE-SIGNED-ONLY-1). The bullets below describe the earlier feed.
 - **One channel document per feed.** `channel.json` sits beside the published source archives and names the
   approved version per ring (`ring1`, `ring2`, …). Releasing to a ring is editing that one entry; nothing is
   pushed to environments.
@@ -5095,7 +5096,7 @@ is decided by its **release ring**, never by "newest available":
   The first update run replaces the record with an ordinary run record (which now also carries `kind` and
   `source`). The Manager still makes no ARM call: its identity holds rights on the tick job only, not on the
   update job, and none were added.
-- **Where a feed is needed.** The in-cloud updater requires a published source feed (archives + `channel.json`).
+- **Where a feed is needed.** The in-cloud updater takes only signed releases from Invardia's update service (Pro: the licensed manifest for its ring; Community: the Community channel). Storage-container sources are no longer supported.
   A community installation from the public repository has none and updates by `git pull` plus re-running the
   one-shot deploy (§11.7).
 - **Which environments the ring gate exempts.** Only the **free community edition** with no ring of its own: no
@@ -5480,6 +5481,22 @@ stored images are removed outright). Rolling back one version uses the previous 
   once. The result is stored in the installation's settings (`RegistryPrune`). `PIM_UPDATE_PRUNE_PLAN=1` on the update
   job reports what would be deleted without deleting; `PIM_UPDATE_NO_PRUNE=1` switches the step off. The step never
   changes the outcome of the update.
+
+#### 11.6x Security image updates — the agreed design and what is built (2026-11-26)
+
+A security image update changes only the base images (a newer Microsoft image for the same .NET version, operating-system
+package updates); the product code stays the same. The agreed design (2026-11-14, build route 2026-11-24, Azure only
+2026-11-26) has four parts:
+
+| Part | Agreed design | Built today |
+|---|---|---|
+| 1. Where the image is built | Each installation pulls the signed release and builds its own patched image in its own container registry (base images and versions as the release names them, Microsoft's current digest, operating-system updates), swaps it in and reports which images it runs. No central registry, no access into a customer's environment. | Only the report of the running images. Installations still pull the published image. |
+| 2. Image-only path | A short path separate from the normal update: images only, no wait for running jobs and no schema pause; a run that is already going keeps its image and is never stopped. | An image-only path exists, but inside the normal update job, and it still waits for running jobs. |
+| 3. How fast | Every 15 minutes each installation checks its ring for a security release and applies it at once. | The 15-minute check runs inside the normal update job; not yet a separate job. |
+| 4. Who makes the release | An Azure job with its own managed identity (no stored secret, no certificate, no person, no virtual machine) takes the security agent's detection, cuts the image-only release from the build each ring runs, and releases it ring 0 → 1 → 2/3 on the owner's standing yes for security updates. | The release is made from the build each ring runs, on the standing yes — but started by an operator session, not yet by the Azure job. |
+
+The open parts are planned for the release after 3.1.69. The base images PIM pins were checked against Microsoft's
+current digests on 2026-11-26 and were current (.NET 10.0.15).
 
 ### 11.7 One-shot "deploy everything" + validation
 
@@ -10651,7 +10668,7 @@ arrays it renders, after its filters, sort and search), never read back from the
 shared export bar (`wireExportBar`) registers its rows automatically. A page with no table leaves the menu disabled.
 The page POSTs `{ view, title, format, sections: [{ heading, columns, rows }] }` to `/api/export`. The server re-checks
 the caller's role against the VIEW (a fixed list: most pages Reader; the audit trail Admin plus the Pro evidence licence,
-like the audit CSV export; backups and the environment report Admin; the role mapping SuperAdmin; an unknown view is
+like the audit CSV export; backups and the System Documentation Admin; the role mapping SuperAdmin; an unknown view is
 refused), caps the export at 50,000 rows (the file says when it was cut), names the environment (see
 below), records `export.<format>` in the audit trail (view, format, row count, whether it was cut -- never the
 content) and returns the file. Excel is written with .NET packaging only: a zip with the content types, the workbook,
@@ -12206,7 +12223,7 @@ sends the cleared records but not the list, and says so once in its log. None of
 a hold is recorded or cleared.
 
 ### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
-A Pro installation can take its updates from Invardia's update platform instead of the source archives. PIM owns the
+A Pro installation takes its updates from Invardia's update platform; it is the only supported update source. PIM owns the
 release: PIM decides which version goes to which ring, and Invardia signs and serves what PIM published (one signed
 manifest per product, kind and ring). The ring is the environment's own (`PIM_UPDATE_RING` on its update job), sent
 with the pull. PIM also keeps HOW: build in its own registry, schema, roll, health gate, rollback.
@@ -12675,7 +12692,7 @@ Not attached:
 | What | Why |
 |---|---|
 | Settings | its tables are forms that edit settings, not lists to browse |
-| Create, Get Started, Client onboarding, Onboarding, Free vs Pro, Home, Counters overview, Delegation Map, Environment report | wizards, tiles, a graph and a document -- no list view |
+| Create, Get Started, Client onboarding, Onboarding, Free vs Pro, Home, Counters overview, Delegation Map, System Documentation | wizards, tiles, a graph and a document -- no list view |
 | The boxes of the Delegation overview graph | a graph with its own column filters, not a list |
 | Tables in a dialog, in an exported or printed document, key / value tables | not a list view of a page |
 | A table whose heading cells are merged | the columns cannot be told apart |
@@ -12938,7 +12955,7 @@ the identity's own claims (`Get-PimRestToken -Resource graph` in `Get-PimManager
 a token is minted and its claims read, no Graph call; it works with zero app roles).
 
 **SQL replay, not Graph:** `Invoke-PimEngineRecordedGraph` / `-Arm` (15 + 8 sites: mail checks, permission health,
-environment report, own-principals review, queue names) read the engine's recorded answers (WEB-GRAPH-MIN-1).
+System Documentation, own-principals review, queue names) read the engine's recorded answers (WEB-GRAPH-MIN-1).
 
 **Azure Resource Manager (separate, unchanged):** `Invoke-PimArm` at 4897 (`Start-PimManagerTickNow`: start the engine job),
 6456 / 13011 (read the engine job), 13264 (`Get-PimManagerEnvironmentReport`, only inside its own resource group --

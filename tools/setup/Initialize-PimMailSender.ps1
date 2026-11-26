@@ -192,6 +192,27 @@ param(
     # Accepted for older printed commands only. The web app sends NO mail (SECURE-WEB-1 / MAIL-WEB-RIGHTS-1): its identity
     # is never added as a sender; with -SubscriptionId/-ResourceGroup it is read only to REFUSE it if it was passed above.
     [string]$ManagerAppName,
+    # ONE-SENDER-1 point B (Invardia 2026-11-25): with -SubscriptionId/-ResourceGroup the run ALSO reads the RFA broker
+    # (container app, default 'ca-pim-rfa') and, when it is deployed, gives ITS sending identity (id-pim-requests or its
+    # system identity) the same scoped send right -- ONE run covers every sending identity. No broker = nothing to add.
+    [string]$RfaAppName = 'ca-pim-rfa',
+    # ONE-SENDER-1 point C (tightened 2026-11-26): a sender change KEEPS the old sender's right; it is retired only by a LATER
+    # run when every sending identity's own Graph probe passes for the new sender. -Cleanup = that later run, said explicitly:
+    # it ends FAILED (exit 1) instead of PENDING when the probe does not allow it yet.
+    [switch]$Cleanup,
+    # the probe records (pim.Settings MailSenderProbe + MailSenderProbeRfa) for a run without -SqlServerFqdn: a JSON file
+    # { "MailSenderProbe": {...}, "MailSenderProbeRfa": {...} } (or a bare MailSenderProbe record). With -SqlServerFqdn they
+    # are read through the store connection step [4] uses.
+    [string]$ProbeRecordFile,
+    # 3.1.69 review: the mailbox the daily sender check must be REFUSED for (pim.Settings 'MailSenderProbeMailbox'; a member's
+    # real mailbox, never the sender or an old sender). With -SqlServerFqdn it is stored; without it the check picks one.
+    [string]$ProbeMailbox,
+    # ONE-SENDER-1 point C: the old right is never removed before the probe passes, so this only COMPLETES it from the recorded
+    # state if a part of it is gone (normally: nothing to do) -- also done by a re-run when the new scope is not in scope 2 h on.
+    [switch]$Restore,
+    # where the previous state is read from (default: <temp>\pim-manager-logs\Initialize-PimMailSender-previous-<tenant>.json,
+    # written by the run that removed the old assignment; its -OutFile result carries it too, as 'previousState')
+    [string]$PreviousStateFile,
     # EXPLICIT, off by default: also remove the older scoped assignment that names the engine SPN.
     # Left in place by default -- it is scoped to the same single mailbox, so it widens nothing,
     # and removing a working send right is the operator's call, not a side effect.
@@ -603,6 +624,35 @@ if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Tr
     $tickOid = "$($pick.principalId)"
     Note "tick job '$TickJobName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
 }
+# ONE-SENDER-1 point B (Invardia 2026-11-25; found on internal 2026-11-25: the RFA broker signed in as id-pim-requests, which
+# held NO Exchange Application Mail.Send, so every PIN mail failed): ONE run covers EVERY sending identity. Where the RFA
+# broker (container app -RfaAppName, default ca-pim-rfa) is deployed in the resource group, its sending identity is found
+# the same way as the tick job's and gets the same scoped send right. No broker = nothing added; an unreadable one is SAID.
+$miRoles = @{}
+if ($tickOid) { $miRoles[$tickOid] = @('engine') }   # 3.1.69 review: a LIST per object id (one identity may send for both)
+$result.rfaBroker = [ordered]@{ app = "$RfaAppName"; deployed = $null; objectId = ''; detail = 'not looked up (no -SubscriptionId / -ResourceGroup)' }
+if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$RfaAppName".Trim()) {
+    $rfaApp = $null; $rfaErr = ''
+    try {
+        $armTok = Get-PimMailAdminToken -Resource 'arm'
+        $rfaApp = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
+            -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$RfaAppName`?api-version=2024-03-01"
+    } catch { $rfaApp = $null; $rfaErr = "$($_.Exception.Message) $($_.ErrorDetails.Message)" }
+    $rfaPick = Resolve-PimRfaBrokerSendIdentity -App $rfaApp -ErrorText $rfaErr -AppName $RfaAppName
+    $result.rfaBroker = [ordered]@{ app = "$RfaAppName"; deployed = $rfaPick.deployed; objectId = "$($rfaPick.principalId)"; detail = "$($rfaPick.reason)" }
+    if ($rfaPick.deployed -eq $true -and $rfaPick.principalId) {
+        if ($miOids -notcontains "$($rfaPick.principalId)") { $miOids += "$($rfaPick.principalId)" }
+        $__ro = "$($rfaPick.principalId)"; $miRoles[$__ro] = @(@($miRoles[$__ro]) + @('rfa') | Where-Object { $_ } | Select-Object -Unique)   # keeps 'engine' when the tick job shares it
+        Note "RFA broker '$RfaAppName' sends as its $($rfaPick.kind)-assigned managed identity $($rfaPick.principalId) -- it gets the same scoped send right" 'DarkGray'
+        Add-Result 'rfa-identity' 'ok' "$RfaAppName -> $($rfaPick.principalId)"
+    } elseif ($rfaPick.deployed -eq $false) {
+        Note "no RFA broker ($RfaAppName) in $ResourceGroup -- only the engine job sends" 'DarkGray'
+    } else {
+        # deployed but no usable identity, or the broker could not be read: SAID, never guessed (the engine's grant goes on)
+        Note "RFA broker: $($rfaPick.reason) -- its send right is NOT set by this run; fix it and re-run" 'Yellow'
+        Add-Result 'rfa-identity' 'FAILED' "$($rfaPick.reason)"
+    }
+}
 # 🔒 SECURE-WEB-1 (PIM 3.1.26) / MAIL-WEB-RIGHTS-1: PIM Manager's web app sends NO mail -- its identity is never a sender
 # and is never given the scoped send right. -ManagerAppName is still accepted (older printed commands carry it) but it
 # never ADDS that identity; when the app can be read it is used only to REFUSE the web app's identity if it was passed in
@@ -652,11 +702,11 @@ if ($EngineAppId) {
     if (-not $engineSp -and -not $miSps.Count) { Fail "engine service principal not found for appId $EngineAppId" }
     if ($engineSp) { Note "engine SPN: $EngineAppId (objectId $($engineSp.id))" 'DarkGray' }
 }
-$sendPlan = Resolve-PimMailSendPrincipals -ManagedIdentitySps $miSps -EngineSp $engineSp -AssignmentNamePrefix $AssignmentNamePrefix
+$sendPlan = Resolve-PimMailSendPrincipals -ManagedIdentitySps $miSps -EngineSp $engineSp -AssignmentNamePrefix $AssignmentNamePrefix -Roles $miRoles
 if ($sendPlan.reason) { Fail $sendPlan.reason }
 $sendPrincipals = @($sendPlan.principals)
-$result.sendIdentities = @($sendPrincipals | ForEach-Object { [ordered]@{ kind = $_.kind; appId = $_.appId; objectId = $_.objectId } })
-foreach ($p in $sendPrincipals) { Note "sends as: $($p.kind) appId $($p.appId) (objectId $($p.objectId))" 'Green' }
+$result.sendIdentities = @($sendPrincipals | ForEach-Object { [ordered]@{ kind = $_.kind; role = $_.role; appId = $_.appId; objectId = $_.objectId } })
+foreach ($p in $sendPrincipals) { Note "sends as: $($p.kind) appId $($p.appId) (objectId $($p.objectId)) -- for the $(if ($p.role -eq 'rfa') { 'RFA broker' } else { 'engine' })" 'Green' }
 
 # Resolve the Graph Mail.Send role now, but DO NOT GRANT IT YET -- see the ordering note at the
 # grant step near the end of this script. Resolving early keeps the failure "this tenant has no
@@ -1122,6 +1172,35 @@ if (-not $exoPlan.Count) {
     $scopedObjectsPresent = $true   # the objects exist -- NOT yet a proof that the scope covers the mailbox (see the in-scope read-back)
 }
 $exoDone = 0; $exoChanged = 0   # $exoChanged: Exchange objects this run really created / changed (not "already present")
+# ONE-SENDER-1 point C, TIGHTENED (owner via Invardia 2026-11-26): the OLD sender's rights (each sending identity's send right
+# on another of our sender scopes) are KEPT in this run -- the plan removes nothing of them (Get-PimMailSenderRetireList only
+# LISTS them). They are recorded with the time of the change so a LATER run retires them once every identity's own probe
+# passes for the new sender (step [5]). An earlier run's record (this computer's state file, -PreviousStateFile, or the test
+# seam) is read too; a re-run that changes nothing keeps the recorded time of the change.
+$retire = @(Get-PimMailSenderRetireList -ExoServicePrincipals $exoSpList -Scopes @($repair.scopes) -Assignments @($repair.assignments) -Principals $sendPrincipals -Sender $scopeSmtp -ScopeName $scopeName)
+$priorPrev = $script:PimMailPriorPrevious
+$prevPath = ''
+if (-not $priorPrev) {
+    $prevPath = if ("$PreviousStateFile".Trim()) { "$PreviousStateFile".Trim() } elseif ("$TenantId".Trim()) { Get-PimMailSenderPreviousStatePath -TenantId $TenantId } else { '' }
+    if ($prevPath -and (Test-Path -LiteralPath $prevPath)) {
+        try { $pj = Get-Content -LiteralPath $prevPath -Raw | ConvertFrom-Json; $priorPrev = if ($pj.PSObject.Properties['previousState']) { $pj.previousState } else { $pj } }
+        catch { Note "the recorded previous state ($prevPath) could not be read: $(($_.Exception.Message -split "`n")[0])" 'Yellow' }
+    }
+} elseif ("$TenantId".Trim()) { $prevPath = Get-PimMailSenderPreviousStatePath -TenantId $TenantId }
+if ($priorPrev -and "$($priorPrev.sender)".Trim() -and "$($priorPrev.sender)".Trim() -ine "$scopeSmtp".Trim()) {
+    Note "the recorded previous state is for another sender ($($priorPrev.sender)) -- not used for $scopeSmtp" 'DarkGray'; $priorPrev = $null
+}
+$prevState = New-PimMailSenderPreviousState -Plan $exoPlan -Retire $retire -Scopes $scopes -Sender $scopeSmtp -NewScope $scopeName -ChangedAtUtc $(if ($priorPrev) { $priorPrev.at } else { $null })
+$savePrev = {
+    if (-not $prevState) { return }
+    $result.previousState = $prevState
+    if ($whatIfRun -or -not $prevPath) { return }
+    try { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $prevPath) | Out-Null; ($prevState | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $prevPath -Encoding utf8
+          Note "recorded the OLD send right (kept; retired by a later run once every identity's probe passes for $scopeSmtp): $prevPath" 'DarkGray' }
+    catch { Note "the previous state could not be written to $prevPath ($(($_.Exception.Message -split "`n")[0])) -- it is in this run's result (previousState)" 'Yellow' }
+}
+& $savePrev
+foreach ($r in $retire) { Note "the OLD sender's send right $($r.name) ($($r.principalRole) $($r.app) on scope $($r.scope)) is KEPT -- it is retired only after every identity's probe passes for $scopeSmtp" 'Yellow' }
 foreach ($item in $exoPlan) {
     if (-not $PSCmdlet.ShouldProcess("Exchange Online ($sender)", "$($item.cmdlet): $($item.what)")) {
         if (-not $whatIfRun) { Fail "Exchange change declined ($($item.cmdlet): $($item.what)) -- the scoped send right is incomplete; re-run to finish" }
@@ -1155,6 +1234,8 @@ foreach ($item in $exoPlan) {
     else { Note "$($item.cmdlet): $($item.what)" 'Green'; $exoChanged++ }
     $exoDone++
 }
+# ONE-SENDER-1 point C: this run really granted / changed something -> THIS is the time of the change (a later probe must be newer)
+if ($exoChanged -gt 0 -and $prevState) { $prevState['at'] = [datetime]::UtcNow.ToString('o'); & $savePrev }
 if ($exoDone) {
     # Read back -- the whole reason RBAC was chosen over an Application Access Policy. EVERY sending
     # identity must hold its own assignment, not merely "some" assignment in the scope.
@@ -1181,8 +1262,42 @@ if ($scopedObjectsPresent -and -not $whatIfRun) {
         param($appId, $res) @((Invoke-Exo -Cmdlet 'Test-ServicePrincipalAuthorization' -Parameters @{ Identity = $appId; Resource = $res }).value)
     }
     $result.inScope = @($auth.identities | ForEach-Object { [ordered]@{ appId = $_.appId; inScope = [bool]$_.inScope; detail = $_.detail } })
-    $inScopeOutcome = Resolve-PimMailInScopeOutcome -InScope ([bool]$auth.ok) -ChangedThisRun (($exoChanged -gt 0) -or [bool]$result.mailboxCreated)
+    # ONE-SENDER-1 point C (tightened 2026-11-26): what the recorded previous state means today (ok | wait | restore | none).
+    # The OLD right was never removed, so 'restore' = keep it, make sure it is complete, and tell Invardia.
+    $effPrev = if ($prevState) { $prevState } else { $priorPrev }
+    $prevDecision = Resolve-PimMailSenderRestoreDecision -Previous $effPrev -InScope ([bool]$auth.ok) -Restore:([bool]$Restore) -PendingHours (Get-PimMailSenderPendingHours)
+    $result.previousStateDecision = [ordered]@{ action = $prevDecision.action; reason = $prevDecision.reason; pendingSince = $prevDecision.pendingSince }
+    if ($prevDecision.action -eq 'restore') {
+        $rsOk = $false; $rsWhy = ''; $rsN = 0
+        try {
+            $nowScopes = @((Invoke-Exo -Cmdlet 'Get-ManagementScope').value); $nowAsg = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment').value)
+            $rp = New-PimMailSenderRestorePlan -Previous $effPrev -Scopes $nowScopes -Assignments $nowAsg
+            if ($rp.reason) { $rsWhy = $rp.reason }
+            else {
+                foreach ($ra in @($rp.actions)) {
+                    if (-not $PSCmdlet.ShouldProcess("Exchange Online ($sender)", "$($ra.cmdlet): $($ra.what)")) { continue }
+                    $rr = Invoke-ExoWhenHydrated -Cmdlet $ra.cmdlet -What $ra.what -Parameters $ra.parameters
+                    if (-not $rr.ok) { throw "could not $($ra.what): $($rr.error)" }
+                    Note "$($ra.cmdlet): $($ra.what)" 'Yellow'; $rsN++
+                }
+                $rsOk = $true
+            }
+        } catch { $rsWhy = (("$($_.Exception.Message)" -split "`n")[0]).Trim() }
+        $result.restored = $rsOk
+        if ($rsOk) {
+            Add-Result 'exo-restore' 'ok' "$($prevDecision.reason)"
+            $what = if ($rsN) { "the OLD send right was incomplete -- $rsN part(s) PUT BACK" } else { 'the OLD send right is still fully in place (nothing was removed, nothing to put back)' }
+            Fail "$($prevDecision.reason). KEPT: $what (recorded $($prevDecision.pendingSince)). Tell Invardia: the new scope '$scopeName' on $scopeSmtp did not read back InScope ($($auth.reason))."
+        }
+        Add-Result 'exo-restore' 'FAILED' $rsWhy
+        Fail "$($prevDecision.reason), and the old send right could not be checked / completed: $rsWhy. Tell Invardia now; the recorded state is in this run's result (previousState / the state file)."
+    }
+    $prevPending = ($prevDecision.action -eq 'wait')   # an earlier run's change is still inside the 2 h window
+    $inScopeOutcome = Resolve-PimMailInScopeOutcome -InScope ([bool]$auth.ok) -ChangedThisRun (($exoChanged -gt 0) -or [bool]$result.mailboxCreated -or $prevPending)
     $result.inScopeOutcome = $inScopeOutcome
+    # ONE-SENDER-1 point C: InScope is NOT enough to retire the old right (EPS: Exchange said in-scope before sending really
+    # worked) -- the OLD right stays; step [5] retires it on a LATER run when every identity's own probe passes.
+    if (@($retire).Count) { $script:PimRetirePending = $true }
     if ($inScopeOutcome -eq 'failed') {
         # nothing was changed in this run and Exchange still says the right does not cover the mailbox: waiting will not fix it
         Add-Result 'exo-in-scope' 'FAILED' $auth.reason
@@ -1331,9 +1446,42 @@ if (-not "$SqlServerFqdn".Trim()) {
         # successful test mail) without waiting for an engine send. Only a confirmed read-back is stored; never a guess. Written
         # here, inside the write, so a temporary firewall rule (-AllowThisIpTemporarily) covers it too.
         $chk = New-PimMailSenderSetupCheck -Confirmed ([bool]$script:PimScopedSendConfirmed) -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -By "$($global:PIM_SetupActor)" -InScopeResource "$scopeSmtp"
+        if ("$ProbeMailbox".Trim()) {
+            $pmv = "$ProbeMailbox".Trim()
+            if ($pmv -ieq "$storeSender" -or $pmv -ieq "$scopeSmtp" -or $pmv -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Note "-ProbeMailbox '$pmv' is not stored: it must be another member's mailbox, not the sender" 'Yellow' }
+            else { try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderProbeMailbox' -Value $pmv; Note "stored the sender check's probe mailbox: $pmv" 'DarkGray' } catch { Note "the probe mailbox could not be stored ($(("$($_.Exception.Message)" -split "`n")[0]))" 'Yellow' } }
+        }
+        # ONE-SENDER-1 (3.1.69 review): a re-run from ANOTHER computer has no local state file -- the time of the change comes
+        # from the STORED setup check (retire.at / pendingSince), read BEFORE this run overwrites it; else "now" would be
+        # recorded and the old right never retired
+        if ($prevState -and -not $script:PimMailChangeTimeRead) {
+            $script:PimMailChangeTimeRead = $true
+            try {
+                $storedChk = Get-PimSqlSetting -ConnectionString $cs -Name 'MailSenderSetupCheck'
+                $ct = Resolve-PimMailSenderChangeTime -StoredSetupCheck $storedChk -Sender $storeSender -ScopeSender $scopeSmtp -ChangedThisRun ([bool]($exoChanged -gt 0)) -HaveLocalState ([bool]$priorPrev)
+                if ($ct) { $prevState['at'] = $ct; Note "the time of the sender change ($ct) is taken from the stored setup check (no local state file on this computer)" 'DarkGray' }
+            } catch { Note "the stored setup check could not be read for the time of the change ($(("$($_.Exception.Message)" -split "`n")[0])) -- the old right is kept until a later run can tell" 'Yellow' }
+        }
+        if ($chk -and $prevState -and @($prevState.retire).Count) {
+            # ONE-SENDER-1 point C: the OLD rights still to retire ride with the check, and the 2 h window starts at the change
+            $chk['retire'] = $prevState; $chk['pendingSince'] = "$($prevState.at)"
+        }
         if ($chk) {
             try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderSetupCheck' -Value $chk; Note "stored the setup check for PIM Manager: scoped Mail.Send confirmed for $(@($chk.identities).Count) sending identit$(if (@($chk.identities).Count -eq 1) { 'y' } else { 'ies' }) in $scopeName" 'Green' }
             catch { Note "the setup check could not be stored ($(($_.Exception.Message -split "`n")[0])) -- PIM Manager proves the engine at its first send instead" 'Yellow' }
+        } elseif ([bool]$script:PimInScopePending) {   # [bool]: keeps the summary's PENDING exit the only match of the MS18 anchor
+            # ONE-SENDER-1 point C: a PENDING run records the change and the PREVIOUS state in the setup check (NOT confirmed --
+            # it never grants anything), so the mail probe reports 'pending' for 2 h and a re-run can put the old right back
+            $pchk = New-PimMailSenderPendingCheck -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -Previous $(if ($prevState) { $prevState } else { $priorPrev }) -By "$($global:PIM_SetupActor)" -InScopeResource "$scopeSmtp"
+            try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderSetupCheck' -Value $pchk; Note "stored the PENDING setup check (with the previous send right, for a restore) for PIM Manager" 'DarkGray' }
+            catch { Note "the pending setup check could not be stored ($(($_.Exception.Message -split "`n")[0]))" 'Yellow' }
+        }
+        # ONE-SENDER-1 point C (2026-11-26): the probe records step [5] decides on are read HERE, through the same connection
+        # that just wrote MailSenderSetupCheck (same sign-in, same firewall handling). A failed read = ok $false: the old right
+        # is then kept, never removed blind.
+        if (-not $script:PimMailProbeRead) {
+            try { $script:PimMailProbeRead = @{ ok = $true; source = 'pim.Settings'; probe = (Get-PimSqlSetting -ConnectionString $cs -Name 'MailSenderProbe'); rfa = (Get-PimSqlSetting -ConnectionString $cs -Name 'MailSenderProbeRfa'); error = '' } }
+            catch { $script:PimMailProbeRead = @{ ok = $false; source = 'pim.Settings'; probe = $null; rfa = $null; error = (("$($_.Exception.Message)" -split "`n")[0]).Trim() } }
         }
     }
     # MAIL-NAMING 100.14 item 5: -AllowThisIpTemporarily -- the temporary SQL firewall rule (ARM, as the identity that signed
@@ -1404,6 +1552,64 @@ if (-not "$SqlServerFqdn".Trim()) {
     }
 }
 
+# --- [5] ONE-SENDER-1: retire the OLD sender's right -- only on a LATER run, only on the probe ---------------------------
+# Owner via Invardia 2026-11-26: a sender change KEEPS the old sender and its right until EVERY sending identity's own Graph
+# probe (PIM-MailSenderProbe.ps1: sender allowed + probe mailbox denied) passes for the NEW sender, after the change.
+# Exchange's InScope is NOT enough. The run that grants the new right never retires anything. The probe records come from
+# (first that exists): the test seam, -ProbeRecordFile, the pim.Settings read step [4] made through its own connection;
+# none -> the old right is KEPT and the run says why (never removed blind).
+$script:PimRetireDone = $false
+if (@($retire).Count -and -not $whatIfRun) {
+    Step "[5] retire the OLD sender's send right (only when every sending identity's probe passes for $storeSender)"
+    $retireDec = $null
+    if ($exoChanged -gt 0) {
+        $retireDec = @{ action = 'keep'; reason = 'the OLD send right is KEPT: this run granted the new right -- a LATER run (re-run, or -Cleanup) retires the old one once every identity''s probe passes'; checks = @() }
+    } elseif ("$inScopeOutcome" -ne 'verified') {
+        # the probe is the gate, but never against Exchange's own answer: a new right that does not even read back InScope
+        # in this run is no reason to drop the old one
+        $retireDec = @{ action = 'keep'; reason = "the OLD send right is KEPT: the new scope does not read back InScope in this run ($(if ("$inScopeOutcome") { $inScopeOutcome } else { 'not checked' }))"; checks = @() }
+    } else {
+        $probeRead = $script:PimMailProbeRecordSeam
+        if (-not $probeRead -and "$ProbeRecordFile".Trim()) {
+            try { $pf = Get-Content -LiteralPath "$ProbeRecordFile".Trim() -Raw | ConvertFrom-Json
+                  $probeRead = if ($pf.PSObject.Properties['MailSenderProbe']) { @{ ok = $true; source = 'file'; probe = $pf.MailSenderProbe; rfa = $(if ($pf.PSObject.Properties['MailSenderProbeRfa']) { $pf.MailSenderProbeRfa } else { $null }); error = '' } }
+                               else { @{ ok = $true; source = 'file'; probe = $pf; rfa = $null; error = '' } } }
+            catch { $probeRead = @{ ok = $false; source = 'file'; probe = $null; rfa = $null; error = "-ProbeRecordFile could not be read: $((("$($_.Exception.Message)" -split "`n")[0]).Trim())" } }
+        }
+        if (-not $probeRead) { $probeRead = $script:PimMailProbeRead }
+        if (-not $probeRead) { $probeRead = @{ ok = $false; source = ''; probe = $null; rfa = $null; error = 'no store was read in this run (-SqlServerFqdn not given or not reachable) and no -ProbeRecordFile' } }
+        # 3.1.69 review: EVERY role of every identity (one identity can send for the engine AND the broker) is checked
+        $roles = @($sendPrincipals | ForEach-Object { if ($_.PSObject.Properties['roles'] -and @($_.roles).Count) { @($_.roles) } elseif ($_.PSObject.Properties['role'] -and "$($_.role)".Trim()) { "$($_.role)" } else { 'engine' } } | Sort-Object -Unique)
+        $retireDec = Resolve-PimMailSenderRetireDecision -Retire $retire -ProbeRead $probeRead -Sender $storeSender -Roles $roles -ChangedAtUtc $(if ($prevState) { $prevState.at } else { $null })
+    }
+    $result.retireDecision = [ordered]@{ action = $retireDec.action; reason = $retireDec.reason; checks = @($retireDec.checks) }
+    foreach ($c in @($retireDec.checks)) { Note "probe $($c.role): $(if ($c.ok) { 'verified' } else { 'NOT verified' }) -- $($c.why)" $(if ($c.ok) { 'Green' } else { 'Yellow' }) }
+    if ($retireDec.action -eq 'retire') {
+        $nowAsg = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment').value); $nowScopes = @((Invoke-Exo -Cmdlet 'Get-ManagementScope').value)
+        $rtp = New-PimMailSenderRetirePlan -Retire $retire -Assignments $nowAsg -Scopes $nowScopes -CurrentScopeName $scopeName
+        foreach ($k in @($rtp.kept)) { Note "the old scope $($k.name) is KEPT: $($k.remaining) other role assignment(s) are still on it" 'DarkGray' }
+        foreach ($ra in @($rtp.actions)) {
+            if (-not $PSCmdlet.ShouldProcess("Exchange Online ($sender)", "$($ra.cmdlet): $($ra.what)")) { continue }
+            $rr = Invoke-ExoWhenHydrated -Cmdlet $ra.cmdlet -What $ra.what -Parameters $ra.parameters
+            if (-not $rr.ok) { Add-Result 'exo-retire' 'FAILED' "$($rr.error)"; Fail "could not $($ra.what): $($rr.error) -- the rest of the old right is kept; re-run to finish" }
+            Note "$($ra.cmdlet): $($ra.what)" 'Green'
+        }
+        # read back: none of the retired assignments and none of the removed scopes may still be listed
+        $backAsg = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment').value); $backScopes = @((Invoke-Exo -Cmdlet 'Get-ManagementScope').value)
+        $rb = Test-PimMailSenderRetireReadBack -Retire $retire -RemovedScopes @($rtp.removedScopes) -Assignments $backAsg -Scopes $backScopes
+        if (-not $rb.ok) { Add-Result 'exo-retire' 'FAILED' ("still listed: " + (@($rb.leftovers) -join ', ')); Fail "the old send right was retired but is still listed on read-back: $(@($rb.leftovers) -join ', ')" }
+        Add-Result 'exo-retire' 'ok' "retired $(@($rtp.actions | Where-Object { $_.cmdlet -eq 'Remove-ManagementRoleAssignment' }).Count) assignment(s), removed scope(s): $(@($rtp.removedScopes) -join ', ')"
+        $result.retired = [ordered]@{ assignments = @($retire | ForEach-Object { "$($_.name)" }); scopes = @($rtp.removedScopes) }
+        $script:PimRetireDone = $true
+        if ($prevPath -and (Test-Path -LiteralPath $prevPath)) { Remove-Item -LiteralPath $prevPath -Force -ErrorAction SilentlyContinue }
+        Note "the OLD sender's send right is retired (verified by read-back); PIM Manager's setup check drops it at the next run" 'Green'
+    } else {
+        Note $retireDec.reason 'Yellow'
+        Add-Result 'exo-retire' 'kept' $retireDec.reason
+        if ($Cleanup) { Fail "-Cleanup: $($retireDec.reason)" }
+    }
+}
+
 # --- summary --------------------------------------------------------------------
 if ($whatIfRun) {
     # 12.7: the preview ends here -- say what WOULD change, and that nothing did.
@@ -1420,6 +1626,19 @@ if ($whatIfRun) {
 }
 # MAIL-SCOPE-SMTP: never "READY" / "VERIFIED" without Exchange's in-scope answer for every sending identity.
 # PENDING (this run changed the objects, Exchange has not applied them yet): its own result and exit code 3 -- not FAILED.
+# ONE-SENDER-1 point C (tightened 2026-11-26): say how it ends -- both rights are in place; a re-run retires the old one once
+# every sending identity's own probe passes for the new sender; still not in scope 2 h after the change -> tell Invardia
+if (($script:PimInScopePending -or ($script:PimRetirePending -and -not $script:PimRetireDone)) -and $result.previousState) {
+    Write-Host "  The OLD send right is KEPT next to the new one. Re-run this script (or -Cleanup) after the daily sender check: when every sending identity's probe is verified for the new sender, the old assignments and then the old scope are removed. Still not in scope $(Get-PimMailSenderPendingHours) h after the change -> the old right stays (-Restore completes it) and you tell Invardia." -ForegroundColor Yellow
+}
+if ($script:PimRetirePending -and -not $script:PimRetireDone -and -not $script:PimInScopePending) {
+    # the new right reads back InScope, but the old one is still in place until the probe passes: PENDING, not READY
+    $result.pending = $true
+    $result.reason = "the OLD sender's send right is kept until every sending identity's probe passes for $storeSender"
+    Write-ResultFile
+    Write-Host "`nRESULT: PENDING -- $($result.reason) (re-run later or -Cleanup)" -ForegroundColor Yellow
+    exit 3
+}
 if ($script:PimInScopePending) {
     $result.pending = $true
     $result.reason = Get-PimMailInScopePendingText

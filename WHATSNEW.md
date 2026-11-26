@@ -1,8 +1,49 @@
 # What's new in PIM Manager
 
-## 3.1.62.1 · 2026-11-23 · Security
+## 3.1.69 · 2026-11-26 · Feature update
 
-A security update: PIM Manager now runs on Microsoft's latest patched platform.
+One mail sender everywhere, a security image overview, and admins in protected groups can be disabled again.
+
+### New features
+
+- **Security image release overview** - Operations has a new page that lists PIM Manager's security image releases: when each was detected, when work started and when it reached each ring, with the hours between. A missing time shows as not recorded.
+- **Environment report is now System Documentation** - The page and its PDF are now called System Documentation. The content is the same.
+- **One mail sender for every part** - Every part of PIM Manager, the access request portal included, now sends from the one sender you set. The setup gives every sending part its right in one run and checks every day that sending works.
+
+### Fixes
+
+- **Disable admins in protected groups** - Admins in role-assignable groups can be disabled and enabled again. Microsoft protects these accounts, so the engine now holds the Microsoft role Privileged Authentication Administrator. Setup grants it, and the permission check reports it when missing.
+- **Each change shows its own result** - In the commit view, a change no longer shows the error of a later change to the same row.
+
+## 3.1.68 · 2026-11-25 · Feature update
+
+Clear, professional access request e-mails, and Microsoft system roles are no longer shown as gaps.
+
+### New features
+
+- **Professional access request e-mails** - Every access request e-mail now shows your company name, the admin account to sign in with, the facts, the next steps and one button to the right page.
+- **System roles shown as Not delegable** - Discovery and gaps shows Microsoft system roles that cannot be given to a group as Not delegable, not as a gap. Nothing to do.
+
+### Fixes
+
+- **Owners can open the request from the e-mail** - The approval e-mail now links straight to the request in PIM Manager, and the PIN e-mail links to the access request portal.
+
+## 3.1.67 · 2026-11-25 · Feature update
+
+New admin no longer waits, and RFA works for every admin by default.
+
+### New features
+
+- **RFA approval by the department by default** - With the RFA portal on, a disabled admin can ask to be enabled without any setting, and an owner of the admin's department approves. Off or Auto can still be chosen.
+- **RFA settings in Admin accounts and Departments** - The RFA mode, the address the PIN is sent to and the hours an admin may ask for are now set in the Manager. A department with no owner is flagged.
+
+### Fixes
+
+- **New admin no longer waits for a lookup** - Add to pending changes now stages a new admin at once. PIM checks the name when the change is applied, and never creates over or changes an existing account that PIM did not create.
+
+## 3.1.66 · 2026-11-25 · Fix-only
+
+Directory lookups no longer wait behind long engine jobs.
 
 ### New features
 
@@ -10,11 +51,48 @@ None in this version.
 
 ### Fixes
 
-- **Latest patched Microsoft base images** - PIM Manager now runs on the newest patched Microsoft platform. Nothing changes in how you sign in or work.
+- **Directory lookups no longer wait behind long jobs** - When PIM Manager looks up a name it has not seen yet, for example in New admin account, the engine now answers at once, even while long jobs run. Before, the lookup could wait behind them.
+
+## 3.1.65 · 2026-11-25 · Fix-only
+
+MSP managed-tenant updates is off on a single tenant.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **MSP managed-tenant updates off on single tenants** - On a single-tenant installation, Settings > Features & edition now shows MSP managed-tenant updates as off and locked, with the status "Not used on a single tenant". Managing and managed tenants are unchanged.
+
+## 3.1.64 · 2026-11-24 · Security
+
+Support fixes wait for your approval, and updates come only as signed releases.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Support fixes wait for your approval** - Fixes by Invardia support now wait on the Approvals page until an Admin or SuperAdmin of your environment approves each one. If a SuperAdmin chose to apply them automatically, that choice stays.
+- **Signed updates only** - PIM Manager and the hybrid worker now take updates only as signed releases from Invardia. The old unsigned source is removed; an installation still set to it refuses to update and says what to set.
+
+## 3.1.63 · 2026-11-24 · Fix-only
+
+Security updates reach your installation within 15 minutes.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Security updates within 15 minutes** - When Invardia releases a security update of the Microsoft platform PIM Manager runs on, your installation applies it within 15 minutes instead of waiting for the nightly update. Running jobs are never stopped; the next run uses the update.
 
 ## 3.1.62 · 2026-11-23 · Fix-only
 
-The environment report lists only PIM Manager's own accounts and the rights they hold.
+The System Documentation lists only PIM Manager's own accounts and the rights they hold.
 
 ### New features
 
@@ -22,7 +100,7 @@ None in this version.
 
 ### Fixes
 
-- **Environment report shows only PIM Manager's own accounts** - The environment report lists PIM Manager's own identities and the Invardia Support app, with each right they hold and why. Other accounts in your tenant are not listed. The permission health check still watches every right.
+- **System Documentation shows only PIM Manager's own accounts** - The System Documentation lists PIM Manager's own identities and the Invardia Support app, with each right they hold and why. Other accounts in your tenant are not listed. The permission health check still watches every right.
 - **Latest .NET base image** - PIM Manager is built on the newest Microsoft .NET 10 base image.
 
 ## 3.1.61 · 2026-11-23 · Fix-only
@@ -1388,7 +1466,7 @@ PIM Manager shows your own environment name everywhere, and new installations gi
 
 ### New features
 
-- **Your environment name shows everywhere** - PIM Manager shows the environment name you keep in Invardia in mail subjects, exports, the environment report, the header and the browser tab.
+- **Your environment name shows everywhere** - PIM Manager shows the environment name you keep in Invardia in mail subjects, exports, the System Documentation, the header and the browser tab.
 
 ### Fixes
 
@@ -2129,7 +2207,7 @@ None in this version.
 
 ### Fixes
 
-- **No false undersized warning** - A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation or in the environment report.
+- **No false undersized warning** - A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation or in the System Documentation.
 
 ## 2.4.663 · 2026-10-21 · Fix-only
 
@@ -3744,7 +3822,7 @@ Manage access for any application, find admins faster, and give your security te
 
 - **Custom workloads, for example SAP** - Templates > Custom workloads lets you define an application PIM Manager has no connector for, with its roles. PIM Manager then maintains one Entra group per delegated role.
 - **Filter admin accounts** - Admin accounts now has filter chips for type, privilege, platform, department and status, and each admin shows a High-priv or Day-to-day badge.
-- **Environment report** - Operations > Environment report shows your PIM Manager setup live: identities and their permissions, Azure resources, network exposure and findings with the fix. Export it as PDF.
+- **System Documentation** - Operations > System Documentation shows your PIM Manager setup live: identities and their permissions, Azure resources, network exposure and findings with the fix. Export it as PDF.
 - **Clear choices for extras in Drift** - An item in the tenant but not in PIM Manager now offers Import into PIM, Delete or Ignore. Deleting a whole group is its own separate commit.
 - **Smaller improvements** - A security review pack for your CISO, More info on every setting, per-recipient notifications, Settings > Reports, PDF export, Reader access for department owners, and a clearer daily changes mail.
 

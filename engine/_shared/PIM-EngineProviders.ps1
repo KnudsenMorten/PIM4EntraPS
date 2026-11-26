@@ -1334,7 +1334,15 @@ function New-PimAdminsProvider {
                 return [pscustomobject]@{ pimApplied = $false; reason = $why }
             }
             if ($blocked) { Write-Host ("    [!] {0}: NOT disabled -- {1} (attribute changes still applied)" -f $item.key, $blocked) -ForegroundColor Yellow }
-            $r = Invoke-PimGraph -Method PATCH -Path "/users/$($l.id)" -Body $body
+            # ADMIN-DISABLE-PROTECTED-1 (c): Graph refuses an accountEnabled change of an admin in a role-assignable group unless
+            # the engine holds Privileged Authentication Administrator -- say the cause and the fix, keep the raw answer as details
+            try { $r = Invoke-PimGraph -Method PATCH -Path "/users/$($l.id)" -Body $body }
+            catch {
+                $__aeRaw = ("$($_.Exception.Message) $(if ($_.ErrorDetails) { $_.ErrorDetails.Message })").Trim()
+                $__aePlain = if (($disabling -or $enabling) -and (Get-Command ConvertTo-PimAccountEnabledRefusalText -ErrorAction SilentlyContinue)) { ConvertTo-PimAccountEnabledRefusalText -ErrorText $__aeRaw -Admin "$($l.userPrincipalName)" -Enable:$enabling -PrivAuthAdminHeld $(if (Get-Command Get-PimEnginePrivAuthAdminHeldFact -ErrorAction SilentlyContinue) { Get-PimEnginePrivAuthAdminHeldFact } else { $null }) } else { '' }
+                if ($__aePlain) { throw $__aePlain }
+                throw
+            }
             $upnA = "$($l.userPrincipalName)"
             if ($disabling) {
                 Write-Host ("    [-] {0}: accountEnabled=false ({1})" -f $item.key, $dec.reason) -ForegroundColor Yellow
@@ -9079,7 +9087,15 @@ function Invoke-PimAdminOffboardSteps {
     if ($null -ne $Desired -and (Test-PimAdminIsExistingAccount -Row $Desired)) { $steps = @($steps | Where-Object { $_ -eq 'memberships' }) }
     $done = New-Object System.Collections.Generic.List[string]
     if ($steps -contains 'disable') {
-        Invoke-PimGraph -Method PATCH -Path "/users/$uid" -Body @{ accountEnabled = $false } | Out-Null   # a failure THROWS: nothing else runs
+        # a failure THROWS: nothing else runs. ADMIN-DISABLE-PROTECTED-1 (c): a refusal for an admin in a role-assignable group is
+        # said in plain words (cause + fix), the raw Graph answer kept as details
+        try { Invoke-PimGraph -Method PATCH -Path "/users/$uid" -Body @{ accountEnabled = $false } | Out-Null }
+        catch {
+            $__aeRaw = ("$($_.Exception.Message) $(if ($_.ErrorDetails) { $_.ErrorDetails.Message })").Trim()
+            $__aePlain = if (Get-Command ConvertTo-PimAccountEnabledRefusalText -ErrorAction SilentlyContinue) { ConvertTo-PimAccountEnabledRefusalText -ErrorText $__aeRaw -Admin $upn -PrivAuthAdminHeld $(if (Get-Command Get-PimEnginePrivAuthAdminHeldFact -ErrorAction SilentlyContinue) { Get-PimEnginePrivAuthAdminHeldFact } else { $null }) } else { '' }
+            if ($__aePlain) { throw $__aePlain }
+            throw
+        }
         [void]$done.Add('disabled')
         Write-PimAdminLifecycleAudit -Action 'account.offboard.disable' -Target $upn -After @{ accountEnabled = $false; reason = "$($Live.reason)" }
     }

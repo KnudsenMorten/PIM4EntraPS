@@ -781,13 +781,14 @@ function Get-PimEnvironmentReport {
             & $add @([pscustomobject][ordered]@{ area = 'app-role'; permission = "$($ho.role)"; scope = "$($ho.resource)"; status = $(if ($undeclared) { 'held' } else { 'extra' }); required = $false; why = $(if ($undeclared) { 'no declared set for this identity' } else { 'an application permission on another API, not in the declared set' }); forbidden = $false; reason = '' })
         }
         if ($idn.role -eq 'engine-app') { continue }
-        # Entra directory roles (none are declared: PIM uses application permissions, never a directory role)
+        # Entra directory roles: PIM uses application permissions; the ONE declared directory role is the engine's Privileged
+        # Authentication Administrator (ADMIN-DISABLE-PROTECTED-1: disabling an admin in a role-assignable group needs it)
         $dr = @(); $ok = $true; $why = ''
         try { foreach ($x in @(& $gAll ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '{0}'&`$expand=roleDefinition" -f $idn.id))) { $n = "$(Get-PimEnvReportField (Get-PimEnvReportField $x 'roleDefinition') 'displayName')"; if (-not $n) { $n = "$($x.roleDefinitionId)" }; $dr += $n } }
         catch { $ok = $false; $why = ConvertTo-PimEnvReportReason $_ }
         $drDecl = if ($undeclared) { @() } else { @($exp.directoryRoles) }
         $drRows = @(Compare-PimEnvReportNamedSet -Area 'directoryRole' -Declared $drDecl -Held $dr -Readable $ok -Reason $why -Scope 'tenant' -Undeclared:$undeclared)
-        if (-not $ok) { $drRows = @([pscustomobject][ordered]@{ area = 'directoryRole'; permission = '(directory roles)'; scope = 'tenant'; status = 'not readable'; required = $false; why = 'PIM uses application permissions; no directory role is declared'; forbidden = $false; reason = $why }) }
+        if (-not $ok) { $drRows = @([pscustomobject][ordered]@{ area = 'directoryRole'; permission = '(directory roles)'; scope = 'tenant'; status = 'not readable'; required = $false; why = $(if (@($drDecl).Count) { 'the declared directory role(s) could not be read: ' + (@($drDecl | ForEach-Object { "$(Get-PimEnvReportField $_ 'role')" }) -join ', ') } else { 'PIM uses application permissions; no directory role is declared for this identity' }); forbidden = $false; reason = $why }) }
         & $add $drRows
         # Azure RBAC (incl. the tenant root management group and Key Vault)
         if ($idn.role -ne 'support') {

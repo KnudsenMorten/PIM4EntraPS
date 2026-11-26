@@ -1,0 +1,5 @@
+{"version":"3.1.68","date":"2026-11-25","type":"feature",
+ "summary":"Clear, professional access request e-mails, and Microsoft system roles are no longer shown as gaps.",
+ "new":[{"title":"Professional access request e-mails","text":"Every access request e-mail now shows your company name, the admin account to sign in with, the facts, the next steps and one button to the right page."},
+        {"title":"System roles shown as Not delegable","text":"Discovery and gaps shows Microsoft system roles that cannot be given to a group as Not delegable, not as a gap. Nothing to do."}],
+ "fixes":[{"title":"Owners can open the request from the e-mail","text":"The approval e-mail now links straight to the request in PIM Manager, and the PIN e-mail links to the access request portal."}]}

@@ -1,0 +1,4 @@
+{"version":"3.1.66","date":"2026-11-25","type":"fix-only",
+ "summary":"Directory lookups no longer wait behind long engine jobs.",
+ "new":[],
+ "fixes":[{"title":"Directory lookups no longer wait behind long jobs","text":"When PIM Manager looks up a name it has not seen yet, for example in New admin account, the engine now answers at once, even while long jobs run. Before, the lookup could wait behind them."}]}

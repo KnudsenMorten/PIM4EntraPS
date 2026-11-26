@@ -7,7 +7,7 @@
     ca-pim-tick only, BUG-268), pim.Settings 'SchedulerTickJobId' and -- §97 -- the tick's Reader at the TENANT ROOT
     management group (Discovery cannot see Azure without it; User Access Administrator there only with
     -EngineAzureRootUserAccessAdmin), and -- PIM 100.22 (b) -- the Manager's 'Reader' on the PIM resource group ONLY (the
-    Environment report reads the architecture with it).
+    System Documentation reads the architecture with it).
 
 .DESCRIPTION
     Before this script those four were done ONLY inside Setup-PimContainers.ps1 (the infra step) -- or not at all (the
@@ -43,7 +43,7 @@ param(
     [switch]$EngineAzureRootUserAccessAdmin,
     [switch]$SkipAzureRootAccess,
     [switch]$SkipTickStart,
-    # PIM 100.22 (b): skip the Manager's Reader on the resource group (the Environment report then cannot read the architecture)
+    # PIM 100.22 (b): skip the Manager's Reader on the resource group (the System Documentation then cannot read the architecture)
     [switch]$SkipManagerRgReader,
     # RIGHTS-LIVE-1: the updater job the engine gets its two job-scoped rights on ('' = caj-pim-updater, else ca-pim-update)
     [string]$UpdaterJobName = '',
@@ -80,6 +80,12 @@ $tickId = "$tickId".Trim(); $tickOid = "$tickOid".Trim(); $mgrOid = "$mgrOid".Tr
 if (-not $SkipGraph) {
     Step "Graph app roles: $TickJobName (Engine set)"
     if ($PSCmdlet.ShouldProcess($tickOid, 'Grant-PimMiGraph Engine')) { Grant-PimMiGraph -MiObjectId $tickOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Engine }
+    # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role Privileged Authentication Administrator (active, directory scope /)
+    Step "Entra role: Privileged Authentication Administrator for $TickJobName"
+    if ($PSCmdlet.ShouldProcess($tickOid, "assign the Entra role 'Privileged Authentication Administrator' (active, directory scope /)")) {
+        $dirAccess = Grant-PimEngineDirectoryRoles -MiObjectId $tickOid -Name $TickJobName -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId
+        if ($dirAccess.ok) { Note 'present and read back' } else { Note 'NOT assigned -- see the warning above; the install continues and Get Started > Engine permissions shows the fix' }
+    }
     Step "Graph app roles: $ManagerApp (read-only Manager set)"
     if ($PSCmdlet.ShouldProcess($mgrOid, 'Grant-PimMiGraph Manager')) { Grant-PimMiGraph -MiObjectId $mgrOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Manager }
 }
@@ -157,10 +163,10 @@ if (-not $SkipEngineUpdaterJobAccess) {
 }
 
 # PIM 100.22 (b) (owner 2026-10-09): the Manager's managed identity gets 'Reader' on THIS resource group only, so the
-# Environment report (Operations > Environment report) reads the installation's own architecture. Idempotent, read back;
+# System Documentation (Operations > System Documentation) reads the installation's own architecture. Idempotent, read back;
 # last, so a refusal (the deploying identity lacks User Access Administrator / Owner here) stops nothing above it.
 if (-not $SkipManagerRgReader) {
-    Step "'Reader' for $ManagerApp on the resource group $ResourceGroup only (the Environment report)"
+    Step "'Reader' for $ManagerApp on the resource group $ResourceGroup only (the System Documentation)"
     if ($PSCmdlet.ShouldProcess("$ManagerApp @ $ResourceGroup", 'role assignment Reader (resource group only)')) {
         $rgr = Grant-PimManagerRgReader -MiObjectId $mgrOid -Name $ManagerApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
         if ($rgr.ok) { Note "$($rgr.reason)" } else { throw "$($rgr.reason)" }

@@ -74,7 +74,9 @@ function Resolve-PimMailSendPrincipals {
     # mailbox -- -AssignmentNamePrefix (default: the mailbox name) -> '<prefix>-<short id>-MailSend'. The names earlier
     # releases forced on every tenant ('PIM4EntraPS-MI-<short id>-MailSend', 'PIM4EntraPS-Engine-MailSend') travel along
     # as legacyAssignmentNames, so an existing assignment is RECOGNISED (adopted), never duplicated.
-    [CmdletBinding()] param([object[]]$ManagedIdentitySps = @(), [object]$EngineSp, [string]$AssignmentNamePrefix = 'PIM-Engine')
+    # ONE-SENDER-1 point B (Invardia 2026-11-25): -Roles @{ <objectId> = 'engine' | 'rfa' } names WHICH component each managed
+    # identity sends for (the tick job = engine, the RFA broker ca-pim-rfa = rfa); an identity not named = 'engine'.
+    [CmdletBinding()] param([object[]]$ManagedIdentitySps = @(), [object]$EngineSp, [string]$AssignmentNamePrefix = 'PIM-Engine', [hashtable]$Roles = @{})
     $pfx = ConvertTo-PimExoNamePart -Value $AssignmentNamePrefix
     if (-not $pfx) { $pfx = 'PIM-Engine' }
     $out = New-Object System.Collections.Generic.List[object]
@@ -88,13 +90,19 @@ function Resolve-PimMailSendPrincipals {
         }
         $oid = "$($sp.id)".Trim()
         $short = $oid.Substring(0, [Math]::Min(8, $oid.Length))
-        $out.Add([pscustomobject]@{ kind = 'managed-identity'; appId = "$($sp.appId)".Trim(); objectId = $oid
+        # 3.1.69 review: a value may be a LIST -- one identity can send for the engine AND the broker; 'roles' keeps all of them
+        # (the retire decision checks every role's probe), 'role' is the first ('engine' when it is one of them)
+        $roleList = @()
+        if ($Roles) { foreach ($rk in @($Roles.Keys)) { if ("$rk".Trim() -ieq $oid) { $roleList += @(@($Roles[$rk]) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) } } }
+        $roleList = @($roleList | Select-Object -Unique); if (-not $roleList.Count) { $roleList = @('engine') }
+        $role = if ($roleList -contains 'engine') { 'engine' } else { $roleList[0] }
+        $out.Add([pscustomobject]@{ kind = 'managed-identity'; role = $role; roles = $roleList; appId = "$($sp.appId)".Trim(); objectId = $oid
                                     displayName = ("{0} sender {1}" -f $pfx, $short)
                                     assignmentName = ("{0}-{1}-MailSend" -f $pfx, $short)
                                     legacyAssignmentNames = @(("PIM4EntraPS-MI-{0}-MailSend" -f $short)) })
     }
     if ($out.Count -eq 0 -and $null -ne $EngineSp -and "$($EngineSp.appId)".Trim()) {
-        $out.Add([pscustomobject]@{ kind = 'engine-spn'; appId = "$($EngineSp.appId)".Trim(); objectId = "$($EngineSp.id)".Trim()
+        $out.Add([pscustomobject]@{ kind = 'engine-spn'; role = 'engine'; roles = @('engine'); appId = "$($EngineSp.appId)".Trim(); objectId = "$($EngineSp.id)".Trim()
                                     displayName = ("{0} sender (engine app)" -f $pfx); assignmentName = ("{0}-App-MailSend" -f $pfx)
                                     legacyAssignmentNames = @('PIM4EntraPS-Engine-MailSend') })
     }
@@ -305,7 +313,9 @@ function Resolve-PimMailSenderScopeRepair {
         foreach ($a in @($asg | Where-Object { $fromNames -contains "$($_.CustomResourceScope)" -and (& $isMailSend $_) })) {
             $idn = if ("$($a.Identity)".Trim()) { "$($a.Identity)".Trim() } else { "$($a.Name)".Trim() }
             $actions.Add([pscustomobject]@{ cmdlet = 'Set-ManagementRoleAssignment'; what = "move send right $idn from scope $($a.CustomResourceScope) (it matches no mailbox) to $target"
-                                            parameters = @{ Identity = $idn; CustomResourceScope = $target } })
+                                            parameters = @{ Identity = $idn; CustomResourceScope = $target }
+                                            # ONE-SENDER-1 point C: the move, recorded so it can be put back
+                                            previous = [ordered]@{ kind = 'move'; identity = $idn; fromScope = "$($a.CustomResourceScope)"; toScope = $target } })
         }
         # the inputs as they will be: the moved assignments now live in $target
         @($asg | ForEach-Object { if ($fromNames -contains "$($_.CustomResourceScope)" -and (& $isMailSend $_)) { $c = $_.PSObject.Copy(); $c.CustomResourceScope = $target; $c } else { $_ } })
@@ -403,6 +413,329 @@ function Get-PimMailInScopePendingText {
     return 'Exchange has not applied the send right yet (it can take up to 2 hours) -- re-run this script later; nothing more to change'
 }
 
+# =============================================================================================
+# ONE-SENDER-1 (Invardia 2026-11-25, framework ONE-SENDER-1 points B + C). Found on internal 2026-11-25: the RFA broker
+# signed in as id-pim-requests, which held NO Exchange Application Mail.Send -- the mail-sender script only ever knew the
+# tick job. B: ONE run covers EVERY sending identity (the tick job AND, where ca-pim-rfa is deployed, the broker's
+# identity -- found the same way as the tick job, never by a separate run). C, TIGHTENED (owner via Invardia 2026-11-26):
+# a sender change KEEPS the old sender's right in the granting run (the run ends PENDING with both in place); a LATER run
+# (a re-run or -Cleanup) retires the old assignments, then the old scope when nothing is left on it, ONLY when every sending
+# identity's own Graph probe (PIM-MailSenderProbe.ps1) is verified for the NEW sender after the change -- Exchange's
+# Test-ServicePrincipalAuthorization InScope is not enough (EPS: it said in-scope before sending really worked).
+# =============================================================================================
+
+function Get-PimRfaBrokerDefaultAppName { 'ca-pim-rfa' }
+
+function Resolve-PimRfaBrokerSendIdentity {
+    <#
+      PURE (ONE-SENDER-1 point B). Is the RFA broker (container app ca-pim-rfa) deployed in the resource group, and which
+      identity does it SEND as? -App = the ARM GET of the container app ($null when the read failed), -ErrorText = the read's
+      error. The broker's Graph token follows the same rule as the engine's (PIM_ManagedIdentityClientId -> that user-assigned
+      identity, e.g. id-pim-requests; else its system identity), so Get-PimJobManagedIdentityPrincipalId decides it.
+      Returns @{ deployed = $true | $false | $null (could not tell); principalId; kind; reason }:
+        404 / not found -> deployed $false (no broker = nothing to grant, not an error);
+        another read error -> deployed $null + the reason (the run says so -- it never guesses that there is no broker);
+        deployed but no usable identity -> deployed $true, principalId '' + the reason.
+    #>
+    [CmdletBinding()] param([object]$App, [AllowEmptyString()][AllowNull()][string]$ErrorText = '', [string]$AppName = 'ca-pim-rfa')
+    if ($null -eq $App) {
+        if (-not "$ErrorText".Trim() -or "$ErrorText" -match '(?i)\b404\b|ResourceNotFound|was not found|could not be found|NotFound') {
+            return [pscustomobject]@{ deployed = $false; principalId = ''; kind = ''; reason = "no RFA broker ($AppName) in this resource group" }
+        }
+        return [pscustomobject]@{ deployed = $null; principalId = ''; kind = ''; reason = "the RFA broker ($AppName) could not be read: $((("$ErrorText") -split "`n")[0].Trim())" }
+    }
+    $pick = Get-PimJobManagedIdentityPrincipalId -Job $App
+    if ($pick.reason) { return [pscustomobject]@{ deployed = $true; principalId = ''; kind = ''; reason = "RFA broker ${AppName}: $($pick.reason)" } }
+    return [pscustomobject]@{ deployed = $true; principalId = "$($pick.principalId)"; kind = "$($pick.kind)"; reason = '' }
+}
+
+function Get-PimMailSenderRetireList {
+    <#
+      PURE (ONE-SENDER-1 point C, tightened 2026-11-26). The OLD sender's rights a sender change leaves behind: each sending
+      identity's 'Application Mail.Send' on ANOTHER of our sender scopes (a legacy 'PIM4EntraPS-Sender*' or '*-SendScope') whose
+      filter is READ and names another mailbox (§94). NOTHING is removed here -- the list is what a LATER run retires once every
+      identity's own probe passes for the new sender.
+      2026-10-31 (EntraPolicySuite, internal): Exchange's REST Get-ManagementScope can answer an EMPTY RecipientRestrictionFilter
+      -- an unread filter (or an unlisted scope) may be this sender's own scope under an older name, so it is never listed.
+      Returns @({ identity; name; role; app; principalRole; scope }).
+    #>
+    [CmdletBinding()] param([object[]]$ExoServicePrincipals = @(), [object[]]$Scopes = @(), [object[]]$Assignments = @(), [object[]]$Principals = @(),
+                            [string]$Sender = '', [string]$ScopeName = '')
+    $out = New-Object System.Collections.Generic.List[object]
+    $otherMailbox = { param($n) $sc = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq "$n" })[0]
+        $f = "$(if ($sc) { $sc.RecipientRestrictionFilter })"; ($f.Trim() -and $f.IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -lt 0) }
+    foreach ($p in @($Principals | Where-Object { $_ })) {
+        $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $ExoServicePrincipals -AppId $p.appId -ObjectId $p.objectId
+        foreach ($wrong in @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and
+                    "$($_.CustomResourceScope)" -ne $ScopeName -and ((Test-PimLegacyMailSenderScopeName -Name "$($_.CustomResourceScope)") -or "$($_.CustomResourceScope)" -like '*-SendScope') -and
+                    (& $otherMailbox "$($_.CustomResourceScope)") } |
+                    Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count })) {
+            $idn = if ("$($wrong.Identity)".Trim()) { "$($wrong.Identity)".Trim() } else { "$($wrong.Name)".Trim() }
+            $out.Add([pscustomobject][ordered]@{ identity = $idn; name = $(if ("$($wrong.Name)".Trim()) { "$($wrong.Name)".Trim() } else { $idn }); role = 'Application Mail.Send'
+                                                 app = "$($p.appId)"; principalRole = "$(if ($p.PSObject.Properties['role'] -and "$($p.role)".Trim()) { $p.role } else { 'engine' })"; scope = "$($wrong.CustomResourceScope)" })
+        }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimMailSendAssignmentNameBeside {
+    <#
+      PURE (ONE-SENDER-1 point C). Exchange role-assignment names are tenant-unique. While the OLD right is kept under -Name on
+      another scope, the new one is created as '<name without -MailSend>-<scope>-MailSend' (at most 64 characters); otherwise
+      -Name as it is.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [string]$ScopeName = '', [object[]]$Assignments = @())
+    $taken = @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Name)" -ieq $Name -and "$($_.CustomResourceScope)" -ine "$ScopeName" }).Count
+    if (-not $taken) { return $Name }
+    $base = ($Name -replace '-MailSend$', '')
+    $sc = ConvertTo-PimExoNamePart -Value $ScopeName
+    $n = "$base-$sc"
+    if ($n.Length -gt 55) { $n = $n.Substring(0, 55).TrimEnd('-') }
+    return "$n-MailSend"
+}
+
+function Resolve-PimMailSenderRetireDecision {
+    <#
+      PURE (ONE-SENDER-1 point C, owner via Invardia 2026-11-26: "keep the old sender and its right until EVERY sending
+      identity's own Graph probe passes for the NEW sender" -- Exchange's InScope is NOT enough, it said in-scope before
+      sending really worked). May the OLD rights (-Retire) go now?
+        -ProbeRead @{ ok; probe (pim.Settings MailSenderProbe); rfa (pim.Settings MailSenderProbeRfa); error }
+        -Sender     the NEW sender (pim.Settings MailSender); -Roles the sending identities' roles (engine, rfa);
+        -ChangedAtUtc when the new right was granted (the recorded state's 'at'); unknown -> the probe must be < 24 h old.
+      'retire' only when the record is READ, is FOR THE NEW SENDER, and EVERY role is verified (sender allowed + the probe
+      mailbox denied) by a probe taken AFTER the change. Anything else 'keep' (never removes blind); no old right -> 'none'.
+      Returns @{ action; reason; checks = @({ role; ok; why }) }.
+    #>
+    param([object[]]$Retire = @(), [AllowNull()][hashtable]$ProbeRead, [string]$Sender = '', [string[]]$Roles = @('engine'), [AllowNull()][object]$ChangedAtUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    $toUtc = { param($v) if ($v -is [datetime]) { $v.ToUniversalTime() } elseif ("$v".Trim()) { try { [datetime]::Parse("$v", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal) } catch { $null } } else { $null } }
+    $keep = { param($why, $checks = @()) @{ action = 'keep'; reason = "the OLD send right is KEPT: $why"; checks = @($checks) } }
+    if (-not @($Retire | Where-Object { $_ }).Count) { return @{ action = 'none'; reason = 'no old send right to retire'; checks = @() } }
+    if ($null -eq $ProbeRead -or -not $ProbeRead.ok) { return (& $keep "the probe record could not be read$(if ($ProbeRead -and "$($ProbeRead.error)".Trim()) { " ($($ProbeRead.error))" }) -- nothing is removed blind") }
+    $pr = $ProbeRead.probe; if ($pr -is [string]) { try { $pr = $pr | ConvertFrom-Json } catch { $pr = $null } }
+    $rf = $ProbeRead.rfa; if ($rf -is [string]) { try { $rf = $rf | ConvertFrom-Json } catch { $rf = $null } }
+    if ($null -eq $pr) { return (& $keep 'there is no probe record yet (pim.Settings MailSenderProbe) -- the daily probe or the first send writes it') }
+    $s = "$Sender".Trim().Trim('"')
+    $ps = "$(& $g $pr 'sender')".Trim()
+    if (-not $s -or $ps -ine $s) { return (& $keep "the probe record is for '$ps', not the new sender '$s'") }
+    $chg = & $toUtc $ChangedAtUtc
+    $fresh = { param($at) $t = & $toUtc $at; if ($null -eq $t) { return $false }; if ($chg) { return ($t -gt $chg) }; return (($NowUtc.ToUniversalTime() - $t).TotalHours -lt 24) }
+    $checks = New-Object System.Collections.Generic.List[object]
+    foreach ($role in @(@($Roles) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique)) {
+        $ok = $false; $why = ''
+        if ($role -eq 'rfa' -and $rf) {
+            # the broker's own answer (it alone signs in as its identity)
+            $rs = "$(& $g $rf 'sender')".Trim()
+            if ($rs -ine $s) { $why = "the broker's probe is for '$rs', not '$s'" }
+            elseif ("$(& $g $rf 'senderVerdict')" -ne 'allowed' -or "$(& $g $rf 'probeVerdict')" -ne 'denied') { $why = "the broker's probe is not verified (sender $(& $g $rf 'senderVerdict'), another mailbox $(& $g $rf 'probeVerdict'))" }
+            elseif (-not (& $fresh (& $g $rf 'at'))) { $why = "the broker's probe is from before the change" }
+            else { $ok = $true; $why = 'verified for the new sender after the change' }
+        } else {
+            $row = @(@(& $g $pr 'identities') | Where-Object { "$(& $g $_ 'role')" -ieq $role })[0]
+            if (-not $row) { $why = "no probe of the $role identity" }
+            elseif ("$(& $g $row 'restriction')" -ne 'verified') { $why = "the $role identity's probe is '$(& $g $row 'restriction')', not verified" }
+            elseif ("$(& $g $row 'sender')".Trim() -and "$(& $g $row 'sender')".Trim() -ine $s) { $why = "the $role identity's probe is for '$(& $g $row 'sender')'" }
+            elseif (-not (& $fresh $(if ("$(& $g $row 'at')".Trim() -or (& $g $row 'at') -is [datetime]) { & $g $row 'at' } else { & $g $pr 'at' }))) { $why = "the $role identity's probe is from before the change" }
+            else { $ok = $true; $why = 'verified for the new sender after the change' }
+        }
+        $checks.Add([pscustomobject]@{ role = $role; ok = $ok; why = $why })
+    }
+    $bad = @($checks | Where-Object { -not $_.ok })
+    if ($bad.Count -or -not $checks.Count) { return (& $keep ((@($bad | ForEach-Object { "$($_.role): $($_.why)" }) -join '; ')) $checks.ToArray()) }
+    return @{ action = 'retire'; reason = 'every sending identity''s own probe passes for the new sender (after the change) -- the old send right is retired'; checks = $checks.ToArray() }
+}
+
+function New-PimMailSenderRetirePlan {
+    <#
+      PURE (ONE-SENDER-1 point C). The retire steps from a FRESH read: each listed old assignment still there ->
+      Remove-ManagementRoleAssignment; then each old scope (never the current one) with NO role assignment of any kind left after
+      those removals -> Remove-ManagementScope. Returns @{ actions; kept = @({ name; remaining }); removedScopes }.
+    #>
+    param([object[]]$Retire = @(), [object[]]$Assignments = @(), [object[]]$Scopes = @(), [Parameter(Mandatory)][string]$CurrentScopeName)
+    $actions = New-Object System.Collections.Generic.List[object]
+    $gone = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Retire | Where-Object { $_ })) {
+        $hit = @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.CustomResourceScope)" -ieq "$($r.scope)" -and ("$($_.Identity)" -ieq "$($r.identity)" -or "$($_.Name)" -ieq "$($r.name)") })[0]
+        if (-not $hit) { continue }
+        $gone.Add($hit)
+        $idn = if ("$($hit.Identity)".Trim()) { "$($hit.Identity)".Trim() } else { "$($hit.Name)".Trim() }
+        $actions.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementRoleAssignment'; what = "retire the OLD sender's send right $idn ($($r.app) on scope $($r.scope))"; parameters = @{ Identity = $idn; Confirm = $false } })
+    }
+    $left = @(@($Assignments) | Where-Object { $null -ne $_ -and -not $gone.Contains($_) })
+    $cl = New-PimMailSenderOldScopeCleanupPlan -OldScopeNames @(@($Retire) | ForEach-Object { "$($_.scope)" }) -CurrentScopeName $CurrentScopeName -Scopes $Scopes -Assignments $left
+    foreach ($a in @($cl.actions)) { $actions.Add($a) }
+    return [pscustomobject]@{ actions = $actions.ToArray(); kept = @($cl.kept); removedScopes = @(@($cl.actions) | ForEach-Object { "$($_.parameters.Identity)" }) }
+}
+
+function Resolve-PimMailSenderChangeTime {
+    <#
+      PURE (ONE-SENDER-1, 3.1.69 review). The time of the sender change when THIS run did not make it and this computer has no
+      state file (a re-run from another computer): the stored pim.Settings 'MailSenderSetupCheck' -- its 'retire'.at, else its
+      'pendingSince' -- when it is for the same new sender (retire.sender = -ScopeSender, or the check's sender = -Sender).
+      This run changed something / a local state exists / nothing usable stored -> '' (keep what the caller has).
+    #>
+    param([AllowNull()][object]$StoredSetupCheck, [string]$Sender = '', [string]$ScopeSender = '', [bool]$ChangedThisRun = $false, [bool]$HaveLocalState = $false)
+    if ($ChangedThisRun -or $HaveLocalState -or $null -eq $StoredSetupCheck) { return '' }
+    $sc = $StoredSetupCheck; if ($sc -is [string]) { try { $sc = $sc | ConvertFrom-Json } catch { return '' } }
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    $iso = { param($v) if ($v -is [datetime]) { $v.ToUniversalTime().ToString('o') } else { "$v".Trim() } }
+    $rt = & $g $sc 'retire'
+    if ($rt -and "$(& $g $rt 'sender')".Trim() -ieq "$ScopeSender".Trim() -and (& $iso (& $g $rt 'at'))) { return (& $iso (& $g $rt 'at')) }
+    if ("$(& $g $sc 'sender')".Trim() -ieq "$Sender".Trim() -and (& $iso (& $g $sc 'pendingSince'))) { return (& $iso (& $g $sc 'pendingSince')) }
+    return ''
+}
+
+function Test-PimMailSenderRetireReadBack {
+    # PURE (ONE-SENDER-1 point C). After the retire: none of the retired assignments and none of the removed scopes may still be listed.
+    param([object[]]$Retire = @(), [string[]]$RemovedScopes = @(), [object[]]$Assignments = @(), [object[]]$Scopes = @())
+    $left = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Retire | Where-Object { $_ })) { if (@(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.CustomResourceScope)" -ieq "$($r.scope)" -and ("$($_.Identity)" -ieq "$($r.identity)" -or "$($_.Name)" -ieq "$($r.name)") }).Count) { $left.Add("assignment $($r.name) on $($r.scope)") } }
+    foreach ($n in @($RemovedScopes | Where-Object { "$_".Trim() })) { if (@(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -ieq $n }).Count) { $left.Add("scope $n") } }
+    return @{ ok = ($left.Count -eq 0); leftovers = @($left.ToArray()) }
+}
+
+function New-PimMailSenderPreviousState {
+    <#
+      PURE (ONE-SENDER-1 point C). The state a sender change leaves for later runs: the OLD rights to retire (-Retire,
+      Get-PimMailSenderRetireList -- KEPT until every identity's probe passes for the new sender), what this run's plan MOVES
+      (a repair of a scope that matched no mailbox), and the old scopes' filters (for a -Restore). -ChangedAtUtc keeps the
+      time of the change an earlier run recorded (a re-run that changes nothing must not reset it). Nothing to retire or move
+      -> $null. Returns @{ at; sender; newScope; retire; assignments (removed -- none since 2026-11-26, kept for older states);
+      moves; scopes = @({ name; filter }) }.
+    #>
+    [CmdletBinding()] param([object[]]$Plan = @(), [object[]]$Retire = @(), [object[]]$Scopes = @(), [string]$Sender = '', [string]$NewScope = '', [datetime]$NowUtc = [datetime]::UtcNow, [AllowNull()][object]$ChangedAtUtc)
+    $asg = @(@($Plan) | Where-Object { $_ -and $_.PSObject.Properties['previous'] -and $_.previous -and "$($_.previous.kind)" -eq 'assignment' } | ForEach-Object {
+        [ordered]@{ name = "$($_.previous.name)"; role = "$($_.previous.role)"; app = "$($_.previous.app)"; scope = "$($_.previous.scope)" } })
+    $mv = @(@($Plan) | Where-Object { $_ -and $_.PSObject.Properties['previous'] -and $_.previous -and "$($_.previous.kind)" -eq 'move' } | ForEach-Object {
+        [ordered]@{ identity = "$($_.previous.identity)"; fromScope = "$($_.previous.fromScope)"; toScope = "$($_.previous.toScope)" } })
+    $rt = @(@($Retire) | Where-Object { $_ } | ForEach-Object { [ordered]@{ identity = "$($_.identity)"; name = "$($_.name)"; role = "$($_.role)"; app = "$($_.app)"; principalRole = "$($_.principalRole)"; scope = "$($_.scope)" } })
+    if (-not $asg.Count -and -not $mv.Count -and -not $rt.Count) { return $null }
+    $names = @(@($asg | ForEach-Object { $_.scope }) + @($mv | ForEach-Object { $_.fromScope }) + @($rt | ForEach-Object { $_.scope }) | Where-Object { "$_".Trim() } | Sort-Object -Unique)
+    $sc = @(foreach ($n in $names) {
+        $s = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq $n })[0]
+        [ordered]@{ name = $n; filter = (Get-PimExoScopeFilterText $s) } })
+    $at = if ($ChangedAtUtc -is [datetime]) { $ChangedAtUtc.ToUniversalTime().ToString('o') } elseif ("$ChangedAtUtc".Trim()) { "$ChangedAtUtc".Trim() } else { $NowUtc.ToUniversalTime().ToString('o') }
+    return [ordered]@{ at = $at; sender = "$Sender".Trim(); newScope = "$NewScope".Trim(); retire = $rt; assignments = $asg; moves = $mv; scopes = $sc }
+}
+
+function New-PimMailSenderOldScopeCleanupPlan {
+    <#
+      PURE (ONE-SENDER-1 point C). AFTER the new scope read back InScope for every sending identity: which OLD scopes go.
+      -OldScopeNames = the scopes this run (or the recorded earlier run) took send rights from; -Assignments = a FRESH read of
+      Get-ManagementRoleAssignment (every assignee type -- a person's or another app's assignment on the scope keeps it);
+      -Scopes = a fresh Get-ManagementScope. A scope is removed ONLY when it exists, is not the current one, and NO role
+      assignment of any kind is left on it. Returns @{ actions = @({ cmdlet = 'Remove-ManagementScope'; parameters; what });
+      kept = @({ name; remaining }) }.
+    #>
+    [CmdletBinding()] param([string[]]$OldScopeNames = @(), [Parameter(Mandatory)][string]$CurrentScopeName, [object[]]$Scopes = @(), [object[]]$Assignments = @())
+    $actions = New-Object System.Collections.Generic.List[object]; $kept = New-Object System.Collections.Generic.List[object]
+    foreach ($n in @(@($OldScopeNames) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Sort-Object -Unique)) {
+        if ($n -ieq "$CurrentScopeName".Trim()) { continue }
+        if (-not @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -ieq $n }).Count) { continue }   # already gone
+        $left = @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.CustomResourceScope)" -ieq $n })
+        if ($left.Count) { $kept.Add([pscustomobject]@{ name = $n; remaining = $left.Count }); continue }
+        $actions.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementScope'; what = "remove the OLD scope $n (no role assignment is left on it; the new scope $CurrentScopeName reads back InScope)"
+                                        parameters = @{ Identity = $n; Confirm = $false } })
+    }
+    return [pscustomobject]@{ actions = $actions.ToArray(); kept = $kept.ToArray() }
+}
+
+function New-PimMailSenderRestorePlan {
+    <#
+      PURE (ONE-SENDER-1 point C). Put the OLD send right back from -Previous (New-PimMailSenderPreviousState), given what
+      exists NOW: the old scope again when it is gone (its recorded filter -- refused when none was recorded), each removed
+      assignment that is not there (New-ManagementRoleAssignment, same name, same app, same scope), each moved assignment
+      back to its old scope. Returns @{ actions; reason } (reason = cannot restore).
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Previous, [object[]]$Scopes = @(), [object[]]$Assignments = @())
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    if ($Previous -is [string]) { try { $Previous = $Previous | ConvertFrom-Json } catch { $Previous = $null } }
+    if ($null -eq $Previous) { return [pscustomobject]@{ actions = @(); reason = 'no previous state was recorded -- nothing to put back' } }
+    $actions = New-Object System.Collections.Generic.List[object]
+    # ONE-SENDER-1 (2026-11-26): the old rights are KEPT now ('retire', never removed before the probe passes) -- a restore
+    # normally finds them all in place and does nothing; one that is gone anyway (by hand) is put back like a removed one
+    $toKeep = @(@(& $g $Previous 'assignments') + @(& $g $Previous 'retire') | Where-Object { $_ })
+    $need = @(@($toKeep | ForEach-Object { "$(& $g $_ 'scope')" }) + @(@(& $g $Previous 'moves') | ForEach-Object { "$(& $g $_ 'fromScope')" }) | Where-Object { "$_".Trim() } | Sort-Object -Unique)
+    foreach ($n in $need) {
+        if (@(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -ieq $n }).Count) { continue }
+        $rec = @(@(& $g $Previous 'scopes') | Where-Object { "$(& $g $_ 'name')" -ieq $n })[0]
+        $flt = "$(& $g $rec 'filter')".Trim()
+        if (-not $flt) { return [pscustomobject]@{ actions = @(); reason = "the old scope $n is gone and its filter was not recorded -- it cannot be put back safely" } }
+        $actions.Add([pscustomobject]@{ cmdlet = 'New-ManagementScope'; what = "put the old scope $n back ($flt)"; parameters = @{ Name = $n; RecipientRestrictionFilter = $flt } })
+    }
+    foreach ($a in $toKeep) {
+        $nm = "$(& $g $a 'name')".Trim(); $sc = "$(& $g $a 'scope')".Trim(); $app = "$(& $g $a 'app')".Trim()
+        if (-not $nm -or -not $sc -or -not $app) { continue }
+        if (@(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Name)" -ieq $nm -and "$($_.CustomResourceScope)" -ieq $sc }).Count) { continue }
+        $actions.Add([pscustomobject]@{ cmdlet = 'New-ManagementRoleAssignment'; what = "put the old send right $nm back ($app on scope $sc)"
+                                        parameters = @{ App = $app; Role = $(if ("$(& $g $a 'role')".Trim()) { "$(& $g $a 'role')".Trim() } else { 'Application Mail.Send' }); CustomResourceScope = $sc; Name = $nm } })
+    }
+    foreach ($m in @(& $g $Previous 'moves')) {
+        $idn = "$(& $g $m 'identity')".Trim(); $from = "$(& $g $m 'fromScope')".Trim()
+        if (-not $idn -or -not $from) { continue }
+        $now = @(@($Assignments) | Where-Object { $null -ne $_ -and ("$($_.Identity)" -ieq $idn -or "$($_.Name)" -ieq $idn) })[0]
+        if ($now -and "$($now.CustomResourceScope)" -ieq $from) { continue }
+        $actions.Add([pscustomobject]@{ cmdlet = 'Set-ManagementRoleAssignment'; what = "move send right $idn back to its old scope $from"; parameters = @{ Identity = $idn; CustomResourceScope = $from } })
+    }
+    return [pscustomobject]@{ actions = $actions.ToArray(); reason = '' }
+}
+
+function Get-PimMailSenderPendingHours { 2 }
+
+function Resolve-PimMailSenderRestoreDecision {
+    <#
+      PURE (ONE-SENDER-1 point C, tightened 2026-11-26). What a run does with a recorded previous state, given today's in-scope
+      answer. The OLD right is never removed before every identity's probe passes (Resolve-PimMailSenderRetireDecision decides
+      THAT), so "restore" mostly means: keep the old right, check it is still all there, and tell Invardia.
+        'ok'      -- the new scope reads back InScope (whether the old right may go is the probe's decision, not this one);
+        'restore' -- NOT in scope and the change is older than the PENDING window (2 h), or -Restore was asked: make sure the
+                     old right is complete (New-PimMailSenderRestorePlan -- normally nothing to do) and tell Invardia;
+        'wait'    -- NOT in scope, still inside the window: PENDING, Exchange may still be applying it;
+        'none'    -- no previous state recorded.
+      Returns @{ action; reason; pendingSince; ageMinutes }.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Previous, [bool]$InScope, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$Restore, [double]$PendingHours = 2)
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    if ($Previous -is [string]) { try { $Previous = $Previous | ConvertFrom-Json } catch { $Previous = $null } }
+    if ($null -eq $Previous) {
+        if ($Restore) { return @{ action = 'none'; reason = '-Restore was asked, but no previous state is recorded -- nothing to put back'; pendingSince = ''; ageMinutes = 0 } }
+        return @{ action = 'none'; reason = 'no previous state recorded'; pendingSince = ''; ageMinutes = 0 }
+    }
+    $atRaw = & $g $Previous 'at'
+    # a state read back from JSON carries 'at' as a [datetime] already (ConvertFrom-Json)
+    $at = if ($atRaw -is [datetime]) { $atRaw.ToUniversalTime().ToString('o') } else { "$atRaw".Trim() }
+    $since = $null
+    if ($at) { try { $since = [datetime]::Parse($at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal) } catch { $since = $null } }
+    $age = if ($since) { [Math]::Round(($NowUtc.ToUniversalTime() - $since).TotalMinutes, 0) } else { [double]::PositiveInfinity }
+    if ($Restore) { return @{ action = 'restore'; reason = '-Restore was asked: the old send right is kept (anything of it that is gone is put back)'; pendingSince = $at; ageMinutes = $age } }
+    if ($InScope) { return @{ action = 'ok'; reason = 'the new scope reads back InScope -- the old right stays until every identity''s probe passes for the new sender'; pendingSince = $at; ageMinutes = $age } }
+    if ($age -ge ($PendingHours * 60)) { return @{ action = 'restore'; reason = "the new scope has not read back InScope within $PendingHours h of the change ($at) -- the old send right stays in place (nothing was removed)"; pendingSince = $at; ageMinutes = $age } }
+    return @{ action = 'wait'; reason = "the new scope has not read back InScope yet ($age min since the change, the window is $PendingHours h)"; pendingSince = $at; ageMinutes = $age }
+}
+
+function New-PimMailSenderPendingCheck {
+    <#
+      PURE (ONE-SENDER-1 point C). The record a PENDING run stores in pim.Settings 'MailSenderSetupCheck': NOT confirmed (ok
+      $false -- Get-PimMailSetupCheckVerdict never grants on it), inScope 'pending', when the change was made, and the
+      PREVIOUS state a re-run uses to put the old send right back if the new scope does not read back within 2 h.
+    #>
+    param([string]$Sender, [string]$ScopeName, [object[]]$Principals = @(), [AllowNull()][object]$Previous, [string]$By = '', [string]$InScopeResource = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $ids = @(@($Principals) | Where-Object { $_ -and ("$($_.objectId)".Trim() -or "$($_.appId)".Trim()) } | ForEach-Object { [ordered]@{ kind = "$($_.kind)"; role = "$(if ($_.PSObject.Properties['role']) { $_.role } else { 'engine' })"; appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim() } })
+    return [ordered]@{ ok = $false; scopedMailSend = 'pending'; inScope = 'pending'; inScopeResource = "$InScopeResource".Trim(); sender = "$Sender".Trim(); scope = "$ScopeName".Trim(); identities = $ids
+                       pendingSince = $(if ($Previous -and "$($Previous.at)".Trim()) { "$($Previous.at)" } else { $NowUtc.ToUniversalTime().ToString('o') })
+                       previous = $Previous; at = $NowUtc.ToUniversalTime().ToString('o'); by = "$By".Trim(); source = 'Initialize-PimMailSender' }
+}
+
+function Get-PimMailSenderPreviousStatePath {
+    # ONE-SENDER-1 point C: where a run keeps the previous state on THIS computer (next to its transcripts), per tenant
+    # cross-platform (the Linux runner, Cloud Shell): [IO.Path] only -- Join-Path resolves PowerShell drives, and a 'C:' root
+    # does not exist there; the temp folder comes from .NET ($env:TEMP / TMPDIR / /tmp)
+    param([Parameter(Mandatory)][string]$TenantId, [string]$Root = '')
+    $tmp = [IO.Path]::GetTempPath(); if (-not "$tmp".Trim()) { $tmp = "$env:TEMP" }
+    $base = if ("$Root".Trim()) { "$Root".Trim() } else { [IO.Path]::Combine($tmp, 'pim-manager-logs') }
+    return [IO.Path]::Combine($base, ("Initialize-PimMailSender-previous-{0}.json" -f (("$TenantId".Trim()) -replace '[^0-9A-Za-z-]', '')))
+}
+
 function New-PimMailSenderExoPlan {
     <#
       WHAT to create in Exchange, given what already exists. Returns an ordered list of
@@ -439,27 +772,19 @@ function New-PimMailSenderExoPlan {
                    "sender's identities to it. Give this environment its own scope (-ScopeName, or leave it out: the default is '<mailbox>-SendScope').")
         }
     }
+    # ONE-SENDER-1 point C, TIGHTENED (owner via Invardia 2026-11-26): the same identity's send right on ANOTHER of our sender
+    # scopes (an OLD sender -- §94's wrong-mailbox grant) is NO LONGER removed here. The run that grants the new right KEEPS
+    # the old one; it is retired by a LATER run, only when every sending identity's own Graph probe passes for the NEW sender
+    # (Get-PimMailSenderRetireList -> Resolve-PimMailSenderRetireDecision -> New-PimMailSenderRetirePlan).
+    $retire = @(Get-PimMailSenderRetireList -ExoServicePrincipals $ExoServicePrincipals -Scopes $Scopes -Assignments $Assignments -Principals $Principals -Sender $Sender -ScopeName $ScopeName)
     foreach ($p in @($Principals)) {
         $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $ExoServicePrincipals -AppId $p.appId -ObjectId $p.objectId
-        # §94: the same identity's send right on ANOTHER of our sender scopes is the wrong-mailbox grant above -- remove it
-        # first (assignment names are tenant-unique, so the right one could not be created beside it).
-        # 2026-10-31 (EntraPolicySuite, internal): Exchange's REST Get-ManagementScope can answer an EMPTY
-        # RecipientRestrictionFilter for every scope. Removed only when that scope's filter is READ and names ANOTHER
-        # mailbox -- an unread filter may be this sender's own scope under an older name (Exchange then refuses the
-        # create and the run adopts it), and removing a working send right on a guess is never the fix.
-        $otherMailbox = { param($n) $sc = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq "$n" })[0]
-            $f = "$(if ($sc) { $sc.RecipientRestrictionFilter })"; ($f.Trim() -and $f.IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -lt 0) }
-        foreach ($wrong in @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and
-                    "$($_.CustomResourceScope)" -ne $ScopeName -and ((Test-PimLegacyMailSenderScopeName -Name "$($_.CustomResourceScope)") -or "$($_.CustomResourceScope)" -like '*-SendScope') -and
-                    (& $otherMailbox "$($_.CustomResourceScope)") } |
-                    Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count })) {
-            $idn = if ("$($wrong.Identity)".Trim()) { "$($wrong.Identity)".Trim() } else { "$($wrong.Name)".Trim() }
-            $plan.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementRoleAssignment'; what = "remove $($p.kind) $($p.appId)'s send right on the OTHER scope $($wrong.CustomResourceScope) ($idn)"
-                                         parameters = @{ Identity = $idn; Confirm = $false } })
-        }
         if (-not @(Select-PimExoMailSendAssignment -Assignments $Assignments -ScopeName $ScopeName -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count) {
-            $plan.Add([pscustomobject]@{ cmdlet = 'New-ManagementRoleAssignment'; what = "scoped send right for $($p.kind) $($p.appId)"
-                                         parameters = @{ App = $p.appId; Role = 'Application Mail.Send'; CustomResourceScope = $ScopeName; Name = $p.assignmentName } })
+            # assignment names are tenant-unique: while the old right is KEPT under the same name, the new one gets the scope in
+            # its name (Get-PimMailSendAssignmentNameBeside)
+            $nm = Get-PimMailSendAssignmentNameBeside -Name $p.assignmentName -ScopeName $ScopeName -Assignments $Assignments
+            $plan.Add([pscustomobject]@{ cmdlet = 'New-ManagementRoleAssignment'; what = "scoped send right for $($p.kind) $($p.appId)$(if (@($retire | Where-Object { $_.app -eq $p.appId }).Count) { ' (the OLD sender''s right is kept until the probe passes)' })"
+                                         parameters = @{ App = $p.appId; Role = 'Application Mail.Send'; CustomResourceScope = $ScopeName; Name = $nm } })
         }
     }
     # Removal of the SPN's assignment is OPT-IN, and never when the SPN is itself a sender.
@@ -698,7 +1023,10 @@ function New-PimMailSenderSetupCheck {
     # that merely exists is not a proof (a customer's scope matched NO mailbox while every object existed).
     param([bool]$Confirmed, [string]$Sender, [string]$ScopeName, [object[]]$Principals = @(), [string]$By = '', [string]$InScopeResource = '', [datetime]$NowUtc = [datetime]::UtcNow)
     if (-not $Confirmed -or -not "$Sender".Trim() -or -not "$ScopeName".Trim() -or -not "$InScopeResource".Trim()) { return $null }
-    $ids = @(@($Principals) | Where-Object { $_ -and ("$($_.objectId)".Trim() -or "$($_.appId)".Trim()) } | ForEach-Object { [ordered]@{ kind = "$($_.kind)"; appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim() } })
+    # ONE-SENDER-1 point B: + role (engine | rfa) -- the check lists EVERY sending identity, the RFA broker's too
+    $ids = @(@($Principals) | Where-Object { $_ -and ("$($_.objectId)".Trim() -or "$($_.appId)".Trim()) } | ForEach-Object { [ordered]@{ kind = "$($_.kind)"; role = "$(if ($_.PSObject.Properties['role'] -and "$($_.role)".Trim()) { $_.role } else { 'engine' })"
+                                                                                                                                  roles = @(if ($_.PSObject.Properties['roles'] -and @($_.roles).Count) { @($_.roles) } else { @("$(if ($_.PSObject.Properties['role'] -and "$($_.role)".Trim()) { $_.role } else { 'engine' })") })
+                                                                                                                                  appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim() } })
     if (-not $ids.Count) { return $null }
     return [ordered]@{ ok = $true; scopedMailSend = 'confirmed'; inScope = 'confirmed'; inScopeResource = "$InScopeResource".Trim(); sender = "$Sender".Trim(); scope = "$ScopeName".Trim(); identities = $ids
                        at = $NowUtc.ToUniversalTime().ToString('o'); by = "$By".Trim(); source = 'Initialize-PimMailSender' }

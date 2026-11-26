@@ -1,0 +1,5 @@
+{"version":"3.1.64","date":"2026-11-24","type":"security",
+ "summary":"Support fixes wait for your approval, and updates come only as signed releases.",
+ "new":[],
+ "fixes":[{"title":"Support fixes wait for your approval","text":"Fixes by Invardia support now wait on the Approvals page until an Admin or SuperAdmin of your environment approves each one. If a SuperAdmin chose to apply them automatically, that choice stays."},
+          {"title":"Signed updates only","text":"PIM Manager and the hybrid worker now take updates only as signed releases from Invardia. The old unsigned source is removed; an installation still set to it refuses to update and says what to set."}]}

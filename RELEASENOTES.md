@@ -13,13 +13,41 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
-## 3.1.62.1 -- 2026-11-23
+## 3.1.69 -- 2026-11-26
 
-- Security update: PIM Manager's base images moved to Microsoft's current .NET 10.0.15 images (automatic image patch of 3.1.62); no change in behaviour
+- One mail sender for every part of PIM Manager with a daily check; admins in role-assignable groups can be disabled again; a Security image release overview page; the Environment report is now System Documentation.
+
+## 3.1.68 -- 2026-11-25
+
+- Access request e-mails now show the company name, the admin account to sign in with, the facts, the next steps and one button to the right page. Microsoft system roles that cannot be given to a group show as Not delegable, not as a gap.
+
+## 3.1.67 -- 2026-11-25
+
+- Add to pending changes now stages a new admin at once. PIM checks the name when the change is applied, and never creates over or changes an existing account that PIM did not create.
+- With the RFA portal on, a disabled admin can ask to be enabled without any setting, and an owner of the admin's department approves. Off or Auto can still be chosen.
+- The RFA mode, the address the PIN is sent to and the hours an admin may ask for are now set in the Manager. A department with no owner is flagged.
+
+## 3.1.66 -- 2026-11-25
+
+- When PIM Manager looks up a name it has not seen yet, for example in New admin account, the engine now answers it at once, even while long jobs run. Before, the lookup could wait behind them, which in a large tenant could take a long time.
+
+## 3.1.65 -- 2026-11-25
+
+- On a single-tenant installation, Settings > Features & edition now shows MSP managed-tenant updates as off and locked, with the status "Not used on a single tenant". Managing and managed tenants are unchanged.
+- New admin account, an existing account and the other one-off directory checks now wait up to about two minutes for PIM's directory lookup, instead of stopping after 30 seconds with "PIM is still looking this up in the directory".
+
+## 3.1.64 -- 2026-11-24
+
+- **Signed updates only.** The unsigned storage-container update source has been removed (`-UpdateSource pim-src`, MSP `updater.source: pim-src`, hybrid worker `-UpdateSource Blob` / `-SourceContainerUrl`, and `-SourceContainerId` on `Deploy-PimHybridWorker` / `Grant-PimHybridWorkerAccess`). An updater or hybrid worker still configured for it refuses to update and says what to set. Use `-UpdateSource Invardia` (Pro) or `InvardiaCommunity` (Community). The hybrid worker no longer needs Storage Blob Data Reader.
+- **Support fixes wait for your approval by default.** Fixes by Invardia support now wait on the Approvals page until an Admin or SuperAdmin of your environment approves each one. An environment that never chose a mode moves to this default. An environment where a SuperAdmin chose "Apply automatically" keeps that choice.
+
+## 3.1.63 -- 2026-11-24
+
+- IMAGE-30MIN-1: the 15-minute update check applies a newer image-only (security) build of the running release at once, without waiting for the nightly update; a code release still waits; running jobs are never stopped.
 
 ## 3.1.62 -- 2026-11-23
 
-- DOC-RIGHTS-1: the environment report document prints only PIM Manager's own identities and the Invardia Support app, and only the rights they hold as declared, with the reason; a missing, extra or unreadable right goes to the permission health check, never into the document. The .NET sdk base image moves to its newest digest.
+- DOC-RIGHTS-1: the System Documentation document prints only PIM Manager's own identities and the Invardia Support app, and only the rights they hold as declared, with the reason; a missing, extra or unreadable right goes to the permission health check, never into the document. The .NET sdk base image moves to its newest digest.
 
 ## 3.1.61 -- 2026-11-23
 
@@ -453,7 +481,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 3.0.40 -- 2026-11-05
 
-- PIM Manager shows the environment name you keep in Invardia (mail subjects, exports, the environment report, the header and the browser tab), and keeps the last name it read when Invardia cannot be reached; a new installation gives Invardia support read-only database access only -- admin rights only during an open support session, never as a standing member of the SQL admin group or an owner of PIM's app registrations.
+- PIM Manager shows the environment name you keep in Invardia (mail subjects, exports, the System Documentation, the header and the browser tab), and keeps the last name it read when Invardia cannot be reached; a new installation gives Invardia support read-only database access only -- admin rights only during an open support session, never as a standing member of the SQL admin group or an owner of PIM's app registrations.
 
 ## 3.0.39 -- 2026-11-05
 
@@ -677,7 +705,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.664 -- 2026-10-22
 
-- A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation and in the environment report -- the size check now leaves room for the sign-in front, as every resize already did, and the report reads the PIM Manager container instead of the sign-in front.
+- A PIM Manager behind the sign-in front is no longer reported as undersized at the end of an installation and in the System Documentation -- the size check now leaves room for the sign-in front, as every resize already did, and the report reads the PIM Manager container instead of the sign-in front.
 
 ## 2.4.663 -- 2026-10-21
 
@@ -801,7 +829,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## 2.4.633 -- 2026-10-15
 
-- Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the environment report expects the web app to run without schema rights
+- Settings > Documentation: the product documentation now ships inside the portal (also on private-network installs); least-privilege SQL access (per-component roles through a signed procedure) converges on every update; the System Documentation expects the web app to run without schema rights
 
 ## 2.4.632 -- 2026-10-14
 
@@ -1353,7 +1381,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   and only ever raises the size. A size you set yourself (`PIM_Bootstrap_Cpu_Tick`, `PIM_Bootstrap_Memory_Tick`,
   `PIM_Bootstrap_ReplicaTimeout_Tick`) wins. If the job ran out of memory or hit its time limit since it was last sized,
   the next update raises it one size and its time limit one step, up to 6 hours. The counts and the size are recorded on
-  the job and shown in the environment report. The end-of-install check warns when the job is smaller than the tenant
+  the job and shown in the System Documentation. The end-of-install check warns when the job is smaller than the tenant
   needs and gives you the command that fixes it.
 - **The database is never Basic, and every Standard database has a 250 GB maximum size.** The main database is S0
   (Standard) at minimum, for every edition: a Basic database is raised to S0 at install and on every update, and no other
@@ -1370,7 +1398,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   https://invardia.com/support/pim/Set-PimSqlTier.ps1.
 - **"Out of memory" is now a named failure.** An engine run that ran out of memory is reported as "The engine job ran out
   of memory", with the command that raises the job to the next size. It was reported as unclassified.
-- **The environment report reads the licence expiry date the same way on every server.** The "licence expires soon"
+- **The System Documentation reads the licence expiry date the same way on every server.** The "licence expires soon"
   finding parsed the date with the server's regional format; it now reads it independent of the language settings.
 - **Upgrade note:** the first update to 2.4.539 raises `ca-pim-tick` on a tenant with 5,000 or more users, groups and
   service principals, and raises a Basic database to S0. A larger job size costs a little more while the job runs.
@@ -1385,7 +1413,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   extra, that carries your naming prefix, whose name is unique, that is not defined in PIM and that has no break-glass
   account as a member. Who queued it, who committed it and when are in the audit log.
 - **The installation gives PIM Manager read access to its own resource group.** The install (single tenant, managing and
-  managed tenant) grants the PIM Manager's managed identity Reader on the PIM resource group only, so the Environment report
+  managed tenant) grants the PIM Manager's managed identity Reader on the PIM resource group only, so the System Documentation
   can show the architecture; the end-of-install check verifies it and grants it when missing (a warning with the exact
   command if the installer may not). The security pack and the script documentation list the new permission.
 - **A new duplicate group tag is refused.** Committing a group definition whose tag another definition already uses is
@@ -1478,7 +1506,7 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - **Export PDF** next to Print on every report and list with an export bar: logo, summary, page numbers, date and tenant.
 - **A daily reminder while Get Started is not complete**: the open required steps, why each matters and a button to each,
   to the alert recipients; it stops by itself when the required steps are done.
-- **Environment report (Operations > Environment report).** An architecture and security report of your PIM Manager environment, read live:
+- **System Documentation (Operations > System Documentation).** An architecture and security report of your PIM Manager environment, read live:
   every identity it uses by name and id, each identity's permissions marked expected / missing / extra against what PIM Manager
   declares, the Azure resources and their network exposure, features and security settings, data flows, change history and
   findings with the fix. Export it as a print-ready PDF (cover, contents, page numbers, diagrams) or as JSON. Admin and SuperAdmin

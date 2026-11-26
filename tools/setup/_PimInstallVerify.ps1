@@ -343,8 +343,14 @@ function Get-PimInstallVerifyRows {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
                 $miss = @(Get-PimFactValue $f 'missing' | Where-Object { "$_".Trim() })
                 $n = [int](Get-PimFactValue $f 'required')
-                if ($miss.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' "$($miss.Count) of $n missing: $($miss -join ', ')" (& $fx $id))) }
-                else { $rows.Add((New-PimInstallVerifyRow $id 'ok' "all $n required app roles held")) }
+                # ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role Privileged Authentication Administrator is part of this
+                # line. Only a fact that READ the roles (dirRolesReadable) can report it missing; an older / unread fact never does.
+                $dirRead = ((Get-PimFactValue $f 'dirRolesReadable') -eq $true)
+                $dirMiss = @(if ($dirRead) { @(Get-PimFactValue $f 'dirRolesMissing' | Where-Object { "$_".Trim() }) })
+                $dirText = if ($dirMiss.Count) { "the Entra role $($dirMiss -join ', ') is missing -- PIM cannot disable or re-enable an admin that is a member of a role-assignable group" } else { '' }
+                if ($miss.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' ("$($miss.Count) of $n missing: $($miss -join ', ')" + $(if ($dirText) { "; $dirText" })) (& $fx $id))) }
+                elseif ($dirMiss.Count) { $rows.Add((New-PimInstallVerifyRow $id 'failed' "all $n required app roles held, but $dirText" (& $fx $id))) }
+                else { $rows.Add((New-PimInstallVerifyRow $id 'ok' ("all $n required app roles held" + $(if ($dirRead) { '; the Entra role Privileged Authentication Administrator is held' })))) }
             }
             'engine-root-reader' {
                 if (-not $readable -and -not [bool](Get-PimFactValue $f 'refused')) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
@@ -359,12 +365,12 @@ function Get-PimInstallVerifyRows {
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NO Reader at the tenant root -- Discovery cannot see management groups or subscriptions until a Global Administrator runs the command' (& $fx $id))) }
             }
             'manager-rg-reader' {
-                # PIM 100.22 (b) (owner 2026-10-09): the Manager's Reader on the PIM resource group ONLY -- the Environment report
+                # PIM 100.22 (b) (owner 2026-10-09): the Manager's Reader on the PIM resource group ONLY -- the System Documentation
                 # reads the architecture with it. Never a stop (a report, not the engine): missing after the one repair attempt =
                 # a WARNING with the exact command; not readable = a WARNING too.
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
                 if ((Get-PimFactValue $f 'reader') -eq $true) { $rows.Add((New-PimInstallVerifyRow $id $okState "Reader at $(Get-PimFactValue $f 'scope')$(if ($repaired) { ' (granted by the verify)' })" '' $false)) }
-                else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NO Reader on the PIM resource group -- the Environment report cannot read the architecture until it is granted (resource group only, never wider)' (& $fx $id) $false)) }
+                else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NO Reader on the PIM resource group -- the System Documentation cannot read the architecture until it is granted (resource group only, never wider)' (& $fx $id) $false)) }
             }
             'engine-first-run' {
                 # Informational follow-up, never a stop: right after an install the tick may simply not have run yet (5 min).

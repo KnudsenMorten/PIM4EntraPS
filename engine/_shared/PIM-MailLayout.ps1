@@ -1430,3 +1430,122 @@ function New-PimMailDocument {
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + (ConvertTo-PimMailText $Title) + $(if ($envName) { ' - ' + (ConvertTo-PimMailText $envName) } else { '' }) + '</title><style>' + $css + '</style></head>' +
             '<body><div class="pim-report"><div class="pim-report-printhint">Print this page and choose <b>Save as PDF</b> to keep it as a PDF (page numbers, date and tenant are added on every page).</div>' + $inner + '</div></body></html>')
 }
+
+# =====================================================================================================================
+# RFA-MAIL-2 (owner 2026-11-25: "not impressed by all the emails going out ... doesn't contain fx company name and the
+# wordings are not good. also missing fx admin account info for login ... improve the layout and wording and make it
+# professional"). The ONE layout of every mail of the request-for-authorization flow: the PIN, "sign in with your admin
+# account", the owner's "approve or deny", the requester's enabled / ending / ended / expired / denied / ended-early, and
+# the owners' "enabled automatically". These mails go to people OUTSIDE IT (a consultant, a department owner), so they
+# lead with the COMPANY (not the product), name the admin account to sign in with, list the facts, number the next
+# steps and carry ONE button to the right page (the access portal for the requester, Access requests in PIM Manager for
+# an owner). The header is the MAIL-ENV first line (class pim-env-first: company + environment) and the footer is the
+# MAIL-1 footer (class pim-env-footer: environment, tenant, version) -- so the chokepoint adds neither a second time.
+# No <table> (SUP-2026-00083). Every value is HTML-encoded here; callers pass plain text only.
+# =====================================================================================================================
+function New-PimRfaMailHtml {
+    <#
+      PURE. -Model (hashtable):
+        company        the organisation's name (pim.Settings CompanyName; the caller falls back to the environment / tenant)
+        environment    the environment's display name; tenantName; tenantId; version   (the small footer line)
+        kicker         the small line under the company ('Access request portal', 'Access request', ...)
+        headline       the heading
+        intro          1-2 sentences
+        code           a one-time PIN (shown large) -- optional; codeNote under it
+        facts          @( @{ label; value; strong } ... ) -- an empty value is left out
+        stepsTitle     default 'What to do next'; steps = @( 'step', ... ) numbered
+        button         @{ url; label } -- dropped when the url is not https
+        notice         the closing safety line ("Did not ask for this? ...")
+        supportEmail   "Questions? Contact <address>" (else "your IT department")
+        whenText       when the mail was made; reference = a request id for support
+      Returns the HTML fragment for the template's <body>.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Model)
+    $b = Get-PimMailBrand
+    $e = { param($v) ConvertTo-PimMailText $v }
+    $f = $b.font
+    $co = ("$($Model.company)" -replace '\s+', ' ').Trim(); if (-not $co) { $co = 'Your organisation' }
+    $envN = ("$($Model.environment)" -replace '\s+', ' ').Trim()
+    if ((Get-Command Test-PimMailTenantIdLabel -ErrorAction SilentlyContinue) -and (Test-PimMailTenantIdLabel $envN)) { $envN = '' }
+    $kick = "$($Model.kicker)".Trim(); if (-not $kick) { $kick = 'Privileged access' }
+    $o = New-Object System.Text.StringBuilder
+    [void]$o.Append('<div class="pim-rfa-mail" style="background:#f3f5f8;padding:24px 12px;">')
+    [void]$o.Append('<div style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid ' + $b.border + ';border-radius:8px;overflow:hidden;">')
+    # header = the MAIL-ENV first line: the company first, then what this is and the environment
+    $envPart = if ($envN -and $envN -ine $co) { ' &middot; ' + (& $e $envN) } else { '' }
+    [void]$o.Append('<div class="pim-env-first" style="background:' + $b.ink + ';padding:18px 24px;font-family:' + $f + ';">' +
+        '<div style="font-size:19px;line-height:24px;font-weight:600;color:#ffffff;">' + (& $e $co) + '</div>' +
+        '<div style="font-size:12.5px;line-height:18px;color:' + $b.wordmark + ';margin-top:2px;">' + (& $e $kick) + $envPart + '</div></div>')
+    [void]$o.Append('<div style="padding:24px;font-family:' + $f + ';color:' + $b.text + ';font-size:15px;line-height:22px;">')
+    [void]$o.Append('<h1 style="margin:0 0 10px 0;font-size:20px;line-height:26px;font-weight:600;color:' + $b.heading + ';font-family:' + $f + ';">' + (& $e $Model.headline) + '</h1>')
+    if ("$($Model.intro)".Trim()) { [void]$o.Append('<p style="margin:0 0 16px 0;">' + (& $e $Model.intro) + '</p>') }
+    if ("$($Model.code)".Trim()) {
+        $cn = if ("$($Model.codeNote)".Trim()) { '<div style="margin-top:6px;font-size:13px;color:' + $b.muted + ';">' + (& $e $Model.codeNote) + '</div>' } else { '' }
+        [void]$o.Append('<div style="margin:0 0 16px 0;padding:16px;background:' + $b.surfaceAlt + ';border:1px solid ' + $b.border + ';border-radius:6px;text-align:center;">' +
+            '<div style="font-family:Consolas,Menlo,monospace;font-size:32px;line-height:38px;letter-spacing:8px;font-weight:700;color:' + $b.heading + ';">' + (& $e $Model.code) + '</div>' + $cn + '</div>')
+    }
+    $facts = @(@($Model.facts) | Where-Object { $_ -and "$($_.value)".Trim() })
+    if ($facts.Count) {
+        [void]$o.Append('<div style="margin:0 0 18px 0;padding:4px 16px;border:1px solid ' + $b.grid + ';border-radius:6px;">')
+        $i = 0
+        foreach ($x in $facts) {
+            $line = if ($i -lt $facts.Count - 1) { 'border-bottom:1px solid ' + $b.grid + ';' } else { '' }
+            $bold = if ($x.strong) { 'font-weight:600;' } else { '' }
+            [void]$o.Append('<div style="padding:9px 0;' + $line + '"><div style="font-size:12px;line-height:16px;color:' + $b.muted + ';text-transform:uppercase;letter-spacing:.4px;">' + (& $e $x.label) + '</div>' +
+                '<div style="font-size:15px;line-height:21px;color:' + $b.heading + ';' + $bold + 'word-break:break-word;">' + (& $e $x.value) + '</div></div>')
+            $i++
+        }
+        [void]$o.Append('</div>')
+    }
+    $steps = @(@($Model.steps) | Where-Object { "$_".Trim() })
+    if ($steps.Count) {
+        $st = "$($Model.stepsTitle)".Trim(); if (-not $st) { $st = 'What to do next' }
+        [void]$o.Append('<div style="margin:0 0 6px 0;font-weight:600;color:' + $b.heading + ';">' + (& $e $st) + '</div>')
+        if ($steps.Count -eq 1) { [void]$o.Append('<p style="margin:0 0 18px 0;">' + (& $e $steps[0]) + '</p>') }
+        else {
+            [void]$o.Append('<ol style="margin:0 0 18px 0;padding-left:22px;">')
+            foreach ($s in $steps) { [void]$o.Append('<li style="margin:0 0 6px 0;">' + (& $e $s) + '</li>') }
+            [void]$o.Append('</ol>')
+        }
+    }
+    if ($Model.button -and (Test-PimMailLinkUrl -Url "$($Model.button.url)")) {
+        $lbl = "$($Model.button.label)".Trim(); if (-not $lbl) { $lbl = 'Open' }
+        [void]$o.Append('<div style="margin:4px 0 20px 0;">' + (New-PimMailButton -Url "$($Model.button.url)" -Label $lbl) + '</div>')
+    }
+    if ("$($Model.notice)".Trim()) {
+        [void]$o.Append('<p style="margin:0;padding:10px 12px;background:' + $b.surfaceAlt + ';border-left:3px solid ' + $b.border + ';font-size:13px;line-height:19px;color:' + $b.muted + ';">' + (& $e $Model.notice) + '</p>')
+    }
+    [void]$o.Append('</div>')
+    # footer = the MAIL-1 footer: who sent it, where to ask, then environment / tenant / reference / version (small)
+    $sup = "$($Model.supportEmail)".Trim()
+    $ask = if ($sup -match '^[^@\s<>"]+@[^@\s<>"]+\.[^@\s<>"]+$') { 'Questions? Contact <a href="mailto:' + (& $e $sup) + '" style="color:' + $b.accent + ';">' + (& $e $sup) + '</a>.' } else { 'Questions? Contact your IT department.' }
+    $ref = New-Object System.Collections.Generic.List[string]
+    if ($envN) { $ref.Add('Environment: ' + (& $e $envN)) }
+    $tn = "$($Model.tenantName)".Trim(); if ($tn -and $tn -ine $envN) { $ref.Add('Tenant: ' + (& $e $tn)) }
+    if ("$($Model.tenantId)".Trim()) { $ref.Add('Tenant id: ' + (& $e "$($Model.tenantId)".Trim())) }
+    if ("$($Model.reference)".Trim()) { $ref.Add('Reference: ' + (& $e "$($Model.reference)".Trim())) }
+    if ("$($Model.version)".Trim()) { $ref.Add('PIM Manager ' + (& $e "$($Model.version)".Trim())) }
+    if ("$($Model.whenText)".Trim()) { $ref.Add('Sent ' + (& $e "$($Model.whenText)".Trim())) }
+    $refLine = if ($ref.Count) { '<br>' + ($ref.ToArray() -join ' &middot; ') } else { '' }
+    [void]$o.Append('<div class="pim-env-footer" style="padding:14px 24px;border-top:1px solid ' + $b.grid + ';background:' + $b.surfaceAlt + ';font-family:' + $f + ';font-size:12px;line-height:18px;color:' + $b.muted + ';">' +
+        'This message was sent by the privileged access management of ' + (& $e $co) + '. ' + $ask + $refLine + '</div>')
+    [void]$o.Append('</div></div>')
+    return $o.ToString()
+}
+
+function ConvertTo-PimRfaMailModelFromTokens {
+    <#
+      PURE. RFA-MAIL-2: a sender that passes only the old rfa-notice tokens (Headline / Detail / Action / PortalUrl, e.g.
+      the company review mails) gets the same layout: Headline = the heading, Detail = the text (its HTML tags dropped --
+      the builder encodes), Action = the one next step, PortalUrl = the button.
+    #>
+    param([hashtable]$Tokens = @{})
+    $plain = { param($v) [System.Net.WebUtility]::HtmlDecode(([regex]::Replace("$v", '<[^>]+>', ''))).Trim() }
+    $u = "$($Tokens['RfaButtonUrl'])".Trim(); if (-not $u) { $u = "$($Tokens['PortalUrl'])".Trim() }
+    return @{
+        company = "$($Tokens['CompanyName'])"; environment = "$($Tokens['EnvironmentName'])"; tenantName = "$($Tokens['TenantName'])"
+        kicker = 'Access request portal'; headline = (& $plain $Tokens['Headline']); intro = (& $plain $Tokens['Detail'])
+        steps = @(& $plain $Tokens['Action']); button = $(if ($u) { @{ url = $u; label = 'Open the access portal' } } else { $null })
+        supportEmail = "$($Tokens['SupportEmail'])"; whenText = "$($Tokens['WhenUtc'])"
+    }
+}

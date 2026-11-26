@@ -1594,8 +1594,10 @@
     <div class="tab" data-tab="jobschedule" title="When each scheduled job runs, in plain words — which area it covers, whether it is on, and how often. Mail jobs included.">Job schedule</div>
     <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization, operational policy, alerting, permission template packs, email controls, and instances.">Settings</div>
     <!-- §12.8 ENV-REPORT-1: the architecture & security report of this environment (Admin / SuperAdmin), exportable to PDF. -->
-    <div class="tab" data-tab="envreport" title="The architecture and security report of this environment: identities, permissions (expected / missing / extra), Azure resources and network exposure, features, data flows, change history and findings -- read live, exportable to PDF and JSON (Admin / SuperAdmin).">Environment report</div>
+    <div class="tab" data-tab="envreport" title="The architecture and security report of this environment: identities, permissions (expected / missing / extra), Azure resources and network exposure, features, data flows, change history and findings -- read live, exportable to PDF and JSON (Admin / SuperAdmin).">System Documentation</div>
     <div class="tab" data-tab="support" title="A one-click connectivity and permission self-check (SQL / Graph / ARM) plus a sanitized diagnostics bundle to hand off when you need help.">Support</div>
+    <!-- SEC-IMAGE-OVERVIEW-1 (owner 2026-11-25): PIM's own security image releases, read from Invardia by the server (read-only). -->
+    <div class="tab" data-tab="secimagereleases" title="PIM's own security image releases (image-only base-image patches): when each was detected, when work started, the first time on ring 0, 1, 2 and 3, and the hours between the recorded steps. A missing time shows &quot;not recorded&quot; -- never a guess.">Security image release overview</div>
     <div id="tabRight">
       <!-- The instance was named THREE times across this header: the INSTANCE selector, "mode:"
            and "source:" all said the same thing, while the one fact an operator actually needs --
@@ -2172,9 +2174,15 @@
       <div style="color:#57606a;font-size:12px;">Loading external companies&hellip;</div>
     </div>
   </div>
-  <!-- §12.8 ENV-REPORT-1: Operations > Environment report (Admin / SuperAdmin). The report itself renders in an iframe. -->
+  <!-- §12.8 ENV-REPORT-1: Operations > System Documentation (Admin / SuperAdmin). The report itself renders in an iframe. -->
   <div id="envreportTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="envReportBody">
+      <div style="color:#57606a;font-size:12px;">Loading&hellip;</div>
+    </div>
+  </div>
+  <!-- SEC-IMAGE-OVERVIEW-1: Operations > Security image release overview (read-only, every signed-in role). -->
+  <div id="secimagereleasesTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="secImgBody">
       <div style="color:#57606a;font-size:12px;">Loading&hellip;</div>
     </div>
   </div>
@@ -3236,8 +3244,10 @@
         // 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation").
         { tab: 'activator', label: 'Client onboarding', desc: 'The PIM Activator browser extension on the PCs of your admins -- with Intune, or without it (a script for PCs and servers). Deploy the browser extension admins activate with: Intune remediation, Edge for Business, the Entra apps (PROD and TEST), the settings catalog, scripts for servers' },
         { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
+        // SEC-IMAGE-OVERVIEW-1 (owner 2026-11-25, his name: "Security image release overview"): read-only, from Invardia.
+        { tab: 'secimagereleases', label: 'Security image release overview', desc: 'PIM\'s own security image releases: detected, work started, the first time on each ring and the hours between -- "not recorded" where a time is missing' },
         // §12.8 ENV-REPORT-1 (owner 2026-10-09: "documentation ... architecture and security info from the customer env ... exportable to pdf").
-        { tab: 'envreport', label: 'Environment report', desc: 'The architecture and security report of this environment -- identities, permissions (expected / missing / extra), Azure resources, features, data flows, change history and findings. Export PDF / JSON (Admin / SuperAdmin)' },
+        { tab: 'envreport', label: 'System Documentation', desc: 'The architecture and security report of this environment -- identities, permissions (expected / missing / extra), Azure resources, features, data flows, change history and findings. Export PDF / JSON (Admin / SuperAdmin)' },
       ] },
     { id: 'audit', label: 'Settings',
       title: 'Configuration, who may use this Manager, and emergency access',
@@ -3676,6 +3686,7 @@
       'Staging is never blocked. Where the prerequisites of a workload are not ready, its group is still created and only its role assignment waits (an amber note says so).',
       '<b>Ignore</b> takes a gap you do not want off the list and out of the gap count. It is a decision about this list only &mdash; nothing changes in the tenant. Choose <b>Ignored</b> under Status to see the ignored ones and <b>Bring back</b>.',
       '<b>Orphan group</b> = a group PIM Manager defines that holds nothing; <b>Unmanaged binding</b> = a role bound to a group PIM Manager does not define; <b>Unmanaged privileged group</b> = a group in PIM for Groups that PIM Manager does not manage (it can gate any application). These are for review only &mdash; never staged, never taken over.',
+      '<b>Not delegable</b> = a Microsoft system role (such as User, Guest User or Device Join): Entra assigns it automatically or it is retired, and it cannot be given to a group. It is not a gap and there is nothing to do.',
       '<b>Not read</b> = a workload PIM Manager could not read. The page says which one, what is missing and the steps &mdash; it is never counted as covered.'] },
     jobschedule: { title: 'What this is & how to use it', what: 'The job schedule &mdash; every scheduled job, the area it covers, whether it is on and how often it runs.', how: ['Change on/off or the interval and Save (SuperAdmin); it applies from the next scheduler run.', 'Run history, failures and Run now are on the Jobs page.'] },
     audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; the window defaults to the last 3 months &mdash; widen it to 12 months or the full history. Newest first.'] },
@@ -3686,9 +3697,11 @@
     replication: { title: 'What this is & how to use it', what: 'Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches &mdash; computed on the server by the same plan every tenant runs.', how: ['Pick a tenant to see what it gets, a kind to narrow the list, or show only rows that reach no tenant.', 'Change a row&rsquo;s Replicate / Ring / Target in its wizard or the records grid; Recompute runs the plan again.'] },
     jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and the engine job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
     settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
-    envreport:   { title: 'What this is & how to use it', what: 'Environment report &mdash; the architecture and security report of THIS environment, read live: every identity by name and id, its permissions marked expected / missing / extra against what PIM Manager declares, the Azure resources and their network exposure, features, data flows, change history and findings with the fix.', how: ['Export PDF prints the report (choose Save as PDF, A4, background graphics on); Export JSON downloads the same data for an audit or a diff.', 'Whatever this Manager may not read is marked not readable, with the reason -- grant it read access and press Read again.', 'Confidential: names and ids only, never a secret value. Admin and SuperAdmin only.'] },
+    envreport:   { title: 'What this is & how to use it', what: 'System Documentation &mdash; the architecture and security report of THIS environment, read live: every identity by name and id, its permissions marked expected / missing / extra against what PIM Manager declares, the Azure resources and their network exposure, features, data flows, change history and findings with the fix.', how: ['Export PDF prints the report (choose Save as PDF, A4, background graphics on); Export JSON downloads the same data for an audit or a diff.', 'Whatever this Manager may not read is marked not readable, with the reason -- grant it read access and press Read again.', 'Confidential: names and ids only, never a secret value. Admin and SuperAdmin only.'] },
     apiref:      { title: 'What this is & how to use it', what: 'The API and MCP reference of the version that runs here &mdash; every API route and MCP tool your PIM Manager role may call, read from this version&rsquo;s own code.', how: ['Type in the filter to find a route or a tool; the role column says what each needs.', 'A route with no role check of its own is open to every signed-in role; the route still checks the item you ask about.', 'The routine part of this reference is published on invardia.com.'] },
     support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] },
+    // SEC-IMAGE-OVERVIEW-1
+    secimagereleases: { title: 'What this is & how to use it', what: 'Security image release overview &mdash; PIM&rsquo;s own security image releases (image-only base-image patches), as Invardia recorded them: when each was detected, when work started, the first time it reached ring 0, 1, 2 and 3, and the hours between those steps.', how: ['Pick the period: 7, 30, 90 or 365 days. Read again asks Invardia once more (otherwise the answer is kept for 5 minutes).', 'A time Invardia did not record shows <b>not recorded</b>. The hours between two steps are shown only when both times are recorded &mdash; never a guess.', 'A row without a version was detected but has no release yet. <b>In progress</b> = still on its way through the rings; <b>Replaced</b> = a newer security release replaced it before ring 3.', 'Read-only. The PIM Manager server asks Invardia with this installation&rsquo;s install key; the key never reaches this page.'] },
     // PIM 100.93
     policysettings: { title: 'What this is & how to use it', what: 'Policy settings &mdash; every policy setting of your tenant, per policy type. PIM Manager never changes a policy on its own: you choose per setting between Microsoft default, PIM Manager recommendation and Keep current.', how: ['Each button shows its own value. Choose, then press <b>Save choices</b> (SuperAdmin) &mdash; nothing is sent before that.', 'Saving changes nothing in your tenant yet: the next policy run plans the change and holds it until a SuperAdmin approves it on Approvals. The same person may approve, as a second step.', 'The quick-selection buttons set every setting at once, after you type the word <b>confirm</b>.'] }
   };
@@ -3785,7 +3798,8 @@
     if (name === 'companies') renderCompaniesPage();   // operator 2026-10-05: its own page, like Departments & owners
     if (name === 'adminimport') renderAdminImportPage();   // operator 2026-10-06: under Admin accounts, SuperAdmin only
     if (name === 'commithistory') renderCommitHistoryPage();   // CONFIG-1.2 / §96.2: commit history + undo
-    if (name === 'envreport') renderEnvReportPage(false);   // §12.8 ENV-REPORT-1: the environment report
+    if (name === 'envreport') renderEnvReportPage(false);   // §12.8 ENV-REPORT-1: the System Documentation
+    if (name === 'secimagereleases') renderSecImageReleasesPage(false);   // SEC-IMAGE-OVERVIEW-1
     if (name === 'manageraccess') { renderSettingsAccessSection(document.getElementById('setAccessHost')); renderSettingsApiAppsSection(document.getElementById('setApiAppsHost')); renderSettingsSupportFixSection(document.getElementById('setSupportFixHost')); }
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
@@ -4421,6 +4435,22 @@
       (add && !/^\d{4}-\d{2}-\d{2}/.test(add) ? '<div style="color:#57606a;font-size:10.5px;">now: <code>' + esc(add) + '</code> (kept unless you pick a date)</div>' : '') +
       '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>Auto-disable never deletes the account.</b> Leave blank for none.</div>' +
       (a.autoDisableConflict ? '<div style="color:#cf222e;font-size:10.5px;max-width:240px;">This row also carries the old <code>OffboardDate</code> with a different date, so the engine refuses it. Saving here clears the old column.</div>' : ''));
+    // RFA-MODE-GUI-1 (owner 2026-11-25: "fix it in the gui so i can config this"): who may use the RFA portal. Blank = the
+    // department decides (its own RFA mode; none = off).
+    const rfaCur = String(a.rfaMode || '').trim();
+    const rfaKnown = ['', 'Off', 'Approval', 'Auto'];
+    h += lbl('Request for authorization (RFA)',
+      '<select class="acctEditFldTop acctRfaSel" data-k="rfaMode" style="width:230px;">' +
+        [['', 'Use the department\'s setting (default: Approval)'], ['Approval', 'Approval -- a department owner must approve'], ['Auto', 'Auto -- enabled at once, no approval'], ['Off', 'Off -- cannot use the portal']]
+          .map(o => '<option value="' + esc(o[0]) + '"' + (o[0].toLowerCase() === rfaCur.toLowerCase() ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') +
+        (rfaKnown.map(x => x.toLowerCase()).indexOf(rfaCur.toLowerCase()) < 0 ? '<option value="' + esc(rfaCur) + '" selected>' + esc(rfaCur) + ' (not valid -- RFA is off)</option>' : '') +
+      '</select>' +
+      '<div style="color:#57606a;font-size:10.5px;max-width:240px;">A disabled admin signs in to the RFA portal with a one-time PIN sent by mail and asks to be enabled for a few hours. <b>Auto</b>: enabled at once. <b>Approval</b>: one of the department\'s owners approves first. A consultant from a registered company always needs approval, unless this is set to Auto.</div>' +
+      (String(a.rfaWindowEndUtc || '').trim() ? '<div style="color:#116329;font-size:10.5px;max-width:240px;">Enabled through the RFA portal until <b>' + esc(fmtTime(a.rfaWindowEndUtc)) + '</b>; PIM disables it again then.</div>' : ''));
+    // RFA-MODE-GUI-1: where the RFA PIN goes. Blank = the mail forwarding address above.
+    h += lbl('RFA PIN e-mail',
+      '<input class="acctEditFldTop" data-k="contactEmail" type="email" value="' + esc(a.contactEmail || '') + '" placeholder="(the forwarding address)" style="width:230px;">' +
+      '<div style="color:#57606a;font-size:10.5px;max-width:240px;">Where the one-time PIN for the RFA portal is sent. Leave blank to use the mail forwarding address. Without either, the account cannot use the portal.</div>');
     // REQUIREMENTS 68.6 row 35 -- MSP downlink, defined on the admin: sync on/off (ManagementMode),
     // which managed tenants (Ring: 0 dev, 1 test, 2 broad -- §77.20; tags are set on the ring, not here).
     // Only on the managing tenant (operator 2026-09-15): in Single mode there are no managed tenants, and a managed tenant never
@@ -5740,8 +5770,35 @@
       '</div>';
     return h;
   }
+  // ADMIN-DISABLE-PROTECTED-1 (b): the Entra directory roles the engine identity is missing (Privileged Authentication
+  // Administrator) -- only from a real check (directoryRoles.checked); a role name outside the known set is never put in a command
+  function permDirRolesMissing(d) {
+    const dr = d && d.directoryRoles;
+    if (!dr || dr.checked !== true) return [];
+    return (dr.missing || []).filter(m => m && typeof m === 'object' && m.role === 'Privileged Authentication Administrator').map(m => m.role);
+  }
+  // One line per required Entra role of the engine (Home banner + Get Started): held = green, missing = red with what it
+  // blocks, not checked = said so (never green). A bad list entry is skipped, never thrown (BUG-250).
+  function permDirRoleLines(d) {
+    let h = '';
+    try {
+      const dr = d && d.directoryRoles;
+      if (dr && Array.isArray(dr.required)) dr.required.filter(r => r && typeof r === 'object').forEach(r => {
+        const st = String(r.state || 'unknown');
+        h += '<div class="permDirRole" style="margin-top:4px;font-size:11.5px;">Entra role <b>' + escapeHtml(String(r.role || '')) + '</b>: ' +
+          (st === 'held' ? '<span style="color:#1a7f37;">held</span>'
+            : st === 'missing' ? '<b style="color:#cf222e;">not held</b> -- ' + escapeHtml(String(r.capability || '')) + '. Grant it with the command below.'
+            : 'not checked yet (the engine has not recorded its role assignments)') + '</div>';
+      });
+    } catch (_) { }
+    return h;
+  }
   function permFixNeeded(d, miss) {
-    return !!(d && d.objectId && ((miss || []).length || d.azureOk === false || permRootReaderMissing(d) || permRootUaaNeededMissing(d)));
+    // ADMIN-DISABLE-PROTECTED-1 (b): the same rule as permDirRolesMissing, written out here -- this function and permFixScript
+    // are run on their own (tests\Test-PimEnginePermissionGrant.ps1 H1 takes them out of the page with the two root helpers)
+    const dr = d && d.directoryRoles;
+    const dirMiss = (dr && dr.checked === true) ? (dr.missing || []).filter(m => m && typeof m === 'object' && m.role === 'Privileged Authentication Administrator') : [];
+    return !!(d && d.objectId && ((miss || []).length || d.azureOk === false || permRootReaderMissing(d) || permRootUaaNeededMissing(d) || dirMiss.length));
   }
   // The words around the fix block (owner 2026-10-11: they are no longer comment lines inside the copied command).
   function permFixHint(d) {
@@ -5759,6 +5816,10 @@
     if (permRootReaderMissing(d) && tid) az.push("'Reader@/providers/Microsoft.Management/managementGroups/" + tid + "'");
     if ((d.azureOk === false || permRootUaaNeededMissing(d)) && tid) az.push("'User Access Administrator@/providers/Microsoft.Management/managementGroups/" + tid + "'");
     if (az.length) cmd += ' -AzureRoleAssignments ' + az.join(',');
+    // ADMIN-DISABLE-PROTECTED-1 (b): the engine's missing Entra role -- the known role only, from a real check (as permDirRolesMissing)
+    const dr = d.directoryRoles;
+    const dirRoles = (dr && dr.checked === true) ? (dr.missing || []).filter(m => m && typeof m === 'object' && m.role === 'Privileged Authentication Administrator').map(m => m.role) : [];
+    if (dirRoles.length) cmd += ' -DirectoryRoles ' + dirRoles.map(r => "'" + r + "'").join(',');
     // Owner 2026-10-11: the copied block is ONLY download + run; who runs it and the ~30 minute wait are said in the
     // text around the block (permFixHint), never as comment lines inside it.
     return pimSupportCmd('Grant-PimEnginePermissions', [cmd]);
@@ -5798,6 +5859,7 @@
       inner += '</table>';
     }
     inner += permRootLines(d);   // §97: Reader + User Access Administrator at the tenant root, each on its own line
+    inner += permDirRoleLines(d);   // ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role, on its own line
     // MAIL CHECK (owner 2026-10-08): each mail prerequisite on its own line, with its fix -- amber at most (mail is optional);
     // "Verify permissions" re-reads it (?refresh=1).
     try { inner += mailCheckLinesHtml(d.mailChecks, true); } catch (_) { }
@@ -7042,7 +7104,7 @@
       });
     });
     // CONFIG-1.2 / §96.2: pages for an Admin or SuperAdmin only (Reader / Delegated: none; the server refuses them too).
-    // §12.8: the environment report is refused to Demo by the server (Demo ranks Reader there), so it is hidden for Demo too.
+    // §12.8: the System Documentation is refused to Demo by the server (Demo ranks Reader there), so it is hidden for Demo too.
     const ad = roleAtLeast('Admin');
     const adReal = ad && PIM_ROLE !== 'Demo';
     ADMIN_ONLY_TABS.forEach(k => {
@@ -8804,15 +8866,18 @@
         // toggle keeps showing the STORED value -- saving it must not pin the feature on for good.
         const autoOn = !isCore && !f.enabled && f.autoEnabled === true;
         const off = !f.enabled && !isCore && !autoOn;
-        const dimmed = (off || needsPro);
+        // MSP-SINGLE-OFF-1 (owner 2026-11-25): a multi-tenant feature on a single tenant -- off, locked, never saved.
+        const notApplicable = !isCore && f.notApplicable === true;
+        const dimmed = (off || needsPro || notApplicable);
         // 2026-09-21 (operator: "bug: cannot enable" / "it looked grayed out but i can set it"): only the TEXT is dimmed;
         // an editable checkbox stays at full strength so an off feature never looks locked.
         const rowStyle = '';
         const cellDim = dimmed ? ' style="opacity:0.55;"' : '';
-        const toggleDis = (!canEdit || isCore || needsPro) ? ' disabled' : '';
-        const checked = (isCore || f.enabled) ? ' checked' : '';
+        const toggleDis = (!canEdit || isCore || needsPro || notApplicable) ? ' disabled' : '';
+        const checked = (isCore || (f.enabled && !notApplicable)) ? ' checked' : '';
         let status = '';
-        if (hardLocked(key)) status = `<span class="featProLocked" data-key="${esc(key)}" style="font-size:10.5px;color:#bc4c00;">&#x1F512; Pro -- contact ${licenceMailtoHtml(licD)} (<a href="#" class="lic-go-settings">Settings &rsaquo; Licence</a>)</span>`;
+        if (notApplicable) status = `<span class="featNotApplicable" style="font-size:10.5px;color:#57606a;">Not used on a single tenant</span>`;
+        else if (hardLocked(key)) status = `<span class="featProLocked" data-key="${esc(key)}" style="font-size:10.5px;color:#bc4c00;">&#x1F512; Pro -- contact ${licenceMailtoHtml(licD)} (<a href="#" class="lic-go-settings">Settings &rsaquo; Licence</a>)</span>`;
         else if (isCore) status = `<span style="font-size:10.5px;color:#57606a;">always on</span>`;
         else if (needsPro) status = `<span style="font-size:10.5px;color:#9a6700;">🔒 Requires Pro</span>`;
         else if (autoOn) status = `<span class="featAutoOn" style="font-size:10.5px;color:#116329;" title="On automatically while ${esc((f.autoEnableWhenData || []).join(', '))} hold rows. Tick the box and save to keep it on even without rows.">On: ${Number(f.autoRows) || 0} workload row${(Number(f.autoRows) === 1) ? '' : 's'}</span>`;
@@ -10252,7 +10317,7 @@
   // ===================================================================
   // §12.8 ENV-REPORT-1 (owner 2026-10-09: "documentation ... with all relevant architecture and security info from the
   // customer env. name of identies, permissions, features, flows, everything. it must be exportable to pdf in nice report").
-  // Operations > Environment report: GET /api/environment-report (Admin / SuperAdmin; the server refuses every other role),
+  // Operations > System Documentation: GET /api/environment-report (Admin / SuperAdmin; the server refuses every other role),
   // rendered as ONE print-designed, self-contained document (cover, contents, numbered sections, two SVG diagrams drawn from
   // the data, "Confidential -- <tenant> -- <date>" header/footer and page numbers via @page). The preview is that document in
   // an iframe; Export PDF prints it (A4, no app chrome, no library); Export JSON downloads the same data.
@@ -10412,7 +10477,7 @@
     let b = '';
     // ---- cover
     b += '<section class="cover"><div class="band">' + erLogoSvg() + '<div class="prod">PIM Manager</div></div>' +
-      '<div class="cover-body"><div class="kicker">Environment report</div><div class="title">Architecture &amp; security</div>' +
+      '<div class="cover-body"><div class="kicker">System Documentation</div><div class="title">Architecture &amp; security</div>' +
       '<div class="cust">' + erEsc(S.customer || tenant) + '</div>' +
       erKv([['Tenant', tenant], ['Tenant id', S.tenantId || ''], S.environmentName ? ['Environment', S.environmentName] : null, ['Product', 'PIM Manager ' + (S.version || '')], ['Edition', (S.edition || '') + (S.dimension ? ' \u2014 ' + S.dimension : '')], ['Read from the live environment', when], d.requestedBy ? ['Prepared for', d.requestedBy] : null]) +
       '<div class="cover-note">Confidential. This document names the identities, permissions and network exposure of this environment. It contains no secret values. Every fact was read from the environment at the time above; what could not be read is marked <i>not readable</i>.</div></div></section>';
@@ -10471,7 +10536,7 @@
       erTable(['Section', 'Source', 'Readable', 'Reason'], erList(d.sources).map(s => [erEsc(s.section), erEsc(s.source), s.readable ? '<span class="st st-ok">yes</span>' : '<span class="st st-nr">no</span>', erEsc(s.reason || '')])) + '</section>';
     const css =
       '@page{size:A4;margin:18mm 14mm 16mm 14mm;' +
-      '@top-left{content:"PIM Manager \u2014 Environment report";font:7.5pt "Segoe UI",Arial,sans-serif;color:#57606a}' +
+      '@top-left{content:"PIM Manager \u2014 System Documentation";font:7.5pt "Segoe UI",Arial,sans-serif;color:#57606a}' +
       '@top-right{content:"' + erCss(conf) + '";font:7.5pt "Segoe UI",Arial,sans-serif;color:#57606a}' +
       '@bottom-left{content:"' + erCss(conf) + '";font:7.5pt "Segoe UI",Arial,sans-serif;color:#57606a}' +
       '@bottom-right{content:"Page " counter(page) " of " counter(pages);font:7.5pt "Segoe UI",Arial,sans-serif;color:#57606a}}' +
@@ -10501,12 +10566,12 @@
       '.tiles{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.tile{border:1px solid #d0d7de;border-radius:6px;padding:8px 12px;min-width:120px;font-size:8.5pt;color:#57606a}.tile b{display:block;font-size:16pt;color:#0B1633}.tile.bad b{color:#cf222e}.tile.warn b{color:#9a6700}' +
       '@media screen{body{background:#eaeef2;padding:14px 0}section{background:#fff;max-width:182mm;margin:0 auto 14px;padding:14mm 14mm;box-shadow:0 1px 4px rgba(0,0,0,.18)}.cover{padding:0;min-height:0}h1.sec{break-before:auto}}' +
       '@media print{section{padding:0}}';
-    return '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>' + erEsc('PIM Manager environment report \u2014 ' + tenant + ' \u2014 ' + when) + '</title><style>' + css + '</style></head><body>' + b + '</body></html>';
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>' + erEsc('PIM Manager System Documentation \u2014 ' + tenant + ' \u2014 ' + when) + '</title><style>' + css + '</style></head><body>' + b + '</body></html>';
   }
   function envReportFileStem(d) {
     const S = (d && d.summary) || {};
     const t = String(S.tenantName || S.tenantId || 'tenant').replace(/[^A-Za-z0-9_.-]+/g, '-');
-    return 'pim-environment-report-' + t + '-' + String((d && d.generatedUtc) || new Date().toISOString()).slice(0, 10);
+    return 'pim-system-documentation-' + t + '-' + String((d && d.generatedUtc) || new Date().toISOString()).slice(0, 10);
   }
   function envReportExportJson() {
     if (!ER_DATA) return;
@@ -10534,23 +10599,125 @@
     }
     setTimeout(restore, 60000);
   }
+  // ===================================================================
+  // SEC-IMAGE-OVERVIEW-1 (owner 2026-11-25, relayed by Invardia 2026-11-26; his name: "Security image release overview"):
+  // PIM's own security image releases, READ-ONLY, from GET /api/security-image-releases?days=7|30|90|365 (default 90). The
+  // SERVER asks Invardia with the install key -- this page never talks to Invardia and never holds the key. Every time is
+  // shown with fmtTime (the browser's local time, like every time on this page); a missing one shows "not recorded". The
+  // hours between two steps are the SERVER's, and shown only when both of its ends are recorded -- the page never computes,
+  // guesses or bridges a gap.
+  // ===================================================================
+  const SECIMG_NOT_RECORDED = 'not recorded';
+  const SECIMG_DAY_CHOICES = [7, 30, 90, 365];
+  const SECIMG_STEPS = [['detectedAt', 'Detected'], ['startedAt', 'Work started'], ['ring0At', 'Ring 0'], ['ring1At', 'Ring 1'], ['ring2At', 'Ring 2'], ['ring3At', 'Ring 3']];
+  let SECIMG_DAYS = 90;
+  let SECIMG_DATA = null;
+  let SECIMG_SEQ = 0;
+  function secImgRecorded(v) { return !(v === null || v === undefined || String(v).trim() === ''); }
+  function secImgTime(v) { return secImgRecorded(v) ? (fmtTime(v) || SECIMG_NOT_RECORDED) : SECIMG_NOT_RECORDED; }
+  // the hours from step i-1 to step i: the server's number, ONLY when both times are recorded; otherwise null
+  function secImgGapHours(row, i) {
+    if (!row || i < 1 || !secImgRecorded(row[SECIMG_STEPS[i - 1][0]]) || !secImgRecorded(row[SECIMG_STEPS[i][0]])) return null;
+    const st = Array.isArray(row.steps) ? row.steps[i - 1] : null;
+    const h = st ? st.hours : null;
+    return (typeof h === 'number' && isFinite(h)) ? h : null;
+  }
+  function secImgGapText(row, i) { const h = secImgGapHours(row, i); return h === null ? SECIMG_NOT_RECORDED : (fmtNum(h, { maximumFractionDigits: 1 }) + ' h'); }
+  function secImgStatus(row) {
+    const p = [];
+    if (row.inProgress) p.push('In progress');
+    if (row.replaced) p.push('Replaced');
+    if (typeof row.newestRing === 'number') p.push('Newest ring: ' + row.newestRing);
+    return p.length ? p.join(' · ') : '';
+  }
+  async function renderSecImageReleasesPage(refresh) {
+    const body = document.getElementById('secImgBody');
+    if (!body) return;
+    if (!isServer) { body.innerHTML = stateEmpty('Static mode', 'The security image releases are read from Invardia by the PIM Manager server.'); return; }
+    const esc = escapeHtml;
+    const seq = ++SECIMG_SEQ;
+    body.innerHTML =
+      '<div style="margin-bottom:8px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations &middot; Security image release overview</span></div>' +
+      '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px;">' +
+        '<label style="font-size:12.5px;">Period <select id="secImgDays" style="font-size:12.5px;">' +
+          SECIMG_DAY_CHOICES.map(d => '<option value="' + d + '"' + (d === SECIMG_DAYS ? ' selected' : '') + '>Last ' + d + ' days</option>').join('') +
+        '</select></label>' +
+        '<button type="button" class="btn-sec" id="secImgRefresh">Read again</button>' +
+        '<span id="secImgRead" style="font-size:12px;color:#57606a;"></span>' +
+      '</div>' +
+      '<div id="secImgContent">' + stateLoading('Reading the security image releases…', 'PIM Manager asks Invardia.') + '</div>';
+    const sel = document.getElementById('secImgDays');
+    sel.addEventListener('change', () => { const v = parseInt(sel.value, 10); SECIMG_DAYS = SECIMG_DAY_CHOICES.indexOf(v) >= 0 ? v : 90; renderSecImageReleasesPage(false); });
+    document.getElementById('secImgRefresh').addEventListener('click', () => renderSecImageReleasesPage(true));
+    const content = document.getElementById('secImgContent');
+    let d;
+    try { d = await api('GET', '/api/security-image-releases?days=' + SECIMG_DAYS + (refresh ? '&refresh=1' : '')); }
+    catch (e) {
+      if (seq !== SECIMG_SEQ) return;
+      const msg = (e && e.body && e.body.error) ? String(e.body.error) : ('PIM Manager could not read the security image releases from Invardia: ' + ((e && e.message) || String(e)));
+      SECIMG_DATA = null;
+      content.innerHTML = '<div id="secImgError">' + stateError('Security image releases not available', msg) + '</div>';
+      return;
+    }
+    if (seq !== SECIMG_SEQ) return;
+    if (!d || d.ok === false) {
+      SECIMG_DATA = null;
+      content.innerHTML = '<div id="secImgError">' + stateError('Security image releases not available', String((d && d.error) || 'PIM Manager could not read the security image releases from Invardia: no answer.')) + '</div>';
+      return;
+    }
+    SECIMG_DATA = d;
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    const readEl = document.getElementById('secImgRead');
+    if (readEl) readEl.textContent = (secImgRecorded(d.generatedAt) ? 'Invardia answered ' + fmtTime(d.generatedAt) : '') + (d.cached ? ' (kept from the last read; Read again for a fresh one)' : '');
+    if (!rows.length) {
+      content.innerHTML = '<div id="secImgEmpty">' + stateEmpty('No security image releases in the last ' + SECIMG_DAYS + ' days', 'Invardia recorded no security image release of PIM in this period. Pick a longer period to see older ones.') + '</div>';
+    } else {
+      const th = (t) => '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #d0d7de;font-size:12px;white-space:nowrap;">' + esc(t) + '</th>';
+      const nr = (t) => t === SECIMG_NOT_RECORDED ? '<span class="secImgNR" style="color:#8c959f;font-style:italic;">' + SECIMG_NOT_RECORDED + '</span>' : esc(t);
+      const html = rows.map((r, ri) => {
+        const ver = (r.version === null || r.version === undefined || String(r.version).trim() === '')
+          ? '<span class="secImgNoRelease" style="color:#57606a;font-style:italic;">detected, no release yet</span>' : '<b>' + esc(String(r.version)) + '</b>';
+        const cells = SECIMG_STEPS.map((s, i) => {
+          const gap = i === 0 ? '' : '<div class="secImgGap" data-gap="' + i + '" style="font-size:11px;color:#57606a;">' +
+            (secImgGapHours(r, i) === null ? 'hours: ' + nr(SECIMG_NOT_RECORDED) : '+' + esc(secImgGapText(r, i)) + ' after ' + esc(SECIMG_STEPS[i - 1][1].toLowerCase())) + '</div>';
+          return '<td data-step="' + s[0] + '" style="padding:6px 8px;border-bottom:1px solid #eaeef2;vertical-align:top;white-space:nowrap;"><div class="secImgAt">' + nr(secImgTime(r[s[0]])) + '</div>' + gap + '</td>';
+        }).join('');
+        return '<tr class="secImgRow" data-row="' + ri + '"><td style="padding:6px 8px;border-bottom:1px solid #eaeef2;vertical-align:top;">' + ver + '</td>' + cells +
+          '<td class="secImgStatus" style="padding:6px 8px;border-bottom:1px solid #eaeef2;vertical-align:top;font-size:12px;">' + esc(secImgStatus(r)) + '</td></tr>';
+      }).join('');
+      content.innerHTML = '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">' + rows.length + ' security image release(s), newest first. Times are in your local time; the hours are from the step before.</div>' +
+        '<div style="overflow:auto;"><table id="secImgTable" style="border-collapse:collapse;width:100%;font-size:12.5px;"><thead><tr>' +
+        th('Version') + SECIMG_STEPS.map(s => th(s[1])).join('') + th('Status') + '</tr></thead><tbody>' + html + '</tbody></table></div>';
+    }
+    pimExportSet('secimagereleases', 'Security image release overview', () => {
+      const R = (SECIMG_DATA && Array.isArray(SECIMG_DATA.rows)) ? SECIMG_DATA.rows : [];
+      const cols = [['Version', r => (r.version === null || r.version === undefined) ? 'detected, no release yet' : r.version]];
+      SECIMG_STEPS.forEach((s, i) => {
+        // the export keeps the stored ISO value (it ends in Z); the header names no zone -- no display path appends one (BRAND-2.10)
+        cols.push([s[1], r => secImgRecorded(r[s[0]]) ? r[s[0]] : SECIMG_NOT_RECORDED]);
+        if (i > 0) cols.push(['Hours ' + SECIMG_STEPS[i - 1][1].toLowerCase() + ' to ' + s[1].toLowerCase(), r => { const h = secImgGapHours(r, i); return h === null ? SECIMG_NOT_RECORDED : h; }]);
+      });
+      cols.push(['In progress', r => r.inProgress ? 'yes' : 'no'], ['Replaced', r => r.replaced ? 'yes' : 'no']);
+      return [pimExportRows('Security image releases (last ' + SECIMG_DAYS + ' days)', cols, R)];
+    });
+  }
   async function renderEnvReportPage(refresh) {
     const body = document.getElementById('envReportBody');
     if (!body) return;
-    if (!isServer) { body.innerHTML = stateEmpty('Static mode', 'The environment report is read from the live environment and needs the PIM Manager server.'); return; }
+    if (!isServer) { body.innerHTML = stateEmpty('Static mode', 'The System Documentation is read from the live environment and needs the PIM Manager server.'); return; }
     if (!roleAtLeast('Admin') || PIM_ROLE === 'Demo') {
-      body.innerHTML = '<div id="erNoRole" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">The environment report names every identity, permission and network exposure of this environment, so it is for an <b>Admin</b> or a <b>SuperAdmin</b>. You are signed in as <b>' + erEsc(PIM_ROLE) + '</b>.</div>';
+      body.innerHTML = '<div id="erNoRole" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">The System Documentation names every identity, permission and network exposure of this environment, so it is for an <b>Admin</b> or a <b>SuperAdmin</b>. You are signed in as <b>' + erEsc(PIM_ROLE) + '</b>.</div>';
       return;
     }
     body.innerHTML = stateLoading('Reading the environment…', 'Identities, permissions, Azure resources, settings and the change journal are read live -- this can take up to a minute.');
     let d;
     try { d = await api('GET', '/api/environment-report' + (refresh ? '?refresh=1' : ''), undefined, { timeoutMs: 180000 }); }
-    catch (e) { body.innerHTML = stateError('Could not build the environment report', (e && e.message) || String(e)); return; }
+    catch (e) { body.innerHTML = stateError('Could not build the System Documentation', (e && e.message) || String(e)); return; }
     ER_DATA = d;
     const C = d.counts || {}; const PC = C.permissions || {}; const FC = C.findings || {};
     const chip = (n, label, color) => '<span style="display:inline-block;margin:0 8px 4px 0;padding:3px 9px;border-radius:12px;border:1px solid ' + color + ';color:' + color + ';font-size:12px;"><b>' + erEsc(String(n || 0)) + '</b> ' + erEsc(label) + '</span>';
     body.innerHTML =
-      '<div style="margin-bottom:8px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations &middot; Environment report</span></div>' +
+      '<div style="margin-bottom:8px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations &middot; System Documentation</span></div>' +
       '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px;">' +
         '<button type="button" class="btn" id="erPdf" style="background:#0969da;color:#fff;border-color:#0969da;">Export PDF</button>' +
         '<button type="button" class="btn-sec" id="erJson">Export JSON</button>' +
@@ -10560,10 +10727,10 @@
       '<div id="erChips" style="margin-bottom:8px;">' + chip(C.identities, 'identities', '#0969da') +
         chip(FC.high, 'high findings', '#cf222e') + chip(FC.medium, 'medium findings', '#bc4c00') + '</div>' +
       '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">Export PDF opens the print dialog: choose <b>Save as PDF</b>, paper <b>A4</b>, and keep <b>Background graphics</b> on. Confidential: it names identities and permissions, never a secret value.</div>' +
-      '<iframe id="envReportFrame" title="Environment report" style="width:100%;height:calc(100vh - 290px);min-height:480px;border:1px solid #d0d7de;border-radius:6px;background:#eaeef2;"></iframe>';
+      '<iframe id="envReportFrame" title="System Documentation" style="width:100%;height:calc(100vh - 290px);min-height:480px;border:1px solid #d0d7de;border-radius:6px;background:#eaeef2;"></iframe>';
     const fr = document.getElementById('envReportFrame');
     fr.srcdoc = envReportDocHtml(d);
-    pimExportSet('envreport', 'Environment report', () => {   // 100.67: the report's tables from its own data
+    pimExportSet('envreport', 'System Documentation', () => {   // 100.67: the report's tables from its own data
       const L = (x) => (Array.isArray(x) ? x : (x && Array.isArray(x.items) ? x.items : asList(x)));
       return [
         pimExportRows('Health', [['Area', 'area'], ['Status', 'status'], ['Detail', 'detail']], L(((d.summary || {}).health || {}).items)),
@@ -11224,15 +11391,31 @@
     // PIM 100.24: the result of the last save (who was added as Reader, who keeps a role), shown once after the re-render.
     if (_deptOwnerLastResult) { h += `<div id="deptOwnerResult">${_deptOwnerLastResult}</div>`; _deptOwnerLastResult = ''; }
     else h += `<div id="deptOwnerResult"></div>`;
-    h += `<table class="set-table" id="setDeptsTbl"><tr><th>Department</th><th>Owners / approvers (UPNs)</th><th>Contact</th><th>Notes</th>${canEdit ? '<th></th>' : ''}</tr>`;
+    // RFA-MODE-GUI-1 (owner 2026-11-25: "fix it in the gui so i can config this"): the department's RFA mode -- whether its
+    // admins may enable their disabled account from the RFA portal. An admin's own RFA mode (Admin accounts > Edit) wins.
+    // Invardia 2026-11-25: the same three choices as on the admin row. RFA-DEFAULT-APPROVAL-1 (owner 2026-11-25: "by default a
+    // disabled admin should be approved by the linked dept"): a department with no mode set IS Approval and shows as such.
+    const rfaDeptSel = (cur, dis) => { const c = String(cur || '').trim().toLowerCase() || 'approval'; return `<select class="setDeptRfa"${dis} style="width:260px;" title="Request for authorization: may this department's admins enable their disabled account from the RFA portal? An admin's own setting wins.">` +
+      [['Approval', 'Approval -- a department owner must approve (default)'], ['Auto', 'Auto -- enabled at once, no approval'], ['Off', 'Off -- cannot use the portal']]
+        .map(o => `<option value="${esc(o[0])}"${c === o[0].toLowerCase() ? ' selected' : ''}>${esc(o[1])}</option>`).join('') +
+      (['off', 'approval', 'auto'].indexOf(c) < 0 ? `<option value="${esc(cur)}" selected>${esc(cur)} (not valid -- off)</option>` : '') + `</select>`; };
+    // RFA-MODE-GUI-1: the window lengths (hours) a requester may pick; blank = 8, 24 and 72 hours.
+    const rfaDurInp = (cur, dis) => `<input class="setDeptRfaDur" value="${esc(String(cur || '').split('|').filter(Boolean).join(', '))}"${dis} placeholder="8, 24, 72" style="width:90px;" title="How long an admin may ask to be enabled for, in hours (1-744). Blank = 8, 24 and 72 hours.">`;
+    h += `<table class="set-table" id="setDeptsTbl"><tr><th>Department</th><th>Owners / approvers (UPNs)</th><th>Contact</th><th>Notes</th><th>RFA mode</th><th title="How long an admin may ask to be enabled for, in hours">RFA hours</th>${canEdit ? '<th></th>' : ''}</tr>`;
     { const deps = (s.departments || []); pimExportSet('departments', 'Departments & owners', () => [pimExportRows('Departments', [['Department', 'name'], ['Owners / approvers', d => Array.isArray(d.owners) ? d.owners.join('; ') : (d.owners || '')], ['Contact', 'contact'], ['Notes', 'notes']], deps)]); }   // 100.67
     (s.departments || []).forEach(d => {
       const owners = Array.isArray(d.owners) ? d.owners.join('; ') : (d.owners || '');
       h += `<tr class="deptRow">` +
         `<td><input class="setDeptName" value="${esc(d.name || '')}"${ro} style="width:180px"></td>` +
-        `<td><input class="setDeptOwners" value="${esc(owners)}" data-orig="${esc(owners)}"${ro} style="width:260px"><div class="deptOwnerNew"></div></td>` +
+        `<td><input class="setDeptOwners" value="${esc(owners)}" data-orig="${esc(owners)}"${ro} style="width:260px"><div class="deptOwnerNew"></div>` +
+          // RFA-DEFAULT-APPROVAL-1 (Invardia 2026-11-25): Approval is the default, so a department without owners leaves its
+          // admins' requests with nobody to approve them -- said here, where the owners are set.
+          ((!String(owners).trim() && String(d.rfaMode || '').trim().toLowerCase() !== 'off' && String(d.rfaMode || '').trim().toLowerCase() !== 'auto')
+            ? `<div class="deptNoRfaOwner" style="color:#bc4c00;font-size:11px;max-width:260px;">No owner can receive RFA approvals -- add an owner, or requests from this department's admins reach nobody.</div>` : '') +
+          `</td>` +
         `<td><input class="setDeptContact" value="${esc(d.contact || '')}"${ro} style="width:200px"></td>` +
         `<td><input class="setDeptNotes" value="${esc(d.notes || '')}"${ro} style="width:160px"></td>` +
+        `<td>${rfaDeptSel(d.rfaMode, ro)}</td><td>${rfaDurInp(d.rfaDurations, ro)}</td>` +
         (canEdit ? `<td><button class="btn-sec setRowDel" title="remove">✕</button></td>` : '') + `</tr>`;
     });
     h += `</table>`;
@@ -11277,7 +11460,7 @@
       const tr = document.createElement('tr');
       tr.className = 'deptRow';
       tr.innerHTML = `<td><input class="setDeptName" style="width:180px"></td><td><input class="setDeptOwners" data-orig="" style="width:260px"><div class="deptOwnerNew"></div></td><td><input class="setDeptContact" style="width:200px"></td><td><input class="setDeptNotes" style="width:160px"></td>` +
-        `<td><button class="btn-sec setRowDel" title="remove">✕</button></td>`;
+        `<td>${rfaDeptSel('', '')}</td><td>${rfaDurInp('', '')}</td><td><button class="btn-sec setRowDel" title="remove">✕</button></td>`;
       tbl.appendChild(tr);
       tr.querySelector('.setRowDel').onclick = () => tr.remove();
       pimWireSettingsPickers();
@@ -11341,7 +11524,7 @@
     };
     (document.getElementById('setDeptsSave') || {}).onclick = () => {
       const arr = [];
-      document.querySelectorAll('#setDeptsTbl tr').forEach((tr, i) => { if (i === 0) return; const n = tr.querySelector('.setDeptName'); if (!n || !n.value.trim()) return; arr.push({ name: n.value.trim(), owners: splitList(tr.querySelector('.setDeptOwners').value), contact: tr.querySelector('.setDeptContact').value, notes: tr.querySelector('.setDeptNotes').value }); });
+      document.querySelectorAll('#setDeptsTbl tr').forEach((tr, i) => { if (i === 0) return; const n = tr.querySelector('.setDeptName'); if (!n || !n.value.trim()) return; const rf = tr.querySelector('.setDeptRfa'), rd = tr.querySelector('.setDeptRfaDur'); arr.push(Object.assign({ name: n.value.trim(), owners: splitList(tr.querySelector('.setDeptOwners').value), contact: tr.querySelector('.setDeptContact').value, notes: tr.querySelector('.setDeptNotes').value }, rf ? { rfaMode: rf.value } : {}, rd ? { rfaDurations: rd.value } : {})); });
       saveDepts(arr, false);
     };
     const setDeptsImportBtn = document.getElementById('setDeptsImport');
@@ -11531,13 +11714,13 @@
     if (!host) return;
     let d = null;
     try { d = await api('GET', '/api/settings/support-fix-mode'); } catch (e) { host.innerHTML = ''; return; }
-    const mode = (d && d.mode) === 'approve' ? 'approve' : 'auto';
+    const mode = (d && d.mode) === 'auto' ? 'auto' : 'approve';   // SUPPORT-FIX-APPROVE-1: approve is the default
     const dis = (d && d.canWrite) ? '' : ' disabled';
     host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 6px 0;font-size:14px;">Support access</h3>' +
       '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">Invardia support fixes known problems on a support ticket. Your admins get a mail for every fix.</div>' +
       '<label style="font-size:13px;">Fixes by Invardia support' + settingInfoBtn('SupportFixMode') + ': <select id="setSupportFixMode"' + dis + '>' +
-      '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>apply automatically (default)</option>' +
-      '<option value="approve"' + (mode === 'approve' ? ' selected' : '') + '>wait for our approval</option></select></label>' +
+      '<option value="approve"' + (mode === 'approve' ? ' selected' : '') + '>wait for our approval (default)</option>' +
+      '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>apply automatically</option></select></label>' +
       ' <span id="setSupportFixMsg" style="font-size:12px;"></span></div>';
     const sel = document.getElementById('setSupportFixMode');
     if (sel && d && d.canWrite) sel.onchange = async () => {
@@ -13596,7 +13779,8 @@
   const COV_FILTER = { workload: '', status: 'Gap', text: '' };   // 100.109 (owner 2026-10-12): the page opens on Status = Gap; All is one click away
   const COV_STATUS_STYLE = {
     'Covered': '#1a7f37', 'Gap': '#0969da', 'Orphan group': '#bc4c00', 'Unmanaged binding': '#bc4c00',
-    'Wrong permissions': '#cf222e', 'Unmanaged privileged group': '#8250df', 'Not checked': '#9a6700', 'Ignored': '#57606a'
+    'Wrong permissions': '#cf222e', 'Unmanaged privileged group': '#8250df', 'Not checked': '#9a6700', 'Ignored': '#57606a',
+    'Not delegable': '#57606a'   // COVERAGE-NOT-DELEGABLE-1: a Microsoft system role -- information, nothing to do
   };
   // The report's status 'Not checked' is said as "Not read" (plain words); the value itself stays (server, filters, tests).
   function covStatusLabel(s) { return s === 'Not checked' ? 'Not read' : String(s || ''); }
@@ -16835,7 +17019,9 @@
         const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; const az = p.azureOk !== false;
         // §97: Reader at the tenant root is required (Discovery); User Access Administrator there only when Azure delegations exist.
         const rdr = !permRootReaderMissing(p), uaa = !permRootUaaNeededMissing(p);
-        return { done: !!p.objectId && miss === 0 && az && rdr && uaa, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : !rdr ? 'no Reader at the tenant root -- Discovery cannot see Azure' : !uaa ? 'no User Access Administrator at the tenant root (Azure delegations are defined)' : 'all required permissions held') : 'not checked yet' };
+        // ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role Privileged Authentication Administrator is required too
+        const dirMiss = permDirRolesMissing(p);
+        return { done: !!p.objectId && miss === 0 && az && rdr && uaa && !dirMiss.length, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : !rdr ? 'no Reader at the tenant root -- Discovery cannot see Azure' : !uaa ? 'no User Access Administrator at the tenant root (Azure delegations are defined)' : dirMiss.length ? 'the Entra role ' + dirMiss.join(', ') + ' is missing -- PIM cannot disable admins in role-assignable groups' : 'all required permissions held') : 'not checked yet' };
       } },
     // GS-AZURE-WORKLOADS (owner 2026-11-10, at a customer: "i am missing the onboarding for azure in the get started"): two
     // OPTIONAL steps over the SAME checks Discovery & gaps > Workload prerequisites shows (no second check). Grey while nothing
@@ -17251,7 +17437,9 @@
         '<label class="gs-l" for="' + p + 'Host">Server' + settingInfoBtn('Mail.SmtpServer') + '</label><input type="text" id="' + p + 'Host" name="smtpHost" value="' + val(s.host) + '" placeholder="smtp.example.com">' + gsErr('smtpHost') +
         '<label class="gs-l" for="' + p + 'Port">Port</label><input type="text" id="' + p + 'Port" name="smtpPort" value="' + val(s.port || 587) + '" style="width:90px;">' + gsErr('smtpPort') +
         '<label class="gs-l" for="' + p + 'Sec">Encryption' + settingInfoBtn('Mail.SmtpSecurity') + '</label><select id="' + p + 'Sec" name="smtpSecurity"><option value="starttls"' + (s.security !== 'none' ? ' selected' : '') + '>STARTTLS (recommended)</option><option value="none"' + (s.security === 'none' ? ' selected' : '') + '>None (an internal relay only)</option></select>' + gsErr('smtpSecurity') +
-        '<label class="gs-l" for="' + p + 'From">From address' + settingInfoBtn('Mail.SmtpFrom') + '</label><input type="text" id="' + p + 'From" name="smtpFrom" value="' + val(s.from) + '" placeholder="pim@yourdomain.com">' + gsErr('smtpFrom') +
+        // ONE-SENDER-1 (3.1.69 review): the relay's OWN From (the address it is proven to accept) is shown and kept; the mail
+        // sender setting fills it only when the relay has none yet. A different mail sender is reported by the mail check.
+        '<label class="gs-l" for="' + p + 'From">From address' + settingInfoBtn('Mail.SmtpFrom') + '</label><input type="text" id="' + p + 'From" name="smtpSender" value="' + val(s.from || m.sender) + '" placeholder="pim@yourdomain.com">' + gsErr('smtpSender') +
         '<label class="gs-l" for="' + p + 'User">User name (leave empty when the relay needs no sign-in)' + settingInfoBtn('Mail.SmtpCredentials') + '</label><input type="text" id="' + p + 'User" name="smtpUser" value="' + val(s.username) + '">' + gsErr('smtpUser') +
         '<label class="gs-l" for="' + p + 'Vault">Key Vault that keeps the password</label><input type="text" id="' + p + 'Vault" name="smtpVault" value="' + val(s.vaultName || ((m.setup || {}).vaultHint) || '') + '" placeholder="the environment\'s key vault">' + gsErr('smtpVault') +
         '<label class="gs-l" for="' + p + 'Secret">Secret name</label><input type="text" id="' + p + 'Secret" name="smtpSecret" value="' + val(s.secretName || 'PIM-SmtpRelayPassword') + '">' + gsErr('smtpSecret') +
@@ -17440,7 +17628,8 @@
     const body = { mode: sel ? sel.value : ((m && m.mode) || 'sharedMailbox') };
     // shared mailbox: the sender is set by step 2 (Check and send a test mail) from step 1's address -- never typed here
     if (body.mode === 'smtp') {
-      body.smtp = { host: g('smtpHost'), port: g('smtpPort'), security: g('smtpSecurity') || 'starttls', from: g('smtpFrom'), username: g('smtpUser'), vaultName: g('smtpVault'), secretName: g('smtpSecret') };
+      body.smtp = { host: g('smtpHost'), port: g('smtpPort'), security: g('smtpSecurity') || 'starttls', username: g('smtpUser'), vaultName: g('smtpVault'), secretName: g('smtpSecret') };
+      body.smtp.from = g('smtpSender');   // ONE-SENDER-1 (3.1.69 review): the relay's From is saved as typed, never blanked
       const pwEl = root.querySelector('[name="smtpPassword"]'); const pw = pwEl ? String(pwEl.value || '') : '';
       if (pw) body.password = pw;
     }
@@ -17456,14 +17645,14 @@
       const port = Number(body.smtp.port || 587);
       if (!Number.isInteger(port) || port < 1 || port > 65535) e.smtpPort = 'Not a port: ' + body.smtp.port + ' (1-65535)';
       else if (port === 465) e.smtpPort = 'Port 465 (implicit TLS) is not supported -- use 587 with STARTTLS.';
-      if (!body.smtp.from) e.smtpFrom = 'Enter the From address the mail is sent as.'; else if (!isMail(body.smtp.from)) e.smtpFrom = 'Not a mail address: ' + body.smtp.from;
+      if (!body.smtp.from) e.smtpSender = 'Enter the From address the relay sends as.'; else if (!isMail(body.smtp.from)) e.smtpSender = 'Not a mail address: ' + body.smtp.from;
       if (body.smtp.username && !body.smtp.vaultName) e.smtpVault = 'Enter the Key Vault that keeps the password.';
       if (body.password && !body.smtp.username) e.smtpUser = 'A password needs a user name.';
     }
     return e;
   }
   function mailSetupMapErrors(errors) {
-    const map = { 'smtp.host': 'smtpHost', 'smtp.port': 'smtpPort', 'smtp.security': 'smtpSecurity', 'smtp.from': 'smtpFrom', 'smtp.username': 'smtpUser', 'smtp.vaultName': 'smtpVault', 'smtp.secretName': 'smtpSecret', 'smtp.password': 'smtpPassword' };
+    const map = { 'smtp.host': 'smtpHost', 'smtp.port': 'smtpPort', 'smtp.security': 'smtpSecurity', 'smtp.from': 'smtpSender', 'smtp.username': 'smtpUser', 'smtp.vaultName': 'smtpVault', 'smtp.secretName': 'smtpSecret', 'smtp.password': 'smtpPassword' };
     const out = {}; Object.keys(errors || {}).forEach(k => { out[map[k] || k] = errors[k]; }); return out;
   }
   // Save through PUT /api/settings/mail -> { wrote, note, state } | { errors }. Nothing changed -> { wrote: false }.
@@ -18484,6 +18673,7 @@
         }
         if (d.objectId && d.azureOk === false) h += '<div class="gs-facts">Azure resource roles cannot be assigned yet: the engine identity needs <b>User Access Administrator</b> at the tenant root management group.</div>';
         if (d.objectId) h += permRootLines(d);   // §97: both tenant-root lines, always shown
+        if (d.objectId) h += permDirRoleLines(d);   // ADMIN-DISABLE-PROTECTED-1 (b): the engine's Entra role
         if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' +
           '<div class="gs-hint gsPermFor">These rights are for: <b>' + escapeHtml(gsIdentityText(c, 'engine')) + '</b></div>' + gsCode('gsPermScript', permFixScript(d, miss)) + '<div class="gs-hint">' + escapeHtml(permFixHint(d)) + '</div>';
         return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
@@ -22746,9 +22936,12 @@
   // GRAPH-PICKER (owner 2026-11-16): the web app reads the directory from PIM's SQL only. A name the engine has not stored
   // yet answers { lookupPending: true } while the engine looks it up (about a minute). Ask again every 6 s, at most `tries`
   // times; onWait(text) shows the calm waiting line. The last answer is returned (still pending = the caller says so).
+  // LOOKUP-WAIT-1 (owner 2026-11-25, internal "critical issue"): the default was 6 tries (~30 s) but the engine answers in
+  // 15-85 s (wake + job start), so New admin's Add said "still looking" while the answer was on its way. The one-shot
+  // actions (no tries given) now wait up to 25 tries (~2.5 min); the type-ahead pickers keep their own short counts.
   const PIM_LOOKUP_STILL = 'PIM is still looking this up in the directory -- try again in a minute.';
   async function pimLookupRetry(fn, onWait, tries) {
-    const n = tries || 6;
+    const n = tries || 25;
     let r = null;
     for (let i = 0; i < n; i++) {
       r = await fn();
@@ -23756,7 +23949,7 @@
     return lines.concat(runs.length ? runs : ['.\\' + f]).join('\n');
   }
   // REQUIREMENTS 100.77 (owner 2026-10-11, "Yes, outside block"): where a command block leaves the page as PLAIN TEXT or a
-  // document (the environment report / its PDF), no link can sit next to it -- ONE plain line goes UNDER the block, outside
+  // document (the System Documentation / its PDF), no link can sit next to it -- ONE plain line goes UNDER the block, outside
   // it: "What does this script do: <doc page>". Mirrors Get-PimSupportScriptDocLine / Add-PimSupportScriptDocLines in
   // tools/setup/_PimScriptDoc.ps1. The block itself is never changed (download line + run line(s)); the caller renders
   // these lines after the block's closing tag.
@@ -27383,8 +27576,10 @@
   function cwCountdown() { const el = document.getElementById("cwNext"); if (!el) return; const s = Math.max(0, Math.ceil((cwNextAt - Date.now()) / 1000)); el.textContent = cwNextAt ? (s ? "next check in " + s + " s" : "checking ...") : ""; }
   // Labels: 'saved' shows as "queued" (the engine has not run on it yet) and 'waiting' as "on hold" (the engine ran
   // and held it back, reason in Details) -- two different things the old words "saved = waiting for the engine" mixed up.
-  const CW_LABEL = { saved: 'queued', applied: 'applied', live: 'live', waiting: 'on hold', failed: 'failed', stored: 'stored (no platform object)' };
-  const CW_COLOR = { saved: '#9a6700', applied: '#0969da', live: '#1a7f37', waiting: '#9a6700', failed: '#cf222e', stored: '#1a7f37' };
+  // ADMIN-DISABLE-PROTECTED-1 (d): 'superseded' = a later commit changed the same row again before the engine reported on this
+  // change; each row shows only the result of its OWN change (the later change carries its own result).
+  const CW_LABEL = { saved: 'queued', applied: 'applied', live: 'live', waiting: 'on hold', failed: 'failed', stored: 'stored (no platform object)', superseded: 'replaced by a later change' };
+  const CW_COLOR = { saved: '#9a6700', applied: '#0969da', live: '#1a7f37', waiting: '#9a6700', failed: '#cf222e', stored: '#1a7f37', superseded: '#57606a' };
   // A committed row key in plain words: who / what was added, removed or changed (the store key's parts per entity).
   function cwChangeText(entity, k) {
     const p = String(k.key || '').split('|');
@@ -27441,7 +27636,7 @@
     const el = commitWatchBox();
     const tot = { total: 0 };
     (commits || []).forEach(c => (c.keys || []).forEach(k => { tot[k.state] = (tot[k.state] || 0) + 1; tot.total++; }));
-    const done = (tot.live || 0) + (tot.stored || 0);
+    const done = (tot.live || 0) + (tot.stored || 0) + (tot.superseded || 0);
     const busy = (tot.saved || 0) + (tot.applied || 0) + (tot.waiting || 0);
     const head = !commits ? 'Commit watcher' :
       (busy ? ('Going live: ' + done + ' of ' + tot.total + ' change' + (tot.total === 1 ? '' : 's') + ' live') :
@@ -27452,14 +27647,14 @@
     if (cwOpen && commits) {
       // operator 2026-10-02: "it would be nice to show the actual changes" -- EVERY change in plain words (live ones too),
       // what changed on a modify, and the state; problems (failed / waiting) first.
-      const order = { failed: 0, waiting: 1, applied: 2, saved: 3, live: 4, stored: 5 };
+      const order = { failed: 0, waiting: 1, applied: 2, saved: 3, live: 4, stored: 5, superseded: 6 };
       body = commits.map(c => {
         const rows = (c.keys || []).slice().sort((x, y) => (order[x.state] ?? 9) - (order[y.state] ?? 9)).slice(0, 40).map(k =>
           '<div style="padding:3px 0;border-top:1px solid #f0f2f4;"><span style="color:' + (CW_COLOR[k.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(CW_LABEL[k.state] || k.state) + '</span> &middot; ' +
           escapeHtml(cwChangeText(c.entity, k)) +
           ((k.fields || []).length ? '<div style="color:#57606a;font-size:11px;">' + (k.fields || []).map(f => escapeHtml(String(f).replace(' -> ', ' → '))).join('<br>') + '</div>' : '') +
           (k.reason && k.state !== 'live' && k.state !== 'stored' ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(k.reason) + '</div>' : '') + '</div>').join('');
-        const liveN = (c.keys || []).filter(k => k.state === 'live' || k.state === 'stored').length;
+        const liveN = (c.keys || []).filter(k => k.state === 'live' || k.state === 'stored' || k.state === 'superseded').length;
         return '<div style="margin-top:8px;"><b>' + escapeHtml(c.entity) + '</b> <span style="color:#57606a;">' + liveN + ' of ' + (c.keys || []).length + ' live' +
           (c.moreKeys ? ' (+' + c.moreKeys + ' more not tracked)' : '') + '</span>' + rows + '</div>';
       }).join('');
@@ -30631,7 +30826,9 @@
     if (fb && fb.disabled) return;
     const fbLabel = fb ? fb.textContent : '';
     if (fb) { fb.disabled = true; fb.textContent = 'Adding…'; }
-    const slow = setTimeout(() => _wizErr('Still waiting for the server -- it answers one request at a time and may be busy. Nothing is staged yet; this gives up after 2 minutes and says why.', { note: true }), 6000);
+    // LOOKUP-WAIT-1: no "gives up after 2 minutes" -- a directory lookup may take longer; a lookup step replaces this line
+    // with what it is doing.
+    const slow = setTimeout(() => _wizErr('Still working -- nothing is staged yet. If something fails, it is said here.', { note: true }), 6000);
     let failed = null;
     try { await _wizCtx.onFinish(_wizCtx.state, _wizCtx); }
     catch (e) { failed = e; }
@@ -34212,9 +34409,12 @@
         // (office user: delegations only). Exists and PIM's = said: it is adopted, not created.
         if (isServer && s.adminType !== 'external-guest') {
           let chk = null;
-          try { chk = await pimLookupRetry(() => api('GET', '/api/admin-accounts/upn-check?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 20000 })); } catch (_) { chk = null; }
-          // GRAPH-PICKER: never stage on a guess -- the engine is still looking the name up
-          if (chk && chk.verdict === 'pending') throw new Error(PIM_LOOKUP_STILL);
+          // ADMIN-STAGE-NOWAIT-1 (owner 2026-11-25: "the user experience is a disaster" -> "No wait: stage at once"): ONE instant
+          // look at what PIM already knows, never a wait. A name PIM has not looked up yet is staged at once; the ENGINE checks it
+          // when it applies the change (NO-OVERWRITE, PIM-EngineProviders: an existing account that is not PIM's is never
+          // created over or changed -- the change fails with one plain line). The call also starts the lookup, so the answer is
+          // usually there before the commit.
+          try { chk = await api('GET', '/api/admin-accounts/upn-check?upn=' + encodeURIComponent(upn), undefined, { timeoutMs: 10000 }); } catch (_) { chk = null; }
           if (chk && chk.verdict === 'blocked') {
             if (window.confirm(chk.message + '\n\nUse ' + upn + ' as an existing account (office user) instead?')) {
               s.adminType = 'existing-account'; s.existingUpn = upn;
