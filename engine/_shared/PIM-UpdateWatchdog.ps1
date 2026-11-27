@@ -48,6 +48,65 @@ function ConvertTo-PimUtcOrNull {
     return $null
 }
 
+function Get-PimUpdateWatchdogQuickUpdateSeconds {
+    <# LITERAL. 3.1.73 review round 2 X2 (b): a quick-slot execution that ran at least this long STARTED an update (a quick
+       check alone ends in seconds; an update rolls apps / jobs for minutes). #>
+    return 240
+}
+
+function ConvertTo-PimUpdateWatchdogImageRef {
+    <# PURE. 3.1.73 round 6 V3: an image reference as @{ repo; tag; digest } -- '<registry>/<repo>:<tag>', '<registry>/<repo>@sha256:<64>'
+       or '<registry>/<repo>:<tag>@sha256:<64>' (the forms the updater / setup write: Set-PimAcaJobImage takes the tag, a
+       re-point by digest the @sha256 form). The registry host is lower-cased (DNS), the repo kept; a tag is the part after the
+       LAST ':' that follows the last '/' (a registry port is not a tag). Unreadable = $null. #>
+    param([AllowNull()][AllowEmptyString()][string]$Ref)
+    $s = "$Ref".Trim(); if (-not $s) { return $null }
+    $dg = ''; $at = $s.IndexOf('@'); if ($at -ge 0) { $dg = $s.Substring($at + 1).ToLowerInvariant(); $s = $s.Substring(0, $at) }
+    if ($dg -and $dg -notmatch '^sha256:[0-9a-f]{64}$') { return $null }
+    $tag = ''; $sl = $s.LastIndexOf('/'); $co = $s.LastIndexOf(':')
+    if ($co -gt $sl) { $tag = $s.Substring($co + 1); $s = $s.Substring(0, $co) }
+    $fs = $s.IndexOf('/'); $repo = $(if ($fs -gt 0) { $s.Substring(0, $fs).ToLowerInvariant() + $s.Substring($fs) } else { $s })
+    if (-not $repo) { return $null }
+    return @{ repo = $repo; tag = $tag; digest = $dg }
+}
+
+function Test-PimUpdateWatchdogSameImage {
+    <# PURE. 3.1.73 round 6 V3: is -A the same image as -B? The SAME digest (both carry one), else the same repository AND tag (both
+       carry one). A tag on one side and only a digest on the other cannot be told apart here = $false (the caller keeps its fall-back,
+       lastModifiedAt). ⛔ SUPERSEDED (round 5 P6): exact text. #>
+    param([AllowNull()][AllowEmptyString()][string]$A, [AllowNull()][AllowEmptyString()][string]$B)
+    $x = ConvertTo-PimUpdateWatchdogImageRef -Ref $A; $y = ConvertTo-PimUpdateWatchdogImageRef -Ref $B
+    if (-not $x -or -not $y) { return $false }
+    if ($x.digest -and $y.digest) { return [bool]($x.digest -eq $y.digest) }
+    if ($x.repo -ne $y.repo) { return $false }
+    return [bool]($x.tag -and $y.tag -and $x.tag -eq $y.tag)
+}
+
+function Get-PimUpdateWatchdogCrashStreak {
+    <# LITERAL. 3.1.73 review round 3 Y2: this many CONSECUTIVE failed quick slots (two hours of 15-minute slots) = one failure. #>
+    return 8
+}
+
+function Get-PimUpdateWatchdogCodeDayGapHours {
+    <# PURE. 3.1.73 review round 2 X2 (a): the LONGEST gap, in hours, between two consecutive code days of -NightlyDays
+       (PIM_UPDATE_NIGHTLY_DAYS) over the last 400 days before -Now: daily = 24, weekly = 168, monthly '1 * *' = up to 744.
+       '' / '* * *' = 24. $null = no code day at all in that window (an unreadable pattern; Test-PimUpdateNowDayMatch). #>
+    param([AllowNull()][AllowEmptyString()][string]$NightlyDays, [datetime]$Now = (Get-Date).ToUniversalTime())
+    if (-not "$NightlyDays".Trim()) { return 24 }
+    if (-not (Get-Command Test-PimUpdateNowDayMatch -ErrorAction SilentlyContinue)) { return $null }
+    $d0 = $Now.ToUniversalTime().Date
+    $prev = $null; $max = 0
+    for ($i = 400; $i -ge 0; $i--) {
+        $d = [datetime]::SpecifyKind($d0.AddDays(-$i), [DateTimeKind]::Utc)
+        if (-not (Test-PimUpdateNowDayMatch -Days "$NightlyDays" -DateUtc $d)) { continue }
+        if ($null -ne $prev) { $g = ($d - $prev).TotalHours; if ($g -gt $max) { $max = $g } }
+        $prev = $d
+    }
+    if ($null -eq $prev) { return $null }
+    if ($max -le 0) { return 9600 }   # one code day in 400 days: the gap is at least the window
+    return $max
+}
+
 function Get-PimUpdateWatchdogPlan {
     <#
       PURE. Decide whether the update job should be put back on its last-known-good image.
@@ -72,7 +131,15 @@ function Get-PimUpdateWatchdogPlan {
         # both, the job runs every 15 minutes and most executions are seconds-long signal checks that always exit 0 -- they
         # must never count as "the updater works", or a nightly that fails every night stays hidden behind them.
         [AllowEmptyString()][string]$NightlyUtc = '',
-        [bool]$UpdateNowOn = $false
+        # FIXED 2026-11-27 (3.1.72 final review F1, for 3.1.73): IGNORED for the classification -- since SEC-PATCH-PIPELINE-1
+        # pt 9 the quarter-hour slots carry the security check WHATEVER PIM_UPDATE_NOW says, so a quick success never proves the
+        # full-update path, update now on or off. Kept for callers. ⛔ SUPERSEDED: "quick successes are left out only when on".
+        [bool]$UpdateNowOn = $false,
+        # F1: the job's PIM_UPDATE_NIGHTLY_DAYS ('' = every day): on a weekly / monthly install the nightly TIME of an off day is
+        # a quick (security-only) slot too (Get-PimUpdaterRunKind -NightlyDays), so its success proves nothing either.
+        [AllowNull()][AllowEmptyString()][string]$NightlyDays = '',
+        # Z1 (3.1.73 round 4): when the job's current image was stamped (systemData.lastModifiedAt); $null = not known
+        [AllowNull()][object]$ImageSinceUtc = $null
     )
     # 🪤 CARRY THE COUNT EVEN WHEN NOT ACTING. The first version hard-coded failures = 0 on every
     # no-action path, so "1 failure, below the threshold" reported ZERO failures -- the caller could
@@ -101,26 +168,91 @@ function Get-PimUpdateWatchdogPlan {
     # slot (not the nightly one, the first of its slot) is a quick signal check (Get-PimUpdaterRunKind, the rule the updater
     # applies to itself): a Succeeded one says nothing about the update and is left out of the successes. A FAILED one stays a
     # failure -- a check never fails on its own, so it was a full update the signal started there.
-    if ("$NightlyUtc".Trim() -and $UpdateNowOn -and (Get-Command Get-PimUpdaterRunKind -ErrorAction SilentlyContinue)) {
+    # F1 (3.1.73): classified whatever PIM_UPDATE_NOW says (was: `-and $UpdateNowOn`), with the job's day pattern.
+    # FIXED 2026-11-27 (3.1.73 review round 2 X2 (b)): a FAILED quick slot counts only when it STARTED an update there (an
+    # image-only apply / an update-now run). ARM carries no outcome per execution -- only status, startTime, endTime -- so the
+    # run LENGTH tells it: a quick check that only checks ends in well under Get-PimUpdateWatchdogQuickUpdateSeconds; one that
+    # started an update runs for minutes. A failed quick slot with no readable end is NOT counted (fail safe: never restore a
+    # healthy updater on a doubt). Nightly / manual executions count as before.
+    # ⛔ SUPERSEDED (3.1.73 round 2): "A FAILED one stays a failure -- a check never fails on its own".
+    $classified = $false
+    $ex0 = @($ex)   # Y2 (3.1.73 round 3): every execution, for the crash-at-start streak below
+    if ("$NightlyUtc".Trim() -and (Get-Command Get-PimUpdaterRunKind -ErrorAction SilentlyContinue)) {
+        $classified = $true
+        $longSec = Get-PimUpdateWatchdogQuickUpdateSeconds
         $exu = @($ex | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; status = "$($_.status)"; startUtc = (ConvertTo-PimUtcOrNull -Value "$($_.startTime)") } })
         $ex = @($ex | Where-Object {
-            if ("$($_.status)" -ne 'Succeeded') { return $true }
             $st = ConvertTo-PimUtcOrNull -Value "$($_.startTime)"
-            if (-not $st) { return $true }
-            $k = Get-PimUpdaterRunKind -NightlyUtc "$NightlyUtc" -StartUtc $st -Executions $exu -OwnExecution "$($_.name)" -Enabled $true
-            return ("$($k.kind)" -ne 'quick')
+            if (-not $st) { return ("$($_.status)" -ne 'Succeeded') }
+            $k = Get-PimUpdaterRunKind -NightlyUtc "$NightlyUtc" -StartUtc $st -Executions $exu -OwnExecution "$($_.name)" -Enabled $true -NightlyDays "$NightlyDays"
+            if ("$($k.kind)" -ne 'quick') { return $true }
+            if ("$($_.status)" -ne 'Failed') { return $false }
+            $en = $(if ($_.PSObject.Properties['endTime']) { ConvertTo-PimUtcOrNull -Value "$($_.endTime)" } else { $null })
+            return [bool]($en -and ($en - $st).TotalSeconds -ge $longSec)
         })
         if (-not $ex.Count) { return (& $none 'only 15-minute checks so far -- no full update run to judge yet') }
     }
+    # X2 (a): the stale window follows the install's CODE-day interval -- a weekly / monthly install's last full run is up to a
+    # period old by design: stale = the longest gap between its code days + 48 h (daily = -StaleAfterHours, 48 h, as before).
+    $staleH = $StaleAfterHours
+    if ($classified -and "$NightlyDays".Trim()) {
+        $gap = Get-PimUpdateWatchdogCodeDayGapHours -NightlyDays "$NightlyDays" -Now $Now
+        if ($null -eq $gap) { return (& $none "the code day pattern '$("$NightlyDays".Trim())' cannot be read -- this install is security-only; not judged (fix by hand)") }
+        if ($gap -gt 24) { $staleH = [Math]::Max($StaleAfterHours, $gap + 48) }
+    }
     $succeeded = @($ex | Where-Object { "$($_.status)" -eq 'Succeeded' })
-    $lastOk = $null
+    $lastOk = $null; $lastOkExec = $null
     foreach ($s in $succeeded) {
         $t = ConvertTo-PimUtcOrNull -Value "$($s.startTime)"
-        if ($t -and (-not $lastOk -or $t -gt $lastOk)) { $lastOk = $t }
+        if ($t -and (-not $lastOk -or $t -gt $lastOk)) { $lastOk = $t; $lastOkExec = $s }
+    }
+    # FIXED 2026-11-27 (3.1.73 review round 3 Y2): an updater that CRASHES AT START fails every quick slot in seconds -- none of
+    # those counts on its own (X2 b), so on a weekly install it went unnoticed for about two weeks. A STREAK of
+    # Get-PimUpdateWatchdogCrashStreak (8) or more CONSECUTIVE failed quick slots after the last success (a working quick check
+    # exits 0; any Succeeded execution ends the streak) is the updater failing: every full block of 8 counts as ONE failure, and
+    # such a streak voids the "healthy" window (the last full run no longer proves the updater starts).
+    # FIXED 2026-11-27 (3.1.73 review round 4 Z1): an outage OUTSIDE the updater (Entra / ARM / SQL / registry pull) fails every
+    # quick slot too, at any time -- a crash at start follows an IMAGE CHANGE. So a streak counts ONLY from executions that started
+    # AFTER the job's current image was stamped (-ImageSinceUtc = the job's systemData.lastModifiedAt: the updater stamps itself
+    # last in a full run; setup / a restore change it too); not known = no streak (fail safe). And it replaces only staleness: a
+    # last full success whose run ENDED at or after that stamp (a good full run on the current image) inside the window stays
+    # healthy. ⛔ SUPERSEDED (round 3 Y2): "a streak ... voids the healthy window" (whenever it started).
+    # FIXED 2026-11-27 (3.1.73 review round 5 P6, B W4): the image's stamp = the START of the FIRST execution whose template image
+    # IS the job's current image (executions carry their template: .image); -ImageSinceUtc (systemData.lastModifiedAt -- it moves
+    # on ANY job change, e.g. a setup re-run) only when no execution shows the image. ⛔ SUPERSEDED (round 4): lastModifiedAt always.
+    $since = $null
+    $curImg = "$CurrentImage".Trim()
+    if ($curImg) {
+        foreach ($x in $ex0) {
+            if (-not $x.PSObject.Properties['image'] -or -not (Test-PimUpdateWatchdogSameImage -A "$($x.image)" -B $curImg)) { continue }
+            $xs = ConvertTo-PimUtcOrNull -Value "$($x.startTime)"
+            if ($xs -and (-not $since -or $xs -lt $since)) { $since = $xs }
+        }
+    }
+    if (-not $since) { $since = ConvertTo-PimUtcOrNull -Value "$ImageSinceUtc" }
+    $streakFailures = 0; $streakMax = 0
+    if ($classified -and $since) {
+        $counted = @{}; foreach ($c in $ex) { $counted["$($c.name)"] = $true }
+        $run = 0
+        $ordered = @($ex0 | ForEach-Object { [pscustomobject]@{ e = $_; t = (ConvertTo-PimUtcOrNull -Value "$($_.startTime)") } } | Where-Object { $_.t } | Sort-Object t)
+        foreach ($o in $ordered) {
+            if ($lastOk -and $o.t -le $lastOk) { continue }
+            if ($o.t -lt $since) { continue }   # Z1: only from the current image's stamp on (P6: its first execution counts)
+            $stt = "$($o.e.status)"
+            if ($stt -eq 'Succeeded') { $streakFailures += [Math]::Floor($run / (Get-PimUpdateWatchdogCrashStreak)); $run = 0; continue }
+            if ($stt -eq 'Failed' -and -not $counted.ContainsKey("$($o.e.name)")) { $run++; if ($run -gt $streakMax) { $streakMax = $run } }
+        }
+        $streakFailures += [Math]::Floor($run / (Get-PimUpdateWatchdogCrashStreak))
     }
     if ($lastOk) {
         $age = ($Now - $lastOk).TotalHours
-        if ($age -lt $StaleAfterHours) {
+        # Z1: the streak overrides the window only when the last good full run is OLDER than the current image (its run ended
+        # before the stamp); an unreadable end = the good run counts (stay healthy)
+        # FIXED 2026-11-27 (3.1.73 review round 5 P5, A E3): the good run counts for the current image only when it STARTED on
+        # it (its start at or after the stamp) -- ⛔ SUPERSEDED (round 4): "its run ENDED at or after the stamp" (the run that
+        # rolled the image ended after its own stamp, so a crash of the NEW image was never seen).
+        $goodOnCurrent = (-not $since) -or ($lastOk -ge $since)
+        if ($age -lt $staleH -and ($streakFailures -lt 1 -or $goodOnCurrent)) {
             return (& $none ("last success was {0:N1}h ago -- healthy" -f $age))
         }
     }
@@ -135,13 +267,15 @@ function Get-PimUpdateWatchdogPlan {
         }
         $failures++
     }
+    # Y2 (3.1.73 round 3): each full block of 8 consecutive fast-failing quick slots = one failure
+    $failures += [int]$streakFailures
     if ($failures -lt $MinFailures) {
         return (& $none "only $failures failure(s) since the last success -- below the $MinFailures needed to act" $failures)
     }
 
     $since = if ($lastOk) { "no success since $($lastOk.ToString('u'))" } else { 'it has never succeeded' }
     @{ action   = 'restore'
-       reason   = "$failures failure(s) and $since -- restoring the last image that completed an update"
+       reason   = "$failures failure(s)$(if ($streakFailures) { " ($streakFailures from $streakMax consecutive failed 15-minute checks: the updater fails at start)" }) and $since -- restoring the last image that completed an update"
        toImage  = $good
        failures = $failures }
 }
@@ -175,11 +309,12 @@ function Invoke-PimUpdateWatchdog {
         }
         $containers = @($job.properties.template.containers)
         $current = if ($containers.Count -eq 1) { "$($containers[0].image)" } else { '' }
-        $lastGood = ''; $nightly = ''; $unValue = ''; $unRing = ''
+        $lastGood = ''; $nightly = ''; $unValue = ''; $unRing = ''; $nightlyDays = ''
         foreach ($c in $containers) {
             foreach ($v in @($c.env)) {
                 if ("$($v.name)" -eq 'PIM_UPDATE_LAST_GOOD') { $lastGood = "$($v.value)".Trim() }
                 if ("$($v.name)" -eq 'PIM_UPDATE_NIGHTLY_UTC') { $nightly = "$($v.value)".Trim() }
+                if ("$($v.name)" -eq 'PIM_UPDATE_NIGHTLY_DAYS') { $nightlyDays = "$($v.value)".Trim() }   # F1 (3.1.73)
                 if ("$($v.name)" -eq 'PIM_UPDATE_NOW') { $unValue = "$($v.value)".Trim() }
                 if ("$($v.name)" -eq 'PIM_UPDATE_RING') { $unRing = "$($v.value)".Trim() }
             }
@@ -191,10 +326,13 @@ function Invoke-PimUpdateWatchdog {
                  ForEach-Object {
                      [pscustomobject]@{ name = "$($_.name)"
                                         status = "$($_.properties.status)"
-                                        startTime = "$($_.properties.startTime)" }
+                                        startTime = "$($_.properties.startTime)"
+                                        endTime = "$($_.properties.endTime)"     # X2 (b) 3.1.73: the run length of a failed quick slot
+                                        image = "$(@($_.properties.template.containers | Where-Object { $_ })[0].image)" }   # P6 (3.1.73 round 5): the image it ran
                  }
         $plan = Get-PimUpdateWatchdogPlan -Executions $execs -CurrentImage $current -LastGoodImage $lastGood `
-                    -StaleAfterHours $StaleAfterHours -MinFailures $MinFailures -NightlyUtc $nightly -UpdateNowOn $unOn
+                    -StaleAfterHours $StaleAfterHours -MinFailures $MinFailures -NightlyUtc $nightly -UpdateNowOn $unOn -NightlyDays $nightlyDays `
+                    -ImageSinceUtc "$($job.systemData.lastModifiedAt)"   # Z1 (3.1.73 round 4): the current image's stamp time
         if ($plan.action -ne 'restore') {
             & $say "  [watchdog] $($plan.reason)" 'DarkGray'
             return ($plan + @{ acted = $false })

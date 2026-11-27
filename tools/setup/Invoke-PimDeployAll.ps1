@@ -508,9 +508,12 @@ param(
     [switch]$OverrideRingGate,
     [string]$Reason,
     [switch]$SkipUpdater,                    # leaves the environment with NO unattended update path
-    # SEC-PATCH-PIPELINE-1 (3.1.70): the separate image-only security job caj-pim-secupdate (cron 7,22,37,52) -- OFF by default;
-    # only with this switch (or $env:PIM_Setup_SecUpdateJob = 1) the updater step switches it on for THIS install
-    # (tools/setup/Deploy-PimSecUpdateJob.ps1 -Enable). Inert until the owner's cost yes.
+    # SEC-PATCH-PIPELINE-1 (3.1.70): the separate image-only security job caj-pim-secupdate (cron 7,22,37,52).
+    # 3.1.72 K5 (owner 2026-11-27: "it must run in azure" / "no local scripts or jobs"): ON BY DEFAULT -- the updater creates it
+    # in Azure on its first run. This switch is kept only so older command lines still work; it changes nothing.
+    # ⛔ SUPERSEDED (K5): "OFF by default; only with this switch the setup ran Deploy-PimSecUpdateJob.ps1 -Enable".
+    # ⛔ SUPERSEDED 2026-11-27 (SEC-PATCH-PIPELINE-1 pt 8, owner via Invardia "and dont run except when needed"): K5's "ON BY DEFAULT". There is
+    # NO separate job: the updater applies security image releases in its 15-minute check. The switch still changes nothing.
     [switch]$SecUpdateJob,
     # MAIL-SKIP (owner 2026-10-31, a customer install): the 'mailsender' step does nothing -- no mailbox, no Exchange role activated for
     # the deploying identity. The tenant's Exchange admin runs Initialize-PimMailSender (browser sign-in) afterwards.
@@ -3132,18 +3135,14 @@ function Invoke-DefaultStepRunner {
                     catch { $abDetail += "; wake job NOT installed: $($_.Exception.Message) (Commit / Run now wait for the next scheduled start; re-run tools/setup/Deploy-PimWakeJob.ps1)" }
                     $global:LASTEXITCODE = 0
                 }
-                # SEC-PATCH-PIPELINE-1 (3.1.70): the security image job -- ONLY when switched on for this install (-SecUpdateJob /
-                # $env:PIM_Setup_SecUpdateJob = 1); OFF = not even the script runs. Best effort like the wake job: REPORTED.
-                $suOn = [bool]$SecUpdateJob -or ("$($env:PIM_Setup_SecUpdateJob)".Trim() -eq '1')
-                $suj = Join-Path $here 'Deploy-PimSecUpdateJob.ps1'
-                if ($ok -and $suOn -and (Test-Path -LiteralPath $suj)) {
-                    $suArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; UpdateJobName = $UpdateJobName; Enable = $true }
-                    if ("$SqlServerFqdn".Trim() -and "$TenantId".Trim()) { $suArgs['SqlServerFqdn'] = "$SqlServerFqdn".Trim(); $suArgs['SqlDatabase'] = $SqlDatabase; $suArgs['TenantId'] = $TenantId; if ($UseSignedInAccount) { $suArgs['UseSignedInAccount'] = $true } }
-                    $global:LASTEXITCODE = 0
-                    try { & $suj @suArgs | Out-Host; $abDetail += "; security image job caj-pim-secupdate installed (every 15 min at :07/:22/:37/:52, image-only)" }
-                    catch { $abDetail += "; security image job NOT installed: $($_.Exception.Message) (re-run tools/setup/Deploy-PimSecUpdateJob.ps1 -Enable)" }
-                    $global:LASTEXITCODE = 0
-                }
+                # SEC-PATCH-PIPELINE-1 (3.1.70) / 3.1.72 K5 (owner 2026-11-27: "it must run in azure" / "no local scripts or jobs"):
+                # the security image job is ON BY DEFAULT and created IN AZURE by the updater's own converge (step 2e-secupdate,
+                # its first run) -- nothing is run from this host for it any more.
+                # ⛔ SUPERSEDED (K5): "ONLY with -SecUpdateJob / PIM_Setup_SecUpdateJob=1 this step ran Deploy-PimSecUpdateJob.ps1 -Enable".
+                # -SecUpdateJob is kept so older command lines still work; it changes nothing.
+                # ⛔ SUPERSEDED 2026-11-27 (SEC-PATCH-PIPELINE-1 pt 8, owner via Invardia "and dont run except when needed"): "created by the updater in
+                # Azure on its first run" -- no separate job; the updater applies security image releases in its 15-minute check.
+                if ($ok) { $abDetail += "; security image releases: applied by the updater's 15-minute check (no separate job)" }
                 return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt$abDetail" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }

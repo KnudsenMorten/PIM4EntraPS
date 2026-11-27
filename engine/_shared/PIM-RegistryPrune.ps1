@@ -3,18 +3,30 @@
 .SYNOPSIS
     IMAGE-PRUNE (framework IMAGE-PATCH-1, owner decision 2026-11-12): after a SUCCESSFUL update that read back healthy,
     the install's OWN container registry keeps only the current release's image and the one previous release's image,
-    per PIM repository. Every other manifest is deleted.
+    per PIM repository. Every other manifest is deleted. (⛔ SUPERSEDED 2026-11-16, owner's final decision: "the one previous
+    release's image" -- see below; only what runs is kept.)
 
 .DESCRIPTION
     Why: the registry's vulnerability scan reads every stored image, so images of old releases keep reporting old CVEs
     at the install long after it stopped running them. Rollback = one version down (the previous image stays); an older
     rollback rebuilds the image from its source.
 
+    ⛔ SUPERSEDED 2026-11-27 (owner: "old img will create noice from defender so they must go"; framework SEC-PATCH-PIPELINE-1
+       pt 8): "every manifest carrying a version tag >= the CURRENT version (... anything newer ... is never ours to delete)"
+       and "the recorded previous release AND the previous version's tag" (two previous images). NOW, per repository: what
+       the install's apps / jobs RUN (the current release + every live-used digest) plus ONE previous image for rollback --
+       a newer tag nothing runs goes, every untagged manifest nothing runs goes.
+    ⛔ SUPERSEDED by the owner's FINAL decision of 2026-11-16 ("we agreed NOT to keep 1 previous, only the current" / "we
+       will not keep an old image in any repo"; rollback = release a new version; Invardia correction e34f6426, 2026-11-27):
+       "plus ONE previous image for rollback" and the bullet "ONE previous image" below. NOW: ONLY what RUNS (the current
+       release, live-used digests, a PIM_UPDATE_TARGET_IMAGE pinned to a newer version -- 3.1.72 review R9) + the closure of
+       the kept images (index children, referrers). The in-run rollback keeps working: the prune runs only AFTER an OK roll
+       whose Manager read back on the target (Test-PimRegistryPruneDue), so the old image exists for the whole run.
     WHAT IS KEPT, per repository (Get-PimRegistryPrunePlan, PURE):
-      * every manifest carrying a version tag >= the CURRENT version (the current one, and anything newer -- a newer tag
-        is a build of the next version and is never ours to delete before it runs);
-      * every manifest carrying the PREVIOUS version's tag (the highest version tag below the current one, sorted as
-        versions: 3.1.10 > 3.1.9);
+      * every manifest carrying the CURRENT version's tag (the release this install runs now);
+      * ONE previous image: the recorded previous release (what ran before this update, -PreviousDigests -- the newest of
+        them in this repository) when there is one, else the PREVIOUS version's tag (the highest version tag below the
+        current one, sorted as versions: 3.1.10 > 3.1.9);
       * every digest a container app / job of this install RUNS, or its PIM_UPDATE_LAST_GOOD names (re-read right before
         deleting) -- listed in the report with who uses it;
       * the platform child manifests of a KEPT multi-platform image (an image index) -- listed as "child of <tag>";
@@ -99,19 +111,30 @@ function Get-PimRegistryPrunePlan {
         }
     }
     if (-not $hasCur) { $res.reason = "the current version's tag $cur is not in the repository -- nothing deleted"; return $res }
-    $res.previous = if ($prev) { "$prev" } else { '' }
+    # ⛔ SUPERSEDED 2026-11-16 (owner, final; Invardia correction e34f6426): "previous = the previous version, kept". None is kept.
+    $res.previous = ''
 
     $live = @{}; foreach ($d in @($LiveDigests) + @($LiveBy.Keys)) { if ("$d".Trim()) { $live["$d".Trim().ToLowerInvariant()] = $true } }
     $by = @{}; foreach ($k in @($LiveBy.Keys)) { if ("$k".Trim()) { $by["$k".Trim().ToLowerInvariant()] = "$($LiveBy[$k])" } }
     $prevRec = @{}; foreach ($d in @($PreviousDigests)) { if ("$d".Trim()) { $prevRec["$d".Trim().ToLowerInvariant()] = $true } }
     $why = [ordered]@{}; $extra = @{}
+    # (⛔ SUPERSEDED 2026-11-16 -- not kept any more, see the next comment; computed for the report only)
+    # 2026-11-27 (owner: "old img will create noice from defender so they must go"): ONE previous image per repository -- the
+    # recorded one (what ran before; the newest of them here, not the current release), else the previous version's tag
+    $curDg = @{}; foreach ($m in $all) { if (@(@($m.tags) | ForEach-Object { ConvertTo-PimRegistryPruneVersion -Tag "$_" } | Where-Object { $_ -and $_ -eq $cur }).Count) { $curDg["$($m.digest)".Trim().ToLowerInvariant()] = $true } }
+    $recIn = @($all | Where-Object { $d0 = "$($_.digest)".Trim().ToLowerInvariant(); $prevRec.ContainsKey($d0) -and -not $curDg.ContainsKey($d0) } | Sort-Object -Property @{ Expression = { $t = Get-PimRegistryPruneTime $_; if ($t) { $t } else { [datetime]::MinValue } }; Descending = $true })
+    $onePrev = if ($recIn.Count) { "$($recIn[0].digest)".Trim().ToLowerInvariant() } else { '' }
     foreach ($m in $all) {
         $dg = "$($m.digest)".Trim().ToLowerInvariant()
         $vs = @(@($m.tags) | ForEach-Object { ConvertTo-PimRegistryPruneVersion -Tag "$_" } | Where-Object { $_ })
         if (@($vs | Where-Object { $_ -eq $cur }).Count) { $why[$dg] = 'current release' }
-        elseif (@($vs | Where-Object { $_ -gt $cur }).Count) { $why[$dg] = 'newer than the current release' }
-        elseif ($prevRec.ContainsKey($dg)) { $why[$dg] = 'previous release (recorded: ran before this update)'; if (-not ($prev -and @($vs | Where-Object { $_ -eq $prev }).Count)) { $extra[$dg] = $true } }
-        elseif ($prev -and @($vs | Where-Object { $_ -eq $prev }).Count) { $why[$dg] = 'previous release' }
+        # ⛔ SUPERSEDED 2026-11-27: "elseif a tag newer than the current release -> kept ('newer than the current release')"
+        # ⛔ SUPERSEDED by the owner's FINAL decision of 2026-11-16 ("we agreed NOT to keep 1 previous, only the current" / "we
+        # will not keep an old image in any repo"; rollback = release a new version; Invardia correction e34f6426, 2026-11-27):
+        # "ONE previous image per repository -- the recorded one, else the previous version's tag". NOW: only what RUNS (the
+        # current release, live-used digests, a newer pinned target -- R9) + the closure of kept images (children, referrers).
+        # $onePrev / $prev are still computed for the report only. The in-run rollback is unaffected: the prune runs only
+        # after an OK roll whose Manager read back on the target (Test-PimRegistryPruneDue), so the old image exists all run.
         elseif ($live.ContainsKey($dg)) { $why[$dg] = 'live-used by ' + $(if ("$($by[$dg])".Trim()) { "$($by[$dg])" } else { 'a live container or job' }); $extra[$dg] = $true }
         elseif ($m.changeableAttributes -and $m.changeableAttributes.PSObject.Properties['deleteEnabled'] -and $m.changeableAttributes.deleteEnabled -eq $false) { $why[$dg] = 'kept: locked (delete disabled in the registry; not unlocked)'; $extra[$dg] = $true }
     }
@@ -129,10 +152,11 @@ function Get-PimRegistryPrunePlan {
         $tags = @(@($m.tags) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
         if ($why.Contains($dg)) { $res.keep += @{ digest = "$($m.digest)"; tags = $tags; why = $why[$dg]; extra = [bool]$extra[$dg]; child = [bool]("$($why[$dg])" -like 'child of *' -or "$($why[$dg])" -like 'referrer of *') }; continue }
         if (-not $tags.Count) { $res.delete += @{ digest = "$($m.digest)"; tags = @(); why = 'untagged, not in use' }; continue }
-        $res.delete += @{ digest = "$($m.digest)"; tags = $tags; why = 'an older release' }
+        $isNewer = [bool](@($tags | ForEach-Object { ConvertTo-PimRegistryPruneVersion -Tag "$_" } | Where-Object { $_ -and $_ -gt $cur }).Count)
+        $res.delete += @{ digest = "$($m.digest)"; tags = $tags; why = $(if ($isNewer) { 'newer than the current release, not in use' } else { 'an older release' }) }
     }
     $res.ok = $true
-    $res.reason = "current $cur, previous $(if ($prev) { $prev } else { '(none)' })"
+    $res.reason = "current $cur; no previous image kept (owner 2026-11-16: only the current)"
     return $res
 }
 
@@ -188,7 +212,11 @@ function Get-PimRegistryLiveImages {
       manifest since. Only what really runs, or may be started by the watchdog, counts now.
       -WithSource: @{ image; by } objects, by = '<resource> (container <name>)' / '<resource> setting PIM_UPDATE_LAST_GOOD'.
     #>
-    param([object[]]$Resources = @(), [AllowEmptyString()][string]$LoginServer = '', [switch]$WithSource)
+    # 3.1.72 review R9 (2026-11-27): with -CurrentVersion, a PIM_UPDATE_TARGET_IMAGE naming a version NEWER than the current one
+    # is kept too (the image a coming roll needs) -- marked pin = $true: never a live version, never in the release record, and
+    # left out of the plain (non -WithSource) list. Older / equal / a digest-only pin = not kept (as before).
+    param([object[]]$Resources = @(), [AllowEmptyString()][string]$LoginServer = '', [switch]$WithSource, [AllowEmptyString()][string]$CurrentVersion = '')
+    $curPin = ConvertTo-PimRegistryPruneVersion -Tag $CurrentVersion
     $out = New-Object System.Collections.Generic.List[object]
     $ls = "$LoginServer".Trim().ToLowerInvariant()
     foreach ($r in @($Resources | Where-Object { $_ })) {
@@ -201,11 +229,20 @@ function Get-PimRegistryLiveImages {
                     $v = "$($e.value)".Trim()
                     if ($v -and $v.ToLowerInvariant().StartsWith("$ls/")) { $out.Add(@{ image = $v; by = "$rn setting $($e.name)" }) }
                 }
+                if ($curPin) {
+                    foreach ($e in @($c.env | Where-Object { $_ -and "$($_.name)" -eq 'PIM_UPDATE_TARGET_IMAGE' })) {
+                        $v = "$($e.value)".Trim()
+                        if (-not $v -or -not $v.ToLowerInvariant().StartsWith("$ls/")) { continue }
+                        $tg = [regex]::Match($v, ':([^:/@]+)(@sha256:[0-9a-fA-F]{64})?$')
+                        $pv = $(if ($tg.Success) { ConvertTo-PimRegistryPruneVersion -Tag $tg.Groups[1].Value } else { $null })
+                        if ($pv -and $pv -gt $curPin) { $out.Add(@{ image = $v; by = "$rn setting PIM_UPDATE_TARGET_IMAGE (a pinned target newer than $curPin)"; pin = $true }) }
+                    }
+                }
             }
         }
     }
     if ($WithSource) { return @($out.ToArray()) }
-    return @($out.ToArray() | ForEach-Object { $_.image } | Select-Object -Unique)
+    return @($out.ToArray() | Where-Object { -not $_.pin } | ForEach-Object { $_.image } | Select-Object -Unique)
 }
 
 function Get-PimRegistryPruneResources {
@@ -233,6 +270,16 @@ function Get-PimRegistryPruneResources {
         }
         foreach ($r in @($revs | Where-Object { $_.properties.active })) {
             $out.Add([pscustomobject]@{ name = "$($a.name) revision $($r.name)"; properties = $r.properties })
+        }
+    }
+    # 3.1.72 review N3 (2026-11-27): the image of every job EXECUTION still Running (or Processing) is live too -- a running
+    # execution can re-pull its image (a replica restart), so that image must stay even when the job's template moved on.
+    # An execution list that cannot be read THROWS (the caller then deletes nothing), as the revision list does.
+    foreach ($j in $jobs) {
+        if (-not "$($j.id)".Trim()) { continue }
+        $exs = @(& $Arm "$($j.id)/executions" | Where-Object { $_ })
+        foreach ($x in @($exs | Where-Object { "$($_.properties.status)" -match '^(?i)(Running|Processing)$' })) {
+            if ($x.properties.template) { $out.Add([pscustomobject]@{ name = "$($j.name) execution $($x.name)"; properties = [pscustomobject]@{ template = $x.properties.template } }) }
         }
     }
     return @($out.ToArray())
@@ -461,7 +508,8 @@ function Invoke-PimRegistryPrune {
                 if ("$($ref.digest)".Trim()) { $hit += "$($ref.digest)".Trim() }
                 if ("$($ref.tag)".Trim()) {
                     foreach ($m in @($ms | Where-Object { @($_.tags) -contains "$($ref.tag)" })) { $hit += "$($m.digest)" }
-                    $lv = ConvertTo-PimRegistryPruneVersion -Tag "$($ref.tag)"; if ($lv) { $liveVersions += $lv }
+                    $isPin = [bool]($item -is [hashtable] -and $item['pin'])   # R9: a newer pinned target is kept, never a live version
+                    $lv = ConvertTo-PimRegistryPruneVersion -Tag "$($ref.tag)"; if ($lv -and -not $isPin) { $liveVersions += $lv }
                 }
                 foreach ($h in $hit) {
                     $liveDigests.Add($h); $hk = $h.ToLowerInvariant()

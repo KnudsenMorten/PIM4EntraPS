@@ -43,6 +43,11 @@
 
   [!] OFF by default behind a per-ring switch (framework 8.18 "built OFF behind a per-ring switch, ring 0 first"):
      Get-PimUpdateNowDefaultRings (a literal: ring 0) unless PIM_UPDATE_NOW on the updater job says 1/0.
+  [!] SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27; framework SEC-LANE-1 G5 / IMAGE-30MIN-1): security is not something an
+     operator opts out of. The 15-minute slot ALWAYS makes the cheap security check (the one POST /head; GET /signal only as
+     the 404 fallback), whatever PIM_UPDATE_NOW says, and the updater's cron always keeps its quarter-hour slots
+     (Get-PimUpdateNowSelfCronPlan). PIM_UPDATE_NOW=0 stops only FEATURE (code) updates in that slot: a newer image-only
+     <build>.N of the running build is still applied at once; a code release waits for the nightly window, as before.
   [!] The heartbeat's UpdatePending { signal; raisedAt; startedUtc }: ON by default since UPDATE-NOW-HEAD;
      PIM_UPLINK_UPDATENOWFIELDS = 0/false/off/no switches the three fields off.
 
@@ -205,21 +210,142 @@ function Get-PimUpdateNowQuarterCron {
     return ('{0},{1},{2},{3} * * * *' -f $o, ($o + 15), ($o + 30), ($o + 45))
 }
 
+# ---- 3.1.72 review N2/C2 (2026-11-27): never widen the CODE cadence -------------------------------------------------------
+# The quarter-hour cron carries the SECURITY check only. An install whose own nightly cron runs on certain DAYS (a weekly
+# '0 3 * * 0', a monthly '0 3 1 * *') keeps that day pattern as the gate for CODE updates: it is kept on the job as
+# PIM_UPDATE_NIGHTLY_DAYS ('<day-of-month> <month> <day-of-week>', '* * *' = every day = the setting is left off), and
+# Get-PimUpdaterRunKind calls the nightly time of any other day a 'quick' (security-only) slot.
+function Get-PimUpdateNowEveryDay { <# PURE. LITERAL. The day pattern of a daily cron. #> return '* * *' }
+
+function ConvertTo-PimUpdateNowCronNumbers {
+    <# PURE. FIXED 2026-11-27 (3.1.72 final review D2, for 3.1.73): one cron field with day / month NAMES as numbers --
+       -Kind dow: SUN..SAT -> 0..6 ('MON-FRI' -> '1-5', 'SAT,SUN' -> '6,0'); -Kind month: JAN..DEC -> 1..12. Case-insensitive.
+       A name that is not one of them is LEFT AS IT IS (the caller's check then calls the field unreadable -- fail safe). #>
+    param([AllowNull()][AllowEmptyString()][string]$Field, [ValidateSet('dow', 'month')][string]$Kind)
+    $names = $(if ($Kind -eq 'dow') { @('SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT') } else { @('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC') })
+    $base = $(if ($Kind -eq 'dow') { 0 } else { 1 })
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($tok in [regex]::Split("$Field", '([,\-/])')) {
+        $i = [Array]::IndexOf($names, "$tok".ToUpperInvariant())
+        if ($tok -match '^[A-Za-z]{3}$' -and $i -ge 0) { [void]$sb.Append("$($i + $base)") } else { [void]$sb.Append($tok) }
+    }
+    return $sb.ToString()
+}
+
+function ConvertFrom-PimUpdateNowDays {
+    <# PURE. '<dom> <month> <dow>' -> @{ ok; text; every }. '' / $null = every day. A field must be * or digits , - / only.
+       D2 (3.1.73): day-of-week names SUN..SAT and month names JAN..DEC (ranges, lists) are read as their numbers first, and
+       text carries the NUMBERS ('* * SUN' -> '* * 0'). Anything else that is not readable = ok $false (the code gate stays shut). #>
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    $t = ("$Text".Trim() -replace '\s+', ' ')
+    if (-not $t) { return @{ ok = $true; text = (Get-PimUpdateNowEveryDay); every = $true } }
+    $f = @($t -split ' ')
+    if ($f.Count -eq 3) {
+        $f = @($f[0], (ConvertTo-PimUpdateNowCronNumbers -Field $f[1] -Kind month), (ConvertTo-PimUpdateNowCronNumbers -Field $f[2] -Kind dow))
+        $t = ($f -join ' ')
+    }
+    if ($f.Count -ne 3 -or @($f | Where-Object { $_ -notmatch '^(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?(,(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?)*$' }).Count) { return @{ ok = $false; text = $t; every = $false } }
+    return @{ ok = $true; text = $t; every = ($t -eq (Get-PimUpdateNowEveryDay)) }
+}
+
+function Get-PimUpdateNowCodeDaysFact {
+    <# PURE. FIXED 2026-11-27 (3.1.72 final review D3, for 3.1.73): the job's PIM_UPDATE_NIGHTLY_DAYS as a FACT, so an unreadable
+       one is never only a run-log line. @{ state = ok | unreadable; days; line }. '' / '* * *' / a readable pattern = ok.
+       unreadable = the install is security-only (no code update ever): the updater counts it "to fix by hand", records it for the
+       heartbeat (UpdateState.setupFacts.updaterCodeDays -> the setup control 'updater-schedule' = wrong / disabled) and the
+       15-minute check's one line says it. #>
+    param([AllowNull()][AllowEmptyString()][string]$Days)
+    $raw = "$Days".Trim()
+    $d = ConvertFrom-PimUpdateNowDays -Text $raw
+    if ($d.ok) { return @{ state = 'ok'; days = $d.text; line = '' } }
+    return @{ state = 'unreadable'; days = $raw
+              line = "PIM_UPDATE_NIGHTLY_DAYS '$raw' cannot be read -- CODE updates are CLOSED here (security check only); re-run Deploy-PimUpdateJob with a readable -Cron (fix by hand)" }
+}
+
+function Resolve-PimUpdateJobSetupCron {
+    <# PURE. FIXED 2026-11-27 (3.1.72 final review F3, for 3.1.73): the NIGHTLY cron a setup re-run works with.
+         -Cron / -CronGiven   the -Cron parameter and whether it was passed      -ExistingCron  the job's cronExpression now
+         -ExistingNightlyUtc / -ExistingNightlyDays   PIM_UPDATE_NIGHTLY_UTC / PIM_UPDATE_NIGHTLY_DAYS on the job now
+       -Cron passed = that cron. NOT passed = the job's existing DAY pattern is kept (SUPERSEDED: the default '0 3 * * *' replaced
+       it and dropped PIM_UPDATE_NIGHTLY_DAYS -- a weekly install became daily for code on a plain re-run):
+         the job still on a one-time-a-day-pattern cron (e.g. '0 3 * * 0')            -> that cron
+         PIM_UPDATE_NIGHTLY_UTC + a non-daily readable PIM_UPDATE_NIGHTLY_DAYS       -> 'M H <days>' at that time
+         PIM_UPDATE_NIGHTLY_UTC + an UNREADABLE PIM_UPDATE_NIGHTLY_DAYS              -> 'M H * * *' + keepDaysRaw = the value
+                                                                                       (written back as it is: the gate stays shut)
+         anything else (a new job, a daily one)                                       -> -Cron (the default), as before
+       @{ cron; keepDaysRaw; reason }. #>
+    param([AllowNull()][AllowEmptyString()][string]$Cron, [bool]$CronGiven, [AllowNull()][AllowEmptyString()][string]$ExistingCron = '',
+          [AllowNull()][AllowEmptyString()][string]$ExistingNightlyUtc = '', [AllowNull()][AllowEmptyString()][string]$ExistingNightlyDays = '')
+    $def = @{ cron = "$Cron"; keepDaysRaw = ''; reason = '' }
+    if ($CronGiven) { $def.reason = "-Cron '$Cron' as given"; return $def }
+    $every = Get-PimUpdateNowEveryDay
+    $ec = Get-PimUpdateNowCronPlan -NightlyCron $ExistingCron
+    if ($ec.ok -and "$($ec.nightlyDays)" -ne $every) { return @{ cron = "$($ec.nightlyCron)"; keepDaysRaw = ''; reason = "kept the job's own cron '$($ec.nightlyCron)' (no -Cron given)" } }
+    $n = ConvertFrom-PimUpdateNowNightly -Text $ExistingNightlyUtc
+    $raw = "$ExistingNightlyDays".Trim()
+    if ($n.ok -and $raw) {
+        $d = ConvertFrom-PimUpdateNowDays -Text $raw
+        if ($d.ok -and -not $d.every) { $c = ('{0} {1} {2}' -f $n.minute, $n.hour, $d.text); return @{ cron = $c; keepDaysRaw = ''; reason = "kept the job's day pattern '$($d.text)' at $($n.text) UTC (no -Cron given)" } }
+        if (-not $d.ok) { return @{ cron = ('{0} {1} * * *' -f $n.minute, $n.hour); keepDaysRaw = $raw; reason = "kept the job's PIM_UPDATE_NIGHTLY_DAYS '$raw' as it is (unreadable: CODE updates stay closed -- give -Cron to fix it)" } }
+    }
+    $def.reason = "-Cron '$Cron' (the default; the job had no day pattern to keep)"
+    return $def
+}
+
+function Test-PimUpdateNowCronField {
+    <# PURE. Does -Value match ONE cron field (*, n, a-b, */s, a-b/s, lists)? #>
+    param([string]$Field, [int]$Value, [int]$Min, [int]$Max)
+    foreach ($part in @("$Field" -split ',')) {
+        $step = 1; $rng = $part
+        if ($part -match '^(.+)/(\d{1,2})$') { $rng = $Matches[1]; $step = [Math]::Max(1, [int]$Matches[2]) }
+        $lo = $Min; $hi = $Max
+        if ($rng -eq '*') { }
+        elseif ($rng -match '^(\d{1,2})-(\d{1,2})$') { $lo = [int]$Matches[1]; $hi = [int]$Matches[2] }
+        elseif ($rng -match '^\d{1,2}$') { $lo = [int]$rng; $hi = $(if ($part -match '/') { $Max } else { [int]$rng }) }
+        else { continue }
+        if ($Value -ge $lo -and $Value -le $hi -and (($Value - $lo) % $step) -eq 0) { return $true }
+    }
+    return $false
+}
+
+function Test-PimUpdateNowDayMatch {
+    <# PURE. Is -DateUtc a nightly day of -Days ('<dom> <month> <dow>')? Cron rule: when BOTH day-of-month and day-of-week
+       are restricted, either one matching is enough. Unreadable days = $false (fail safe: no code update outside the day). #>
+    param([AllowNull()][AllowEmptyString()][string]$Days, [Parameter(Mandatory)][datetime]$DateUtc)
+    $d = ConvertFrom-PimUpdateNowDays -Text $Days
+    if (-not $d.ok) { return $false }
+    if ($d.every) { return $true }
+    $f = @($d.text -split ' ')
+    $u = $DateUtc.ToUniversalTime()
+    if (-not (Test-PimUpdateNowCronField -Field $f[1] -Value $u.Month -Min 1 -Max 12)) { return $false }
+    $dow = [int]$u.DayOfWeek
+    $domOk = Test-PimUpdateNowCronField -Field $f[0] -Value $u.Day -Min 1 -Max 31
+    $dowOk = (Test-PimUpdateNowCronField -Field $f[2] -Value $dow -Min 0 -Max 7) -or ($dow -eq 0 -and (Test-PimUpdateNowCronField -Field $f[2] -Value 7 -Min 0 -Max 7))
+    if ($f[0] -ne '*' -and $f[2] -ne '*') { return [bool]($domOk -or $dowOk) }
+    return [bool]($domOk -and $dowOk)
+}
+
 function Get-PimUpdateNowCronPlan {
     <#
       PURE. A nightly cron ('M H * * *', the only shape the updater has ever been deployed with) -> @{ ok; nightlyUtc
-      ('HH:mm'); quarterCron; nightlyCron; reason }. Any other shape -> ok = $false: the job keeps that cron, every execution
-      a full run, and UPDATE NOW cannot be used there (said in reason).
+      ('HH:mm'); quarterCron; nightlyCron; nightlyDays; reason }. Any other shape -> ok = $false: the job keeps that cron, every
+      execution a full run, and UPDATE NOW cannot be used there (said in reason).
+      3.1.72 review N2/C2: a cron at ONE time on certain days ('M H <dom> <month> <dow>', e.g. weekly '0 3 * * 0') is ok too:
+      nightlyDays = '<dom> <month> <dow>' (the CODE gate, kept on the job as PIM_UPDATE_NIGHTLY_DAYS); a daily cron = '* * *'.
     #>
     param([AllowNull()][AllowEmptyString()][string]$NightlyCron)
     $c = ("$NightlyCron".Trim() -replace '\s+', ' ')
-    $res = @{ ok = $false; nightlyUtc = ''; quarterCron = ''; nightlyCron = $c; reason = '' }
-    if ($c -notmatch '^(\d{1,2}) (\d{1,2}) \* \* \*$') { $res.reason = "the updater's cron '$c' is not a daily 'M H * * *' -- it is kept, and UPDATE NOW needs a daily one"; return $res }
-    $m = [int]$Matches[1]; $h = [int]$Matches[2]
+    $res = @{ ok = $false; nightlyUtc = ''; quarterCron = ''; nightlyCron = $c; nightlyDays = (Get-PimUpdateNowEveryDay); reason = '' }
+    if ($c -notmatch '^(\d{1,2}) (\d{1,2}) (\S+) (\S+) (\S+)$') { $res.reason = "the updater's cron '$c' is not a daily 'M H * * *' -- it is kept, and UPDATE NOW needs a daily one"; return $res }
+    $m = [int]$Matches[1]; $h = [int]$Matches[2]; $days = "$($Matches[3]) $($Matches[4]) $($Matches[5])"
     if ($m -gt 59 -or $h -gt 23) { $res.reason = "the updater's cron '$c' is not a valid time"; return $res }
+    $dd = ConvertFrom-PimUpdateNowDays -Text $days
+    if (-not $dd.ok) { $res.reason = "the updater's cron '$c' has a day pattern ('$days') this updater cannot read -- it is kept, and UPDATE NOW needs a daily one"; return $res }
     $res.ok = $true; $res.nightlyUtc = ('{0:D2}:{1:D2}' -f $h, $m); $res.quarterCron = Get-PimUpdateNowQuarterCron -Minute $m
-    $res.nightlyCron = ('{0} {1} * * *' -f $m, $h)
-    $res.reason = "nightly at $($res.nightlyUtc) UTC; every 15 minutes = '$($res.quarterCron)'"
+    $res.nightlyDays = $dd.text
+    $res.nightlyCron = ('{0} {1} {2}' -f $m, $h, $dd.text)
+    $res.reason = $(if ($dd.every) { "nightly at $($res.nightlyUtc) UTC; every 15 minutes = '$($res.quarterCron)'" }
+                    else { "code updates only at $($res.nightlyUtc) UTC on the days '$($dd.text)' (the install's own cron, kept as PIM_UPDATE_NIGHTLY_DAYS); every 15 minutes = '$($res.quarterCron)' for the security check" })
     return $res
 }
 
@@ -229,31 +355,52 @@ function Get-PimUpdateNowSelfCronPlan {
       Contributor on its resource group -- the right that rolls the Manager and stamps its own image).
         -CurrentCron   the job's cronExpression now          -NightlyUtc  PIM_UPDATE_NIGHTLY_UTC on the job ('' = none)
         -Enabled       Test-PimUpdateNowEnabled for this environment
-      Returns @{ action = none|quarter|nightly; cron; nightlyUtc; reason }:
-        quarter  on, and the job is on a daily cron         -> cron = the 15-minute cron, nightlyUtc = that daily time
-                 on, a 15-minute cron with no nightly time  -> none (it cannot tell the nightly slot; said in reason)
-        nightly  OFF, and the job is on its 15-minute cron  -> back to the daily cron at PIM_UPDATE_NIGHTLY_UTC
-        none     everything else (already right)
+      Returns @{ action = none|quarter; cron; nightlyUtc; reason }:
+        quarter  the job is on a daily cron                 -> cron = the 15-minute cron, nightlyUtc = that daily time
+                 a 15-minute cron off the nightly minute    -> corrected to the nightly minute's quarter-hours
+                 any other cron, nightly time readable      -> the 15-minute cron on PIM_UPDATE_NIGHTLY_UTC's minute
+                 any other cron, no nightly time            -> the 15-minute cron on setup's default nightly 03:00
+        none     already right, or a 15-minute cron with no nightly time (it cannot tell the nightly slot; said in reason)
+      SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27; framework SEC-LANE-1 G5 / IMAGE-30MIN-1): -Enabled (PIM_UPDATE_NOW) no
+      longer changes the cron -- the quarter-hour slot carries the security check, and security is not something an
+      operator opts out of. (Was: OFF on a 15-minute cron -> 'nightly', back to the daily cron.) -Enabled is kept for callers.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$CurrentCron, [AllowNull()][AllowEmptyString()][string]$NightlyUtc, [bool]$Enabled)
+    # 3.1.72 review N2/C2: -NightlyDays = PIM_UPDATE_NIGHTLY_DAYS on the job; every result carries nightlyDays (the CODE gate,
+    # '* * *' = every day). A cron at one time on certain days (weekly / monthly) keeps its day pattern there.
+    param([AllowNull()][AllowEmptyString()][string]$CurrentCron, [AllowNull()][AllowEmptyString()][string]$NightlyUtc, [bool]$Enabled,
+          [AllowNull()][AllowEmptyString()][string]$NightlyDays = '')
     $cur = ("$CurrentCron".Trim() -replace '\s+', ' ')
     $n = ConvertFrom-PimUpdateNowNightly -Text $NightlyUtc
+    $keptDays = ConvertFrom-PimUpdateNowDays -Text $NightlyDays
+    $kd = $(if ($keptDays.ok) { $keptDays.text } else { "$NightlyDays".Trim() })
     $daily = Get-PimUpdateNowCronPlan -NightlyCron $cur
     $isQuarter = [bool]($cur -match '^\d{1,2},\d{1,2},\d{1,2},\d{1,2} \* \* \* \*$')
-    if ($Enabled) {
-        if ($daily.ok) { return @{ action = 'quarter'; cron = $daily.quarterCron; nightlyUtc = $daily.nightlyUtc; reason = "UPDATE NOW is on: the updater checks every 15 minutes ($($daily.reason))" } }
-        if ($isQuarter -and $n.ok) {
-            $want = Get-PimUpdateNowQuarterCron -Minute $n.minute
-            if ($cur -eq $want) { return @{ action = 'none'; cron = $cur; nightlyUtc = $n.text; reason = "every 15 minutes, nightly at $($n.text) UTC" } }
-            return @{ action = 'quarter'; cron = $want; nightlyUtc = $n.text; reason = "the 15-minute cron did not match the nightly time $($n.text) -- corrected" }
+    if ($daily.ok) { return @{ action = 'quarter'; cron = $daily.quarterCron; nightlyUtc = $daily.nightlyUtc; nightlyDays = $daily.nightlyDays; reason = "the updater checks every 15 minutes -- the security check always, feature updates when UPDATE NOW is on ($($daily.reason))" } }
+    # FIXED 2026-11-27 (3.1.72 final review D2, for 3.1.73): a cron at ONE time whose day part this updater still cannot read
+    # (not '* * *', not a number / name pattern) keeps the CODE gate CLOSED: nightlyDays = that day part as written (unreadable ->
+    # Test-PimUpdateNowDayMatch says no day, ever) -- never the daily fall-back below, which WIDENED code updates to every night.
+    # The security check still gets its quarter-hour slots. SUPERSEDED: such a cron fell through to "nightlyDays = $kd" (''
+    # on a job without PIM_UPDATE_NIGHTLY_DAYS = every day).
+    if ($cur -match '^(\d{1,2}) (\d{1,2}) (\S+) (\S+) (\S+)$' -and [int]$Matches[1] -le 59 -and [int]$Matches[2] -le 23) {
+        $um = [int]$Matches[1]; $uh = [int]$Matches[2]; $ud = "$($Matches[3]) $($Matches[4]) $($Matches[5])"
+        if ($ud -ne (Get-PimUpdateNowEveryDay) -and -not (ConvertFrom-PimUpdateNowDays -Text $ud).ok) {
+            return @{ action = 'quarter'; cron = (Get-PimUpdateNowQuarterCron -Minute $um); nightlyUtc = ('{0:D2}:{1:D2}' -f $uh, $um); nightlyDays = $ud; codeGateClosed = $true
+                      reason = "the updater's cron '$cur' has a day part ('$ud') this updater cannot read -- CODE updates stay CLOSED (security check only, every 15 minutes) until Deploy-PimUpdateJob is re-run with a readable -Cron (fix by hand)" }
         }
-        if ($isQuarter) { return @{ action = 'none'; cron = $cur; nightlyUtc = ''; reason = 'a 15-minute cron with no nightly time (PIM_UPDATE_NIGHTLY_UTC) -- left as it is; re-run Deploy-PimUpdateJob' } }
-        return @{ action = 'none'; cron = $cur; nightlyUtc = ''; reason = $daily.reason }
     }
     if ($isQuarter -and $n.ok) {
-        return @{ action = 'nightly'; cron = ('{0} {1} * * *' -f $n.minute, $n.hour); nightlyUtc = $n.text; reason = "UPDATE NOW is off: back to the nightly cron at $($n.text) UTC" }
+        $want = Get-PimUpdateNowQuarterCron -Minute $n.minute
+        # D2 (3.1.73): an unreadable kept day pattern is said in the run line (the code gate stays closed)
+        $kdNote = $(if (-not $keptDays.ok) { " -- PIM_UPDATE_NIGHTLY_DAYS '$kd' cannot be read: CODE updates stay CLOSED (security check only) until Deploy-PimUpdateJob is re-run (fix by hand)" } else { '' })
+        if ($cur -eq $want) { return @{ action = 'none'; cron = $cur; nightlyUtc = $n.text; nightlyDays = $kd; reason = "every 15 minutes, nightly at $($n.text) UTC$kdNote" } }
+        return @{ action = 'quarter'; cron = $want; nightlyUtc = $n.text; nightlyDays = $kd; reason = "the 15-minute cron did not match the nightly time $($n.text) -- corrected$kdNote" }
     }
-    return @{ action = 'none'; cron = $cur; nightlyUtc = $n.text; reason = 'UPDATE NOW is off -- the cron is left as it is' }
+    if ($isQuarter) { return @{ action = 'none'; cron = $cur; nightlyUtc = ''; nightlyDays = $kd; reason = 'a 15-minute cron with no nightly time (PIM_UPDATE_NIGHTLY_UTC) -- left as it is; re-run Deploy-PimUpdateJob' } }
+    # not daily, not quarter-hourly: the quarter-hour slot is restored on the nightly minute the job keeps (else setup's 03:00)
+    $nn = $(if ($n.ok) { $n } else { ConvertFrom-PimUpdateNowNightly -Text '03:00' })
+    $src = $(if ($n.ok) { "PIM_UPDATE_NIGHTLY_UTC $($nn.text)" } else { "no readable nightly time -- setup's default $($nn.text)" })
+    return @{ action = 'quarter'; cron = (Get-PimUpdateNowQuarterCron -Minute $nn.minute); nightlyUtc = $nn.text; nightlyDays = $kd
+              reason = "the updater's cron '$cur' has no 15-minute slot -- restored on the nightly time ($src) UTC: the security check runs every 15 minutes" }
 }
 
 # ---- which kind of execution is this ---------------------------------------------------------------------------------
@@ -280,24 +427,36 @@ function Get-PimUpdaterRunKind {
         -StartUtc         when THIS execution started (its ARM startTime; else the process start, with a wider -ToleranceSeconds)
         -Executions       the job's executions (ConvertTo-PimUpdateNowExecutions); $null = not readable
         -OwnExecution     CONTAINER_APP_JOB_EXECUTION_NAME
-        -Enabled          Test-PimUpdateNowEnabled ($false = legacy: every execution a full run)
+        -Enabled          Test-PimUpdateNowEnabled -- IGNORED since SEC-PATCH-PIPELINE-1 pt 9 (was: $false = legacy, every
+                          execution a full run); the quarter-hour slot is always 'quick' (the security check)
       A scheduled execution starts on a 15-minute slot (the nightly minute's quarter-hour minutes), within -ToleranceSeconds.
       Off-slot, or not the FIRST execution of its slot (the scheduled one already ran) = somebody started it = manual.
     #>
     param([AllowNull()][AllowEmptyString()][string]$NightlyUtc, [Parameter(Mandatory)][datetime]$StartUtc, [AllowNull()][object[]]$Executions = $null,
-          [AllowNull()][AllowEmptyString()][string]$OwnExecution = '', [int]$ToleranceSeconds = 120, [bool]$Enabled = $true)
+          [AllowNull()][AllowEmptyString()][string]$OwnExecution = '', [int]$ToleranceSeconds = 120, [bool]$Enabled = $true,
+          # 3.1.72 review N2/C2: PIM_UPDATE_NIGHTLY_DAYS ('' = every day). The nightly TIME on a day outside it is a 'quick'
+          # (security-only) slot -- the install's own code cadence is never widened.
+          [AllowNull()][AllowEmptyString()][string]$NightlyDays = '')
     $n = ConvertFrom-PimUpdateNowNightly -Text $NightlyUtc
     $s = $StartUtc.ToUniversalTime()
     if (-not $n.ok) { return @{ kind = 'legacy'; reason = 'the updater runs on its nightly cron (no PIM_UPDATE_NIGHTLY_UTC) -- a full run, as before'; startUtc = $s; slotUtc = $null } }
-    # OFF = every execution is a full run, as before (a hand-started run must never become a quick check that does nothing;
-    # a job still on its 15-minute cron gets its nightly cron back from that full run -- Invoke-PimUpdateNowSelfCronUpdate).
-    if (-not $Enabled) { return @{ kind = 'legacy'; reason = 'update now is off for this environment -- a full run, as before'; startUtc = $s; slotUtc = $null } }
+    # SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27): -Enabled (PIM_UPDATE_NOW) no longer makes every execution a full run --
+    # a scheduled quarter-hour slot is ALWAYS 'quick' (it carries the security check; security is not something an operator
+    # opts out of), and the quick check itself stops only feature updates when UPDATE NOW is off. A hand-started execution is
+    # still 'manual' (off-slot, or not the slot's first) -- never a do-nothing check. -Enabled is kept for callers.
     $q = Get-PimUpdateNowSlotMinutes
     $o = $n.minute % $q
     $back = (($s.Minute - $o) % $q + $q) % $q
     $slot = (New-Object datetime ($s.Year, $s.Month, $s.Day, $s.Hour, $s.Minute, 0, [DateTimeKind]::Utc)).AddMinutes(-$back)
-    if ($slot.Hour -eq $n.hour -and $slot.Minute -eq $n.minute) {
+    $isNightlyTime = ($slot.Hour -eq $n.hour -and $slot.Minute -eq $n.minute)
+    if ($isNightlyTime -and (Test-PimUpdateNowDayMatch -Days $NightlyDays -DateUtc $slot)) {
         return @{ kind = 'nightly'; reason = "the nightly slot ($($n.text) UTC) -- the normal update"; startUtc = $s; slotUtc = $slot }
+    }
+    if ($isNightlyTime -and ($s - $slot).TotalSeconds -le $ToleranceSeconds) {
+        # N2/C2: the nightly time, not a nightly day -> the scheduled security check of this slot (a hand start stays manual below)
+        $own0 = "$OwnExecution".Trim(); $taken = $false
+        foreach ($e in @($Executions | Where-Object { $null -ne $_ })) { if ($own0 -and "$($e.name)" -eq $own0) { continue }; if ($null -ne $e.startUtc -and $e.startUtc -ge $slot -and $e.startUtc -lt $s) { $taken = $true } }
+        if (-not $taken) { return @{ kind = 'quick'; reason = ("the {0:HH:mm} UTC slot is the nightly time, but not a nightly day ('{1}') -- the security check only" -f $slot, "$NightlyDays".Trim()); startUtc = $s; slotUtc = $slot; offDay = $true } }
     }
     $delta = ($s - $slot).TotalSeconds
     if ($delta -gt $ToleranceSeconds) {
@@ -473,11 +632,14 @@ function Invoke-PimUpdateNowQuickCheck {
                         Set-PimUpdateNowHandled); signal = the parsed signal
         run = $false -> the caller says -line and exits 0
       Gates, in order (the cheap ones first; the network only when it can matter):
-        off for this ring -> no install key (community / Invardia-less: NO call) -> no ring -> the signal (404 / 0 / 5xx =
+        no install key (community / Invardia-less: NO call) -> no ring -> the signal (404 / 0 / 5xx =
         no signal, quietly; 304 = the stored one) -> updateNow false -> older than 24 h -> already acted on (raisedAt) ->
         not newer than the installed version -> PIM_UPDATE_HOLD -> another updater execution running (guard Strict mode is
         NEVER a gate: owner 2026-11-09 "strict mode can never block an update")
         (unreadable = not started).
+        -Enabled $false (PIM_UPDATE_NOW=0) = SECURITY ONLY (SEC-PATCH-PIPELINE-1 pt 9): the same one call is made, and an
+        update-now / expedite for anything but a newer image-only build of the running release is not started here (it
+        waits for the nightly window) -- securityOnly = $true in the result.
       Seams: -Head { } -> @{ status; body; error }  (UPDATE-NOW-HEAD: POST /head; the seam holds the key + licence, this
                                                        function never sees the licence)
              -Signal { param($ETag) } -> @{ status; body; etag }   (the old GET /signal: only when -Head is not given, or
@@ -490,11 +652,14 @@ function Invoke-PimUpdateNowQuickCheck {
           [AllowEmptyString()][string]$RunningVersion = '', [bool]$Hold = $false, [bool]$StrictActive = $false, [AllowEmptyString()][string]$StrictUntil = '',
           [scriptblock]$Head, [scriptblock]$Signal, [scriptblock]$GetState, [scriptblock]$SetState, [scriptblock]$IsRunning,
           [AllowEmptyString()][string]$UpdateWindow = '', [AllowEmptyString()][string]$NightlyUtc = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false; source = ''; imageOnly = $false }
+    $res = @{ run = $false; line = ''; signal = $null; stateSaved = $false; source = ''; imageOnly = $false; securityOnly = $false }
     try {
         $now = $NowUtc.ToUniversalTime()
         $ringN = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$ringN)
-        if (-not $Enabled) { $res.line = "update now: off for ring $("$Ring".Trim()) (PIM_UPDATE_NOW) -- nothing checked"; return $res }
+        # SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27; SEC-LANE-1 G5 / IMAGE-30MIN-1): security is not something an operator
+        # opts out of -- with UPDATE NOW OFF the check still runs (the same one /head call); only an image-only release of the
+        # running build may start an update then (gate below). (Was: off -> "nothing checked", no call.)
+        $res.securityOnly = (-not $Enabled)
         if (-not "$InstallKey".Trim()) { $res.line = 'update now: this install has no install key -- no signal is asked for'; return $res }
         if ($ringN -lt 0 -or $ringN -gt 3) { $res.line = "update now: this environment has no update ring ('$Ring') -- nothing checked"; return $res }
 
@@ -530,7 +695,8 @@ function Invoke-PimUpdateNowQuickCheck {
                     # IMAGE-30MIN-1 (SEC-LANE-1 G5): a newer image-only build of the running release needs no expedite mark --
                     # it is applied in THIS slot (once per version: the signal key is version#sequence#now). A code release
                     # still waits for an expedite or the nightly slot. Running jobs are never stopped (images only).
-                    if ($hp.ok -and -not $hp.apply -and (Test-PimUpdateNowImageOnly -Running $RunningVersion -Target "$($hp.version)")) {
+                    # UPDATE NOW off (security only): an image-only release is applied now even when Invardia marked it 'window'.
+                    if ($hp.ok -and (-not $hp.apply -or -not $Enabled) -and (Test-PimUpdateNowImageOnly -Running $RunningVersion -Target "$($hp.version)")) {
                         $hp.apply = 'now'; $hp.reason = 'image-only security release (IMAGE-30MIN-1)'; $res.imageOnly = $true
                     }
                     if ($hp.ok) { $sig = ConvertTo-PimUpdateNowHeadSignal -Head $hp -Previous $prevSig -NowUtc $now }
@@ -569,6 +735,15 @@ function Invoke-PimUpdateNowQuickCheck {
                 & $save $(if ($hv) { "update now: Invardia's head for ring $ringN is $hv with no expedite -- nothing to do (the nightly run covers it)" } else { "update now: Invardia's head for ring $ringN names no version -- nothing to do" })
             } else { & $save 'update now: no update-now signal for this environment -- nothing to do' }
             return $res
+        }
+        if (-not $Enabled) {
+            # security only: a code release (an expedite, or the old /signal for a non-image-only version) waits for the nightly
+            # window, exactly as before; an image-only build of the running release goes on through every gate below.
+            if (-not $isHead -and (Test-PimUpdateNowImageOnly -Running $RunningVersion -Target "$($sig.version)")) { $res.imageOnly = $true }
+            if (-not $res.imageOnly) {
+                & $save "update now: off for ring $ringN (PIM_UPDATE_NOW) -- the security check ran; $($sig.version) is a code release, not an image-only one of $RunningVersion -- it waits for the nightly window"
+                return $res
+            }
         }
         $raised = $sig.raisedAt
         if ($null -eq $raised) { & $save 'update now: a signal without raisedAt -- ignored'; return $res }
@@ -769,10 +944,18 @@ function Get-PimUpdateNowApprovalDecision {
         the ring approves a version OLDER than the signal's -> not ok (not approved for this ring yet)
         the ring's version is not newer than the installed  -> not ok
         else ok (the update runs; it installs what the RING approves)
+      3.1.72 review N1/C1 (2026-11-27): -ImageOnly = the run was let through by an IMAGE-ONLY signal (IMAGE-30MIN-1, also the
+      security-only slot of SEC-PATCH-PIPELINE-1 pt 9). Then it may start ONLY when the ring-approved version is itself an
+      image-only build of the RUNNING version (Test-PimUpdateNowImageOnly); a code release the ring approves is not rolled
+      by it -- not ok, "waits for the nightly window", nothing changed. This holds with UPDATE NOW on as well.
     #>
-    param([AllowEmptyString()][string]$SignalVersion = '', [AllowEmptyString()][string]$ApprovedVersion = '', [AllowEmptyString()][string]$RunningVersion = '', [AllowEmptyString()][string]$Ring = '')
+    param([AllowEmptyString()][string]$SignalVersion = '', [AllowEmptyString()][string]$ApprovedVersion = '', [AllowEmptyString()][string]$RunningVersion = '', [AllowEmptyString()][string]$Ring = '',
+          [bool]$ImageOnly = $false)
     $a = "$ApprovedVersion".Trim()
     if (-not $a) { return @{ ok = $false; line = "update now: ring $Ring approves no version -- the signal's $SignalVersion is not approved for this ring; nothing started" } }
+    if ($ImageOnly -and -not (Test-PimUpdateNowImageOnly -Running $RunningVersion -Target $a)) {
+        return @{ ok = $false; line = "update now: the image-only security release $SignalVersion let this slot through, but ring $Ring approves $a -- not an image-only build of the running $RunningVersion; it waits for the nightly window (nothing changed)" }
+    }
     $c1 = Compare-PimUpdateNowVersion -A $a -B $SignalVersion
     if ($null -eq $c1) { return @{ ok = $false; line = "update now: the ring's version ('$a') or the signal's ('$SignalVersion') cannot be read -- nothing started" } }
     if ($c1 -lt 0) { return @{ ok = $false; line = "update now: ring $Ring approves $a, older than the signal's $SignalVersion -- not approved for this ring yet; nothing started" } }
@@ -846,10 +1029,13 @@ function Invoke-PimUpdateNowSelfCronUpdate {
         $j = & $Arm 'GET' $path $null
         if (-not $j) { $res.ok = $false; $res.detail = "update now: the updater's own job '$JobName' could not be read -- its cron is left as it is"; return $res }
         $cur = "$($j.properties.configuration.scheduleTriggerConfig.cronExpression)"
-        $plan = Get-PimUpdateNowSelfCronPlan -CurrentCron $cur -NightlyUtc (& $envOf $j 'PIM_UPDATE_NIGHTLY_UTC') -Enabled $Enabled
+        $plan = Get-PimUpdateNowSelfCronPlan -CurrentCron $cur -NightlyUtc (& $envOf $j 'PIM_UPDATE_NIGHTLY_UTC') -Enabled $Enabled -NightlyDays (& $envOf $j 'PIM_UPDATE_NIGHTLY_DAYS')
         $res.action = $plan.action
         if ($plan.action -eq 'none') { $res.detail = "update now: cron '$cur' -- $($plan.reason)"; return $res }
         $want = "$($plan.cron)"; $nightly = "$($plan.nightlyUtc)"
+        # 3.1.72 review N2/C2: the CODE day pattern rides along -- PIM_UPDATE_NIGHTLY_DAYS set for a weekly / monthly cron, left
+        # off (removed) for every day
+        $days = "$($plan.nightlyDays)".Trim(); $daysEvery = (-not $days -or $days -eq (Get-PimUpdateNowEveryDay))
         [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write {
             $jw = & $Arm 'GET' $path $null
             if (-not $jw) { throw "job '$JobName' not found" }
@@ -865,8 +1051,9 @@ function Invoke-PimUpdateNowSelfCronUpdate {
                 $target = if ($cs.Count -eq 1) { $cs[0] } else { @($cs | Where-Object { "$($_.name)" -eq $JobName }) | Select-Object -First 1 }
                 if ($target) {
                     $envList = New-Object System.Collections.Generic.List[object]
-                    foreach ($v in @($target.env)) { if ($v -and "$($v.name)" -ne 'PIM_UPDATE_NIGHTLY_UTC') { $envList.Add($v) | Out-Null } }
+                    foreach ($v in @($target.env)) { if ($v -and "$($v.name)" -notin @('PIM_UPDATE_NIGHTLY_UTC', 'PIM_UPDATE_NIGHTLY_DAYS')) { $envList.Add($v) | Out-Null } }
                     $envList.Add([pscustomobject]@{ name = 'PIM_UPDATE_NIGHTLY_UTC'; value = $nightly }) | Out-Null
+                    if (-not $daysEvery) { $envList.Add([pscustomobject]@{ name = 'PIM_UPDATE_NIGHTLY_DAYS'; value = $days }) | Out-Null }
                     $target | Add-Member -NotePropertyName 'env' -NotePropertyValue @($envList.ToArray()) -Force
                 }
             }
@@ -875,6 +1062,7 @@ function Invoke-PimUpdateNowSelfCronUpdate {
         $got = "$($back.properties.configuration.scheduleTriggerConfig.cronExpression)"
         if ($got -ne $want) { $res.ok = $false; $res.detail = "update now: wrote cron '$want' but read back '$got' -- the next full run tries again"; return $res }
         if ($nightly -and (& $envOf $back 'PIM_UPDATE_NIGHTLY_UTC') -ne $nightly) { $res.ok = $false; $res.detail = "update now: cron '$want' written, but PIM_UPDATE_NIGHTLY_UTC did not read back -- the next full run tries again"; return $res }
+        if ($nightly -and -not $daysEvery -and (& $envOf $back 'PIM_UPDATE_NIGHTLY_DAYS') -ne $days) { $res.ok = $false; $res.detail = "update now: cron '$want' written, but PIM_UPDATE_NIGHTLY_DAYS did not read back -- the next full run tries again"; return $res }
         $res.changed = $true
         $res.detail = "update now: the updater's cron '$cur' -> '$want' ($($plan.reason)); it takes effect from the next slot"
         return $res

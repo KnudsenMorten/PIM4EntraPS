@@ -1,0 +1,13 @@
+{
+  "version": "3.1.72",
+  "date": "2026-11-27",
+  "type": "feature",
+  "summary": "Security image updates now apply within 15 minutes of reaching your update ring, and old images are removed after each update.",
+  "new": [
+    {
+      "title": "Security updates within 15 minutes",
+      "text": "PIM Manager now checks every 15 minutes for a security image update released to its ring and applies it at once, separately from normal updates. After each update only the images still in use are kept."
+    }
+  ],
+  "fixes": []
+}

@@ -329,8 +329,20 @@ if ($UpdateSource) {
 # framework 8.18 UPDATE-NOW: -Cron is the NIGHTLY time. The job keeps it as PIM_UPDATE_NIGHTLY_UTC ('HH:mm'), so the updater
 # can tell its nightly slot from its 15-minute signal checks (engine/_shared/PIM-UpdateNow.ps1). A -Cron that is not a daily
 # 'M H * * *' keeps its own cron and the marker 'none' = every execution a full run, as before.
+# FIXED 2026-11-27 (3.1.72 final review F3, for 3.1.73): a re-run WITHOUT -Cron keeps the job's existing day pattern
+# (Resolve-PimUpdateJobSetupCron) -- ⛔ SUPERSEDED: the default '0 3 * * *' replaced it and dropped PIM_UPDATE_NIGHTLY_DAYS.
+$exCronText = ''; if ($exists -and $existingJob) { try { $exCronText = "$($existingJob.properties.configuration.scheduleTriggerConfig.cronExpression)" } catch { $exCronText = '' } }
+$cronR = Resolve-PimUpdateJobSetupCron -Cron $Cron -CronGiven ($PSBoundParameters.ContainsKey('Cron')) -ExistingCron $exCronText `
+             -ExistingNightlyUtc "$($existingEnv['PIM_UPDATE_NIGHTLY_UTC'])" -ExistingNightlyDays "$($existingEnv['PIM_UPDATE_NIGHTLY_DAYS'])"
+if ("$($cronR.cron)" -ne "$Cron") { Note "cron         $($cronR.cron) (UTC) -- $($cronR.reason)" }
+$Cron = "$($cronR.cron)"
 $unCronPlan = Get-PimUpdateNowCronPlan -NightlyCron $Cron
 $envVars += "PIM_UPDATE_NIGHTLY_UTC=$(if ($unCronPlan.ok) { $unCronPlan.nightlyUtc } else { 'none' })"
+# 3.1.72 review N2/C2: a -Cron at one time on certain days (weekly '0 3 * * 0') keeps that day pattern as the CODE gate --
+# the quarter-hour slots carry only the security check there (update-job-entry.ps1, Get-PimUpdaterRunKind -NightlyDays).
+if ($unCronPlan.ok -and "$($unCronPlan.nightlyDays)" -ne (Get-PimUpdateNowEveryDay)) { $envVars += "PIM_UPDATE_NIGHTLY_DAYS=$($unCronPlan.nightlyDays)" }
+# F3: an UNREADABLE kept day pattern is written back as it is (the code gate stays shut; -Cron fixes it), and said
+elseif ("$($cronR.keepDaysRaw)".Trim()) { $envVars += "PIM_UPDATE_NIGHTLY_DAYS=$("$($cronR.keepDaysRaw)".Trim())"; Warn "PIM_UPDATE_NIGHTLY_DAYS '$("$($cronR.keepDaysRaw)".Trim())' cannot be read -- kept, CODE updates stay closed; pass -Cron to set a readable schedule" }
 # IDENTITY-MOVE-1 line 7 (2026-11-09): a re-run KEEPS the identity the job signs in as. The env list above is built from
 # scratch, so without this a re-run dropped PIM_ManagedIdentityClientId and put a moved updater back on its retired
 # system identity (no rights left -> every update fails). The job's identities themselves are never changed by an update.
@@ -348,11 +360,14 @@ foreach ($m in @($ringPlan.messages)) { if ($m -match '(?i)CHANGES|default ring|
 # framework 8.18 UPDATE-NOW, the cron: every 15 minutes on the nightly minute's quarter-hours when UPDATE NOW is on for this
 # environment (its ring is in Get-PimUpdateNowDefaultRings, or PIM_UPDATE_NOW=1 on the job), else the nightly cron itself.
 # The updater converges its OWN cron to the same answer on its next full run (Invoke-PimUpdateNowSelfCronUpdate).
+# SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27; SEC-LANE-1 G5 / IMAGE-30MIN-1): the quarter-hour cron ALWAYS -- the slots
+# carry the security check, and security is not something an operator opts out of. PIM_UPDATE_NOW=0 stops only feature
+# updates in those slots (the updater's quick check). (Was: off -> the nightly cron itself.)
 $unEnabled = Test-PimUpdateNowEnabled -Ring "$($ringPlan.ring)" -Value "$($existingEnv['PIM_UPDATE_NOW'])"
-$jobCron = if ($unCronPlan.ok -and $unEnabled) { $unCronPlan.quarterCron } elseif ($unCronPlan.ok) { $unCronPlan.nightlyCron } else { "$Cron" }
+$jobCron = if ($unCronPlan.ok) { $unCronPlan.quarterCron } else { "$Cron" }
 Step 'schedule'
-if ($unCronPlan.ok -and $unEnabled) { Note "update now is ON for ring $($ringPlan.ring): cron '$jobCron' -- the nightly update at $($unCronPlan.nightlyUtc) UTC, a seconds-long signal check on the other slots" }
-elseif ($unCronPlan.ok) { Note "update now is off for ring $($ringPlan.ring): cron '$jobCron' (nightly at $($unCronPlan.nightlyUtc) UTC)" }
+if ($unCronPlan.ok -and $unEnabled) { Note "update now is ON for ring $($ringPlan.ring): cron '$jobCron' -- the nightly update at $($unCronPlan.nightlyUtc) UTC, a seconds-long check on the other slots" }
+elseif ($unCronPlan.ok) { Note "update now is off for ring $($ringPlan.ring): cron '$jobCron' -- the nightly update at $($unCronPlan.nightlyUtc) UTC; the other slots check for security (image-only) releases only" }
 else { Warn $unCronPlan.reason }
 
 $entry ='/app/PIM4EntraPS/tools/pim-engine/update-job-entry.ps1'

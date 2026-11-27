@@ -379,8 +379,13 @@ function Get-PimSetupControlStates {
     else {
         $last = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'tsUtc')
         $deployed = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'configuredUtc'); if (-not $deployed) { $deployed = ConvertTo-PimSetupUtc (Get-PimSetupField $us 'recordedUtc') }
+        # FIXED 2026-11-27 (3.1.72 final review D3, for 3.1.73): the updater recorded its CODE day pattern (PIM_UPDATE_NIGHTLY_DAYS)
+        # as unreadable (UpdateState.setupFacts.updaterCodeDays) -> its schedule never runs a code update = wrong / disabled,
+        # heartbeat-visible (the existing control and its enum; the fix text names Deploy-PimUpdateJob).
+        $cdState = ''; try { $cdState = "$(Get-PimSetupField (Get-PimSetupField $us 'setupFacts') 'updaterCodeDays')".Trim() } catch { $cdState = '' }
         # 100.103: the updater records EVERY run (also "nothing to do") in UpdateState.tsUtc -- checkedUtc = that run.
-        if ($last -and ($now - $last).TotalHours -le 48) { & $add 'updater-schedule' 'ok' 'enabled' $null $last }
+        if ($cdState -eq 'unreadable') { & $add 'updater-schedule' 'wrong' 'disabled' $null $last }
+        elseif ($last -and ($now - $last).TotalHours -le 48) { & $add 'updater-schedule' 'ok' 'enabled' $null $last }
         elseif ($last) { & $add 'updater-schedule' 'wrong' 'disabled' $null $last }
         elseif ($deployed -and ($now - $deployed).TotalHours -le 48) { & $add 'updater-schedule' 'unknown' $null 'not-due-yet' }   # installed, first nightly run not due yet
         else { & $add 'updater-schedule' 'wrong' 'disabled' }

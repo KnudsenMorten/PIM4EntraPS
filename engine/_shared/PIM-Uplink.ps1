@@ -2242,6 +2242,7 @@ function Get-PimUplinkTenantCapabilities {
 #   Update          { lastUpdaterRunUtc; lastUpdaterResult }  -- UPD-07 (framework ALIGN-AUTO-ALL item 2): the updater's last
 #                   run from UpdateState, EXACTLY these two keys of Invardia's closed Update shape; left out when no run is
 #                   recorded. Until Invardia adds Update to PIM's contract it is dropped there alone (soft, named in Dropped).
+#                   3.1.72 K1 (TELEMETRY-SAME-1): plus installed / available when each is a valid version (soft).
 #   Database        { tier; dtu; maxSizeMb; usedMb; peakLogWritePct1h; minutesAtLimit1h; statsAsync; statsStalePct;
 #                   statsRefreshedUtc }  -- SQL-STATS-PROOF (framework 12.27 point 5, the SI / EPS shape): every key SOFT, an
 #                   unreadable one is left out; nothing readable = no Database at all (New-PimUplinkDatabaseField)
@@ -2998,6 +2999,49 @@ function ConvertTo-PimUplinkUpdaterResult {
     return $null
 }
 
+function ConvertTo-PimUplinkVersionText {
+    <#
+      PURE. 3.1.72 K1 (TELEMETRY-SAME-1): a version as Invardia's Update.installed / Update.available take it -- 'x.y.z' or
+      'x.y.z.n' -- from a version, a tag ('v3.1.72') or an image reference ('reg.azurecr.io/pim-manager:3.1.72', '@sha256:..'
+      dropped: the updater records ToVersion as the image it rolled). '' when it is anything else (empty, 'latest', a digest
+      only, two parts, five parts): the key is then LEFT OUT, never a wrong value. Small on purpose (the uplink does not load
+      PIM-UpdateState.ps1's ConvertTo-PimUpdateStateVersion in every process).
+    #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return '' }
+    if (-not ($Value -is [string] -or $Value -is [version])) { return '' }
+    $s = "$Value".Trim()
+    if (-not $s) { return '' }
+    if ($s.Contains('@')) { $s = ($s -split '@')[0] }
+    if ($s -match '[:/]') { $s = ($s -split ':')[-1] }
+    $s = $s -replace '^(?i)v', ''
+    if ($s -cnotmatch '^\d{1,9}\.\d{1,9}\.\d{1,9}(\.\d{1,9})?$') { return '' }
+    return $s
+}
+
+function Get-PimUplinkUpdateVersions {
+    <#
+      PURE. 3.1.72 K1 (TELEMETRY-SAME-1, Invardia 2026-11-26 decision (b)): the two version keys of the heartbeat's Update block,
+      from the updater's OWN run record (pim.Settings 'UpdateState', New-PimUpdateStateRecord), each only when it is a valid
+      version (ConvertTo-PimUplinkVersionText) -- otherwise the key is left out:
+        installed  = lastSuccessVersion: the version the last SUCCESSFUL update run left this install on (a roll records the
+                     image it rolled to; a quiet run the version it found running; a failed run carries the previous one on;
+                     caj-pim-secupdate records its swap in the same key, secupdate-job-entry.ps1 step 6)
+        available  = approvedVersion: what this install's ring offered on the updater's last read (Invardia's signed manifest
+                     / the ring channel, $script:PimRingApproved); a held install records none = left out
+      Returns an ordered dictionary with 0, 1 or 2 keys. The deployment's record (kind 'deploy', no run yet) = none.
+    #>
+    param([AllowNull()][object]$UpdateState)
+    $o = [ordered]@{}
+    $us = ConvertFrom-PimUplinkStoredValue $UpdateState
+    if ($null -eq $us -or "$(Get-PimUplinkField $us 'kind')".Trim() -ieq 'deploy') { return $o }
+    $inst = ConvertTo-PimUplinkVersionText (Get-PimUplinkField $us 'lastSuccessVersion')
+    if ($inst) { $o['installed'] = $inst }
+    $avail = ConvertTo-PimUplinkVersionText (Get-PimUplinkField $us 'approvedVersion')
+    if ($avail) { $o['available'] = $avail }
+    return $o
+}
+
 function New-PimUplinkUpdateField {
     <#
       PURE. UPD-07 (framework ALIGN-AUTO-ALL item 2, "the updater reaches every install"): Update { lastUpdaterRunUtc;
@@ -3010,6 +3054,8 @@ function New-PimUplinkUpdateField {
                            record's outcome maps to none of them
       No record, the deployment's record (kind 'deploy': no update run yet) or a record without a readable run time = $null:
       the field is LEFT OUT, never a guessed run.
+      3.1.72 K1 (TELEMETRY-SAME-1, Invardia decision (b)): after the two run keys, installed + available from the same record
+      (Get-PimUplinkUpdateVersions), each only when it is a valid version x.y.z / x.y.z.n -- else that key is left out.
     #>
     param([AllowNull()][object]$UpdateState)
     $us = ConvertFrom-PimUplinkStoredValue $UpdateState
@@ -3019,6 +3065,12 @@ function New-PimUplinkUpdateField {
     if (-not $at) { return $null }
     $res = ConvertTo-PimUplinkUpdaterResult -Outcome "$(Get-PimUplinkField $us 'outcome')" -Action "$(Get-PimUplinkField $us 'action')"
     $o = [ordered]@{ lastUpdaterRunUtc = $at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture); lastUpdaterResult = $res }
+    # 3.1.72 K1 (TELEMETRY-SAME-1): Update.installed / Update.available -- SOFT, each only when it is a valid version
+    # (Get-PimUplinkUpdateVersions); PIM_UPLINK_UPDATEVERSIONS=0/off leaves both out (rollback switch).
+    if ("$([Environment]::GetEnvironmentVariable('PIM_UPLINK_UPDATEVERSIONS'))".Trim() -notmatch '^(?i)(0|off|false|no)$') {
+        $uvs = Get-PimUplinkUpdateVersions -UpdateState $us
+        foreach ($uvk in @($uvs.Keys)) { $o[$uvk] = $uvs[$uvk] }
+    }
     # IMAGE-PRUNE CONTRACT point 5 (Invardia e1de70b7, 2026-11-12): Update.imagePrune -- the last clean-up's totals.
     # PIM_UPLINK_IMAGEPRUNE=0/off leaves it out; no (valid) record = left out.
     if ("$([Environment]::GetEnvironmentVariable('PIM_UPLINK_IMAGEPRUNE'))".Trim() -notmatch '^(?i)(0|off|false|no)$') {
@@ -3936,7 +3988,11 @@ function Invoke-PimUplinkCycle {
           # UPLINK-QUIET (owner 2026-11-10): count this cycle in UplinkState.failedCycles (cycles in a row with a report that
           # was not delivered; a fully delivered cycle resets it to 0). $false = carry the stored count unchanged -- a FLUSH
           # before an alert mail is not one of the job's cycles.
-          [bool]$CountFailedCycle = $true)
+          [bool]$CountFailedCycle = $true,
+          # 3.1.72 K2 (framework UPLINK-SLOT-1 "the post-update heartbeat must not wait for its slot"): the heartbeat goes in
+          # THIS cycle whatever the cadence says -- set ONLY by Send-PimUplinkPostUpdateHeartbeat (the updater's / the security
+          # image job's last step after a roll). $false = the cadence + the version rule, exactly as before.
+          [bool]$ForceHeartbeat = $false)
     $NowUtc = $NowUtc.ToUniversalTime()
     $envNameRead = $null
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
@@ -4157,7 +4213,7 @@ function Invoke-PimUplinkCycle {
         if ("$($r.Status)" -eq 'ok') { $sent++; $floor = $NowUtc.ToString('o'); $marks = @{}; $lastHb = $null }
         else { $failed++; $stopped = $true; $consent = 'off'; $why += "optin: $($r.Reason)" }
     }
-    if (-not $stopped -and ($hbVerChanged -or (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc -Hours $HeartbeatHours))) {
+    if (-not $stopped -and ($ForceHeartbeat -or $hbVerChanged -or (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc -Hours $HeartbeatHours))) {
         # PIM 100.36: the SQL space, identified heartbeat only, both numbers or neither (never a 0 / a guess).
         $hbCounts = $null
         if ($sender.Mode -eq 'identified' -and $SqlSpace -and $SqlSpace.ContainsKey('sqlUsedMb') -and $SqlSpace.ContainsKey('sqlMaxMb') -and
@@ -4852,8 +4908,15 @@ function Invoke-PimUplinkJob {
           # PIM 100.167 (lane G, framework 8.16 "Order and links"): a FLUSH before a customer alert mail -- the job's own
           # cycle (same watermarks, so nothing is sent twice), a smaller budget and no pause between records.
           # 0 / -1 = the hourly job's own values.
+          # 3.1.72 K2: the POST-UPDATE heartbeat (Send-PimUplinkPostUpdateHeartbeat, run in the updater / the security image
+          # job, NOT the tick): the heartbeat goes in this cycle whatever the cadence (-ForceHeartbeat on the cycle), named with
+          # -Version (the version the install now runs -- the process itself still runs the image it started on). OFF sends
+          # NOTHING here (never the opt-out: that is the tick's job). Nothing that acts AS the engine runs in the other process:
+          # no permission snapshot refresh, no support-access sweep, no supportSqlAccess / licence probe.
+          [switch]$PostUpdate, [string]$Version = '',
           [int]$MaxPerCycle = 0, [int]$PauseMs = -1)
     $on = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.uplink' -Quiet))
+    if ($PostUpdate -and -not $on) { return [pscustomobject]@{ ran = $false; whatIf = [bool]$WhatIf; detail = "post-update heartbeat: not sent -- Invardia support link is off (feature 'telemetry.uplink')" } }
     # §11: OFF still runs ONE check -- an install that was on and is now off reports its opt-out once (Invoke-PimUplinkCycle).
     # Never on = nothing is sent and nothing is called; no SQL store while off = nothing to check, quietly.
     $offDetail = "Invardia support link: off (feature 'telemetry.uplink')"  # SUPPORT-LINK-1 point 1: the shown name; the job stays 'uplink'
@@ -4876,6 +4939,11 @@ function Invoke-PimUplinkJob {
     $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $verFile = Join-Path $sol 'VERSION'
     $ver = if (Test-Path -LiteralPath $verFile) { "$(Get-Content -Raw -LiteralPath $verFile)".Trim() } elseif ($env:PIM_VERSION) { "$env:PIM_VERSION" } else { '' }
+    if ($PostUpdate) {
+        # K2: the version the install runs AFTER the roll; never this process's own (older) VERSION file. No valid one = nothing.
+        $ver = ConvertTo-PimUplinkVersionText "$Version"
+        if (-not $ver) { return [pscustomobject]@{ ran = $false; whatIf = [bool]$WhatIf; detail = "post-update heartbeat: not sent -- no valid version ('$Version')" } }
+    }
     $tid = ''; if (Get-Command Resolve-PimLicenseTenantId -ErrorAction SilentlyContinue) { try { $tid = "$(Resolve-PimLicenseTenantId)" } catch { } }
     $lic = $null; try { $lic = Get-PimLicense } catch { $lic = $null }
     $proHere = $false; if ($lic -and (Get-Command Test-PimLicenseIsProForTenant -ErrorAction SilentlyContinue)) { try { $proHere = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $tid).pro } catch { } }
@@ -4904,7 +4972,7 @@ function Invoke-PimUplinkJob {
     # reads of its OWN app roles -- it holds Application.Read.All -- and the Manager's builder; NO ARM: rootReader is carried
     # from the last real check, see Update-PimEnginePermissionSnapshot). BEFORE the setup facts, so this heartbeat sends it.
     # PIM_UPLINK_PERMSNAPSHOT=0 = off. Time-bounded (15 s a call, no retry, 30 s in all); never throws, never fails the run.
-    if ($on -and -not $WhatIf -and (Get-Command Update-PimEnginePermissionSnapshot -ErrorAction SilentlyContinue) -and (Test-PimEnginePermissionSnapshotOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
+    if ($on -and -not $WhatIf -and (Get-Command Update-PimEnginePermissionSnapshot -ErrorAction SilentlyContinue) -and (Test-PimEnginePermissionSnapshotOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue) -and -not $PostUpdate) {
         $psPrevTo = $global:PIM_RestTimeoutSec
         try {
             $psAppId = "$($global:PIM_RuntimeAppId)".Trim(); if (-not $psAppId) { $psAppId = "$($env:AZURE_CLIENT_ID)".Trim() }
@@ -4982,7 +5050,7 @@ function Invoke-PimUplinkJob {
     }
     # PIM 100.167 / framework 8.16: the cause fields -- feature 'telemetry.causes' (OFF by default until Invardia is live).
     # The licence probe is a PLAIN scriptblock (dynamic scope), invoked by the cycle only when the identified heartbeat is due.
-    $causesOn = [bool]($on -and "$key".Trim() -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.causes' -Quiet))
+    $causesOn = [bool]($on -and "$key".Trim() -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.causes' -Quiet) -and -not $PostUpdate)
     $licProbe = $null; $hyAd = $null
     if ($causesOn) {
         if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) { $licProbe = { @(Invoke-PimGraph -Path '/subscribedSkus?$select=skuPartNumber,capabilityStatus,servicePlans' -All) } }
@@ -4990,6 +5058,7 @@ function Invoke-PimUplinkJob {
     }
     $cyc = @{}
     if ($MaxPerCycle -gt 0) { $cyc['MaxPerCycle'] = $MaxPerCycle }
+    if ($PostUpdate) { $cyc['ForceHeartbeat'] = $true }   # 3.1.72 K2: the post-update heartbeat never waits for its slot
     # UPLINK-ROUNDS-84: the scheduled job sends in rounds (up to 5 x 20 POSTs, 65 s apart: at most ~9 min, inside the 15-minute
     # release-window cadence and the tick's 7-day run limit). A FLUSH before an alert mail (-MaxPerCycle) and -WhatIf: one round.
     if ($MaxPerCycle -le 0 -and -not $WhatIf) { $cyc['MaxRounds'] = (Get-PimUplinkMaxRounds); $cyc['RoundWaitSec'] = (Get-PimUplinkRoundWaitSeconds) }
@@ -5022,8 +5091,11 @@ function Invoke-PimUplinkJob {
     # PIM 100.158 (c): Testing / Stable per engine scope -- KEPT on every cycle of an identified install (pim.Settings
     # 'ScopeStability'; the code hashed again only when VERSION changed), SENT only while PIM_Telemetry_ScopeStability is on
     # (OFF by default until Invardia confirms the field). Best-effort: a failure here never fails the run or the heartbeat.
+    # FIXED 2026-11-27 (3.1.72 review A3): NOT in -PostUpdate -- the other process (the updater) never runs ScopeStability nor
+    # writes pim.Settings 'ScopeStability' under the new version (that is engine state; the tick's next run on the new
+    # version does it). The post-update heartbeat sends no ScopeStability field.
     $ssField = $null
-    if ($on -and "$key".Trim() -and (Get-Command Update-PimScopeStability -ErrorAction SilentlyContinue)) {
+    if ($on -and "$key".Trim() -and (Get-Command Update-PimScopeStability -ErrorAction SilentlyContinue) -and -not $PostUpdate) {
         try {
             $ssPrev = $null; try { $ssPrev = & $get 'ScopeStability' } catch { $ssPrev = $null }
             $ssHashes = $null
@@ -5071,7 +5143,7 @@ function Invoke-PimUplinkJob {
     # state after it (read-only access, open grants, opened / closed in 24 h, half-done grants) goes into this run's report
     # and, on the identified heartbeat, into supportSqlAccess. An install without the support-session step: 'not installed'.
     $jitSweep = $null; $jitState = $null
-    if ("$cs".Trim() -and (Get-Command Invoke-PimSupportJitSweep -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
+    if ("$cs".Trim() -and (Get-Command Invoke-PimSupportJitSweep -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue) -and -not $PostUpdate) {
         $jitQ = { param($q) Invoke-PimSqlScalar -ConnectionString $cs -Sql $q }
         $jitAud = $null
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { $jitAud = { param($a) Write-PimAuditEvent -Action "$($a.action)" -Target "$($a.target)" -After $a -Result "$($a.result)" -Actor 'engine:uplink' } }
@@ -5080,7 +5152,7 @@ function Invoke-PimUplinkJob {
         if ($jitSweep) { foreach ($jw in @($jitSweep.problems)) { Write-Host "  [uplink] support access: $jw" -ForegroundColor Yellow } }
     }
     $ssaSb = $null
-    if ($on -and "$key".Trim() -and (Test-PimUplinkSupportSqlAccessOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) {
+    if ($on -and "$key".Trim() -and (Test-PimUplinkSupportSqlAccessOn) -and (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue) -and -not $PostUpdate) {
         $ssaJobCs = $cs; $ssaJobNow = $NowUtc; $ssaJobJit = $jitState
         $ssaJobGroup = 'grp-pim-sql-admins'
         try { if (Get-Command Get-PimInstallName -ErrorAction SilentlyContinue) { $ssaJobGroup = "$(Get-PimInstallName -Role sqlAdminGroup)".Trim() } elseif ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { $ssaJobGroup = "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } } catch { }
@@ -5148,7 +5220,7 @@ function Invoke-PimUplinkJob {
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
             -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField -CountsAsOf $countsAsOfSb -LastRun $lastRunField -Published $publishedSb `
-            -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport -CountFailedCycle ($MaxPerCycle -le 0)
+            -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport -CountFailedCycle (($MaxPerCycle -le 0) -and -not $PostUpdate)
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
     $claimSt = $null; try { $claimSt = & $get 'InstallKeyClaimState'; if ($claimSt -is [string]) { $claimSt = $claimSt | ConvertFrom-Json } } catch { $claimSt = $null }
@@ -5177,5 +5249,109 @@ function Invoke-PimUplinkJob {
         }
     } catch { }
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = $detail
-                       warning = [bool]$w.warning; warningKind = "$($w.kind)"; warningSummary = "$($w.summary)" }
+                       warning = [bool]$w.warning; warningKind = "$($w.kind)"; warningSummary = "$($w.summary)"; heartbeat = [bool]$r.heartbeat }
+}
+
+# ---- 3.1.72 K2 -- THE POST-UPDATE HEARTBEAT (framework UPLINK-SLOT-1: "after an update the install's first report goes out AT
+# ONCE, not on the next cadence tick") ---------------------------------------------------------------------------------------
+# The heartbeat is the tick's hourly job; after a roll Invardia waited up to ~60 min for the new version (3.1.71 ring-1 smoke,
+# Invardia 2026-11-27). The updater (tools/pim-engine/update-job-entry.ps1, normal + image-only path) calls THIS as its LAST
+# step after a successful roll (⛔ SUPERSEDED 2026-11-27, SEC-PATCH-PIPELINE-1 pt 8: "and the security image job
+# (secupdate-job-entry.ps1, after its swap)" -- that job is deleted): ONE heartbeat through the
+# uplink job's own code (Invoke-PimUplinkJob -PostUpdate: the same records, the same UplinkState watermarks, a flush budget
+# of 5 records, one round, no pause -- the alert flush's shape), named with the version the install now runs.
+function Get-PimUplinkPostUpdateDecision {
+    <# PURE. Does this run send the post-update heartbeat? ONLY when it moved the Manager (the web app) to a new image and the
+       Manager is not unhealthy (-Healthy $false). Nothing rolled (already on the image: a quiet run, the follow-up run on the
+       new updater) = none -- the hourly heartbeat stays as it is. @{ send; reason } #>
+    param([bool]$ManagerRolled = $false, [AllowNull()][object]$Healthy = $null)
+    if (-not $ManagerRolled) { return @{ send = $false; reason = 'nothing rolled in this run (the Manager was already on the image)' } }
+    if ($Healthy -is [bool] -and -not $Healthy) { return @{ send = $false; reason = 'the Manager is not healthy on the new image' } }
+    return @{ send = $true; reason = 'the Manager rolled to a new image in this run' }
+}
+
+function Get-PimUplinkJobLibraries {
+    <# PURE. LITERAL. The engine/_shared files the uplink job reads through (the tick loads them); file -> one function it
+       defines, so a file already loaded in the calling process is not loaded twice. #>
+    return [ordered]@{
+        'PIM-FeatureCatalog.ps1'  = 'Test-PimFeatureAvailable'      # telemetry.uplink / telemetry.setup (+ PIM-License.ps1: Get-PimLicense)
+        'PIM-Scheduler.ps1'       = 'Get-PimJobRunHistory'          # run history, schedule, scheduler state
+        'PIM-JobLanes.ps1'        = 'Get-PimSchedulerLocksRaw'      # locks (Pipeline, stalled runs, the uplink-running check)
+        'PIM-JobAlert.ps1'        = 'Test-PimUplinkJobRunningNow'   # the uplink job running now in the tick = it sends itself
+        'PIM-UplinkSetup.ps1'     = 'Get-PimSetupFacts'
+        'PIM-ScenarioProfile.ps1' = 'Get-PimActiveScenario'
+        'PIM-LicenceRequest.ps1'  = 'Resolve-PimInvardiaInstallId'
+        'PIM-InvardiaUpdate.ps1'  = 'Get-PimCommunityContactGate'
+        'PIM-GuardLimits.ps1'     = 'Get-PimGuardStrictState'
+        'PIM-ReleaseControl.ps1'  = 'Get-PimReleaseModeWindow'
+        'PIM-UplinkAlert.ps1'     = 'Select-PimUplinkAlertsDue'
+    }
+}
+
+function Send-PimUplinkPostUpdateHeartbeat {
+    <#
+      3.1.72 K2. ONE heartbeat at once after a successful roll. BOUNDED: never throws, never changes the caller's outcome or
+      exit code -- every failure is ONE line (-Log) and @{ sent = $false }. Skipped, with its line: no valid -Version, the
+      uplink job running in the tick right now (it reports itself; the next tick on the new version sends at once anyway,
+      UPLINK-SLOT-1 c), telemetry off (nothing is sent; never an opt-out from here).
+      -Version: the version (or the image) the install runs NOW. -By: 'updater' (the line only).
+      FIXED 2026-11-27 (3.1.72 review A5 + B5): the cycle holds the uplink job's OWN single-writer lock 'job:uplink' (the same
+      Request-PimAreaLocks the tick takes for the uplink job, PIM-Scheduler.ps1; own slot, no lane cap), released at the end;
+      a lock that cannot be taken (the tick's uplink holds it, or the lock store cannot be read) = NOT sent, one line -- two
+      cycles never write UplinkState at once. The job runs with -CountFailedCycle $false (Invoke-PimUplinkJob -PostUpdate): a
+      post-update send that fails never counts as a failed hourly cycle.
+      Seams: -Job { param($Version) } (default Invoke-PimUplinkJob -PostUpdate -Version $Version -MaxPerCycle 5 -PauseMs 0),
+      -Running { } (default Test-PimUplinkJobRunningNow), -Load { } (default: Get-PimUplinkJobLibraries, dot-sourced HERE so the
+      job below sees them), -Lock { } -> @{ ok; reason } and -Unlock { } (default: Request-PimAreaLocks / Remove-PimAreaLocks on
+      'job:uplink'), -Log { param($Line) }. Returns @{ sent; reason }.
+    #>
+    param([AllowEmptyString()][string]$Version = '', [string]$By = 'updater', [AllowNull()][scriptblock]$Job = $null,
+          [AllowNull()][scriptblock]$Running = $null, [AllowNull()][scriptblock]$Load = $null, [AllowNull()][scriptblock]$Log = $null,
+          [AllowNull()][scriptblock]$Lock = $null, [AllowNull()][scriptblock]$Unlock = $null)
+    $puOut = [ordered]@{ sent = $false; reason = '' }
+    $puHeld = $false
+    $puOwner = "post-update:${By}:$(if ("$($env:CONTAINER_APP_JOB_EXECUTION_NAME)".Trim()) { "$($env:CONTAINER_APP_JOB_EXECUTION_NAME)".Trim() } else { [guid]::NewGuid().ToString('N').Substring(0, 12) })"
+    $puRunId = [guid]::NewGuid().ToString('N')
+    $puSay = { param($l) try { if ($Log) { & $Log $l } else { Write-Host "  $l" -ForegroundColor DarkGray } } catch { } }
+    try {
+        $puVer = ConvertTo-PimUplinkVersionText "$Version"
+        if (-not $puVer) { $puOut.reason = "no valid version ('$Version')"; & $puSay "post-update heartbeat ($By): not sent -- $($puOut.reason)"; return [pscustomobject]$puOut }
+        if ($Load) { . $Load }
+        else {
+            $puLibs = Get-PimUplinkJobLibraries
+            foreach ($puLib in @($puLibs.Keys)) {
+                if (Get-Command $puLibs[$puLib] -ErrorAction SilentlyContinue) { continue }
+                $puPath = Join-Path $PSScriptRoot $puLib
+                if (Test-Path -LiteralPath $puPath) { . $puPath }
+            }
+        }
+        $puRun = $false
+        try { $puRun = [bool]$(if ($Running) { & $Running } elseif (Get-Command Test-PimUplinkJobRunningNow -ErrorAction SilentlyContinue) { Test-PimUplinkJobRunningNow } else { $false }) } catch { $puRun = $false }
+        if ($puRun) { $puOut.reason = 'the uplink job is running in the tick now -- its next run on the new version reports at once'; & $puSay "post-update heartbeat ($By): not sent -- $($puOut.reason)"; return [pscustomobject]$puOut }
+        # 3.1.72 review A5 + B5: the uplink's single-writer lock for the whole cycle; not taken = not sent
+        $puLk = $null
+        try {
+            if ($Lock) { $puLk = & $Lock }
+            elseif (Get-Command Request-PimAreaLocks -ErrorAction SilentlyContinue) {
+                $puLr = Request-PimAreaLocks -Owner $puOwner -Areas @('job:uplink') -Job 'uplink' -RunId $puRunId -NowUtc ([datetime]::UtcNow) -TtlMinutes 15 -Cap 0
+                $puLk = @{ ok = [bool]$puLr.ok; reason = $(if ($puLr.conflict) { "the uplink lock (job:uplink) is held by $("$($puLr.conflict.job)" -replace '^job:', '')" } elseif (-not $puLr.ok) { "the uplink lock (job:uplink) cannot be taken: $($puLr.error)" } else { '' }) }
+            } else { $puLk = @{ ok = $false; reason = 'the lock store (PIM-JobLanes.ps1) is not loaded -- the uplink lock cannot be taken' } }
+        } catch { $puLk = @{ ok = $false; reason = "the uplink lock (job:uplink) cannot be taken: $((("$($_.Exception.Message)") -split "`n")[0])" } }
+        $puLk = @($puLk) | Where-Object { $null -ne $_ } | Select-Object -Last 1
+        if (-not ($puLk -and $puLk.ok)) { $puOut.reason = "$(if ($puLk -and "$($puLk.reason)") { $puLk.reason } else { 'the uplink lock (job:uplink) cannot be taken' }) -- the tick's next uplink run on the new version reports"; & $puSay "post-update heartbeat ($By): not sent -- $($puOut.reason)"; return [pscustomobject]$puOut }
+        $puHeld = $true
+        $puR = if ($Job) { & $Job $puVer } else { Invoke-PimUplinkJob -PostUpdate -Version $puVer -MaxPerCycle 5 -PauseMs 0 }
+        $puR = @($puR) | Where-Object { $null -ne $_ } | Select-Object -Last 1
+        $puOut.sent = [bool]($puR -and $puR.PSObject.Properties['heartbeat'] -and $puR.heartbeat)
+        $puOut.reason = "$(if ($puR -and $puR.PSObject.Properties['detail']) { $puR.detail } else { 'no answer' })"
+        & $puSay "post-update heartbeat ($By): $(if ($puOut.sent) { "sent for $puVer" } else { 'not sent' }) -- $($puOut.reason)"
+    } catch {
+        $puOut.sent = $false; $puOut.reason = "$((("$($_.Exception.Message)") -split "`n")[0])"
+        & $puSay "post-update heartbeat ($By): not sent -- $($puOut.reason) (the update is not affected)"
+    } finally {
+        if ($puHeld) {
+            try { if ($Unlock) { [void](& $Unlock) } elseif (Get-Command Remove-PimAreaLocks -ErrorAction SilentlyContinue) { [void](Remove-PimAreaLocks -Owner $puOwner -RunId $puRunId) } } catch { & $puSay "post-update heartbeat ($By): the uplink lock was not released ($((("$($_.Exception.Message)") -split "`n")[0])) -- it lapses after 15 min" }
+        }
+    }
+    return [pscustomobject]$puOut
 }

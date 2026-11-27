@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.73 -- 2026-11-27
+
+- Security image updates now apply within 15 minutes of reaching your update ring, and old images are removed after each update.
+
+## 3.1.72 -- 2026-11-27
+
+- Security image updates now apply within 15 minutes of reaching your update ring, and old images are removed after each update.
+
 ## 3.1.71 -- 2026-11-26
 
 - Safer rollbacks and a stricter check before a new SMTP sender is used.

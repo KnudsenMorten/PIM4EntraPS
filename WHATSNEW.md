@@ -1,5 +1,29 @@
 # What's new in PIM Manager
 
+## 3.1.73 · 2026-11-27 · Feature update
+
+Security image updates now apply within 15 minutes of reaching your update ring, and old images are removed after each update.
+
+### New features
+
+- **Security updates within 15 minutes** - From its first nightly update on this version, PIM Manager checks every 15 minutes for a security image update released to its ring and applies it at once. Afterwards only the images still in use are kept.
+
+### Fixes
+
+None in this version.
+
+## 3.1.72 · 2026-11-27 · Feature update
+
+Security image updates now apply within 15 minutes of reaching your update ring, and old images are removed after each update.
+
+### New features
+
+- **Security updates within 15 minutes** - PIM Manager now checks every 15 minutes for a security image update released to its ring and applies it at once, separately from normal updates. After each update only the images still in use are kept.
+
+### Fixes
+
+None in this version.
+
 ## 3.1.71 · 2026-11-26 · Fix-only
 
 Safer rollbacks and a stricter check before a new SMTP sender is used.

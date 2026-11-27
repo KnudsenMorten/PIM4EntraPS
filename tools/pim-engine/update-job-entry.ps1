@@ -85,7 +85,7 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 # AI-CHAT-CONVERGE-1 (3.1.27): the AI chat is Pro (engine/ai-chat is not in the Community release) -- loaded where it is there
 $aiChatLib = Join-Path $solRoot 'engine\ai-chat\PIM-AiChat.ps1'
 if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
-. (Join-Path $solRoot 'engine\_shared\PIM-SecUpdate.ps1')        # SEC-PATCH-PIPELINE-1 (3.1.70) the separate image-only job caj-pim-secupdate (step 2e-secupdate; OFF unless pim.Settings 'SecUpdateJob' is on)
+. (Join-Path $solRoot 'engine\_shared\PIM-SecUpdate.ps1')        # SEC-PATCH-PIPELINE-1 pt 8 (2026-11-27): caj-pim-secupdate is never created; step 2e-secupdate removes one that exists
 . (Join-Path $solRoot 'engine\_shared\PIM-Wake.ps1')             # WAKE-1 (3.1.26) the wake queue + the event-triggered wake job (step 2e-sexies; grants REPORTED only)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
@@ -125,6 +125,24 @@ $script:PimDbInitResult = $null
 # 100.37), 2d the other install defaults the updater's identity can reach (engine/_shared/PIM-ConvergeDefaults.ps1).
 # Called after the tick roll (step 2a below) AND on the 'ahead' exit -- an environment running ahead of its ring is
 # healthy and must still converge; it used to exit before any of this ran. Never throws, never fails the update.
+$script:PimSecUpdateRemoval = $null   # 3.1.72 review R4: this run's removal result (it runs ONCE per run)
+function Invoke-PimUpdaterSecUpdateRemoval {
+    <# 3.1.72 review R4 (2026-11-27): remove a leftover caj-pim-secupdate (3.1.70-3.1.72) and read it back -- ONCE per run, as
+       early as the run allows: BEFORE the schema step / the roll (0-sec) and on the "nothing approved" exit, so an old job
+       cannot race the roll. Later callers (step 2e) get the same result. Returns the warning count. Never throws. #>
+    if ($null -ne $script:PimSecUpdateRemoval) { return [int]$script:PimSecUpdateRemoval }
+    $script:PimSecUpdateRemoval = 0
+    try {
+        if (Get-Command Invoke-PimSecUpdateConverge -ErrorAction SilentlyContinue) {
+            $suArm = { param($m, $p, $b) $pp = ($p -split '\?')[0]; if ($m -eq 'GET') { try { return (Invoke-PimArm -Method GET -Path $pp -ApiVersion (Get-PimSecUpdateAcaApiVersion)) } catch { if ("$($_.Exception.Message)" -match '404|NotFound') { return $null }; throw } }; Invoke-PimArm -Method $m -Path $pp -ApiVersion (Get-PimSecUpdateAcaApiVersion) }
+            $su = Invoke-PimSecUpdateConverge -SubscriptionId $sub -ResourceGroup $rg -Arm $suArm
+            foreach ($l in @($su.lines)) { if ($l.level -ne 'info') { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) } }
+            $script:PimSecUpdateRemoval = [int]$su.warnings
+        }
+    } catch { Say "  security image job not removed: $($_.Exception.Message)" 'Yellow'; $script:PimSecUpdateRemoval = 1 }
+    return [int]$script:PimSecUpdateRemoval
+}
+
 function Invoke-PimUpdaterConvergeStep {
     param([string]$When = 'update')
     # FLEET-SETUPSTEPS: the results the setup-step facts (2g) are read from; $null = that step did not run this time.
@@ -525,21 +543,19 @@ function Invoke-PimUpdaterConvergeStep {
             Say ("wake ($When): job $($wk.state), rights on the queue $($wk.rights)$(if ($wk.state -ne 'ok' -or $wk.rights -ne 'ok') { ' -- Commit / Run now wait for the next scheduled start until it is ok' })") $(if ($wk.state -eq 'ok' -and $wk.rights -eq 'ok') { 'DarkGray' } else { 'Yellow' })
         }
     } catch { Say "  wake queue / job not converged: $($_.Exception.Message)" 'Yellow' }
-    # ---- 2e-secupdate. SEC-PATCH-PIPELINE-1 (3.1.70) -- THE SEPARATE IMAGE-ONLY SECURITY JOB, ONLY WHEN SWITCHED ON ----------------
-    # pim.Settings 'SecUpdateJob' not on (the default) = NOTHING is written here. On = caj-pim-secupdate is created / converged from
-    # this job (same image, identity, store settings), after the rights check against the approved list (a right not on it =
-    # nothing created, reported). No role is ever granted here. Never fails the update.
-    try {
-        if ((Get-Command Invoke-PimSecUpdateConverge -ErrorAction SilentlyContinue) -and "$csSize".Trim()) {
-            $suVal = $null; try { $suVal = Get-PimSqlSetting -ConnectionString $csSize -Name (Get-PimSecUpdateSettingName) } catch { $suVal = $null }
-            $suEn = Test-PimSecUpdateEnabled -Value $suVal
-            $suList = $null; if ($suEn.enabled) { try { $suList = Get-PimApprovedRightsList -Version "$([IO.File]::ReadAllText((Join-Path $solRoot 'VERSION')))".Trim() } catch { $suList = $null } }
-            $suArm = { param($m, $p, $b) $pp = ($p -split '\?')[0]; if ($m -eq 'GET') { try { return (Invoke-PimArm -Method GET -Path $pp -ApiVersion (Get-PimSecUpdateAcaApiVersion)) } catch { if ("$($_.Exception.Message)" -match '404|NotFound') { return $null }; throw } }; Invoke-PimArm -Method $m -Path $pp -Body $b -ApiVersion (Get-PimSecUpdateAcaApiVersion) }
-            $su = Invoke-PimSecUpdateConverge -SubscriptionId $sub -ResourceGroup $rg -UpdaterJob $selfJob -Enabled ([bool]$suEn.enabled) -EnabledReason $suEn.reason -Arm $suArm -RightsList $suList
-            foreach ($l in @($su.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
-            $fixByHand += [int]$su.warnings
-        }
-    } catch { Say "  security image job not converged: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-secupdate. SEC-PATCH-PIPELINE-1 (3.1.70) -- THE SEPARATE IMAGE-ONLY SECURITY JOB -----------------------------------
+    # ⛔ SUPERSEDED (owner 2026-11-27: "it must run in azure" / "no local scripts or jobs"): "ONLY WHEN SWITCHED ON -- not on (the
+    # default) = nothing is written".
+    # ⛔ SUPERSEDED 2026-11-27 (SEC-PATCH-PIPELINE-1 pt 8, owner via Invardia: "and dont run except when needed"): "3.1.72 K5: ON BY
+    # DEFAULT -- caj-pim-secupdate is created / converged HERE at every install; only pim.Settings 'SecUpdateJob' = { enabled:
+    # false } turns it off".
+    # NOW: NO separate job. A security (image-only) release is applied by THIS updater: its 15-minute quick check (POST /head)
+    # runs the update in that slot when the head names an image-only release of the running build (IMAGE-30MIN-1), and the
+    # update takes the image-only path (Get-PimImageOnlyUpdateDecision: no schema step, no quiesce). caj-pim-secupdate is never
+    # created; one that exists is REMOVED here and read back (Invoke-PimSecUpdateConverge). Never fails the update.
+    # 3.1.72 review R4: the removal now runs FIRST, before the schema step / the roll (0-sec below) and on the "nothing
+    # approved" exit, so a leftover caj-pim-secupdate cannot race the roll; here it only reports that run's result again.
+    if (Get-Command Invoke-PimUpdaterSecUpdateRemoval -ErrorAction SilentlyContinue) { $fixByHand += [int](Invoke-PimUpdaterSecUpdateRemoval) }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -702,6 +718,15 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($script:PimBuiltinAuthResult.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         if ("$($script:PimBuiltinAuthResult.state)" -eq 'missing') { $fixByHand++ }
     } catch { Say "  built-in sign-in not checked: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2f-days. FIXED 2026-11-27 (3.1.72 final review D3, for 3.1.73) -- AN UNREADABLE CODE DAY PATTERN IS A FIX-BY-HAND ITEM ----
+    # PIM_UPDATE_NIGHTLY_DAYS that cannot be read keeps this install security-only (no code update ever, fail safe). It is no
+    # longer only a run-log line: counted "to fix by hand" here, and recorded for the heartbeat (setupFacts updaterCodeDays,
+    # step 2g below -> the setup control 'updater-schedule' = wrong / disabled). ⛔ SUPERSEDED: "unreadable = a run-log line".
+    $script:PimCodeDaysFact = $null
+    try {
+        $script:PimCodeDaysFact = Get-PimUpdateNowCodeDaysFact -Days "$($env:PIM_UPDATE_NIGHTLY_DAYS)"
+        if ("$($script:PimCodeDaysFact.state)" -eq 'unreadable') { $fixByHand++; Say ("converge: " + $script:PimCodeDaysFact.line) 'Yellow' }
+    } catch { Say "  the code day pattern was not checked: $($_.Exception.Message)" 'DarkGray' }
     # ---- 2g. FLEET-SETUPSTEPS (framework contract with Invardia, 2026-11-03) -- THE ONE-TIME STEPS, CHECKED ON EVERY RUN ----
     # READ ONLY (ARM GET + one SQL scalar): private network, the Jobs Operator role + SchedulerTickJobId, CR8 (registry admin
     # user, Key Vault purge protection, no SAS in the update source, SQL auditing), the front's key + schema + private vault,
@@ -735,6 +760,8 @@ function Invoke-PimUpdaterConvergeStep {
         try { $skF = Get-PimSkvSetupFact -Result $script:PimSkvResult; foreach ($k in @($skF.Keys)) { $ssF[$k] = $skF[$k] } } catch { }
         # BUILT-IN-AUTH-1 (step 2f-quater): the sign-in standard's fact (builtinSignin = ok | missing | n/a | unknown + detail) -> setup step builtin-signin
         if ($script:PimBuiltinAuthResult) { $ssF['builtinSignin'] = "$($script:PimBuiltinAuthResult.state)"; $ssF['builtinSigninDetail'] = ConvertTo-PimSetupStepDetail -Text "$($script:PimBuiltinAuthResult.detail)" }
+        # D3 (3.1.73, step 2f-days): updaterCodeDays = ok | unreadable -> the heartbeat's setup control 'updater-schedule'
+        if ($script:PimCodeDaysFact) { $ssF['updaterCodeDays'] = "$($script:PimCodeDaysFact.state)" }
         $script:PimSetupFacts = $ssF
         $ssUnk = @(@($ssF.Keys) | Where-Object { $_ -notin @('checkedUtc', 'asBuiltDetail', 'dbJobDetail', 'appRegOwnerDetail', 'appRegOwnerProofUtc', 'appRegOwnerProofDetail', 'sqlTierDetail', 'sqlTierCurrent', 'downlinkDbUserDetail', 'identityNamesDetail', 'builtinSigninDetail') -and ($null -eq $ssF[$_] -or "$($ssF[$_])" -eq 'unknown') })
         Say ("setup steps: facts recorded for the heartbeat$(if ($ssUnk.Count) { " (not readable: $($ssUnk -join ', '))" })") 'DarkGray'
@@ -1600,10 +1627,22 @@ $script:PimUpdateNowSignal = $null
 $script:PimUpdateRollRetry = $null   # ROLL-RETRY-1: the retry decision when THIS quick run retries a roll the quiesce held
 $unEnabled = Test-PimUpdateNowEnabled -Ring $ring -Value "$($env:PIM_UPDATE_NOW)"
 $unNightly = "$($env:PIM_UPDATE_NIGHTLY_UTC)".Trim()
+# 3.1.72 review N2/C2 (2026-11-27): never widen the CODE cadence. An install whose own nightly cron runs on certain days
+# (PIM_UPDATE_NIGHTLY_DAYS, e.g. weekly '* * 0') gets the quarter-hour slots for the SECURITY check only: every quick slot is
+# security-only there (as UPDATE NOW off), and its nightly time on any other day is a quick slot (Get-PimUpdaterRunKind).
+# Unreadable days = security-only too (fail safe).
+$unNightlyDays = "$($env:PIM_UPDATE_NIGHTLY_DAYS)".Trim()
+if (-not (ConvertFrom-PimUpdateNowDays -Text $unNightlyDays).every) { $unEnabled = $false }
+# D3 (3.1.73): an unreadable day pattern is said in the 15-minute check's ONE line too (Get-PimUpdateNowCodeDaysFact)
+$unDaysFact = Get-PimUpdateNowCodeDaysFact -Days $unNightlyDays
 $unOwnExec = "$([Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))".Trim()
 $unExecs = $null
 $unKind = @{ kind = 'legacy'; reason = 'the updater runs on its nightly cron (no PIM_UPDATE_NIGHTLY_UTC) -- a full run, as before' }
-if ($unNightly -and $unEnabled) {
+# SEC-PATCH-PIPELINE-1 pt 9 (Invardia 2026-11-27; SEC-LANE-1 G5 / IMAGE-30MIN-1): the quarter-hour slot is a quick check
+# WHATEVER PIM_UPDATE_NOW says -- security is not something an operator opts out of. Off = the quick check is security only
+# (Invoke-PimUpdateNowQuickCheck -Enabled $false): an image-only release of the running build is applied at once, a code
+# release waits for the nightly window. (Was: `if ($unNightly -and $unEnabled)` -- off = every execution a full run.)
+if ($unNightly) {
     # ONE ARM read: the job's executions (the same path the watchdog reads) -- this execution's start time, whether the slot
     # already had its scheduled execution, and whether another execution is running.
     try { $unExecs = ConvertTo-PimUpdateNowExecutions -Items (Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$selfJob/executions" -ApiVersion $script:PimAcaApi) } catch { $unExecs = $null }
@@ -1612,7 +1651,7 @@ if ($unNightly -and $unEnabled) {
         $unMine = @($unExecs | Where-Object { "$($_.name)" -eq $unOwnExec }) | Select-Object -First 1
         if ($unMine -and $null -ne $unMine.startUtc) { $unStart = $unMine.startUtc; $unTol = 120 }
     }
-    $unKind = Get-PimUpdaterRunKind -NightlyUtc $unNightly -StartUtc $unStart -Executions $unExecs -OwnExecution $unOwnExec -ToleranceSeconds $unTol -Enabled $unEnabled
+    $unKind = Get-PimUpdaterRunKind -NightlyUtc $unNightly -StartUtc $unStart -Executions $unExecs -OwnExecution $unOwnExec -ToleranceSeconds $unTol -Enabled $unEnabled -NightlyDays $unNightlyDays
 }
 if ($unKind.kind -eq 'quick') {
     $unCs = Get-PimUpdaterStoreCsHealed
@@ -1657,7 +1696,9 @@ if ($unKind.kind -eq 'quick') {
         # BUILD-TRANSIENT-1: a build that failed on a passing registry fault (UpdateState 'built' / 'failed' with a retry that
         # says willRetry) is retried by the same decision (reason 'build-retry'); the 3rd failing attempt stops the retries.
         $unRt = $null
-        if ("$unCs".Trim()) {
+        # SEC-PATCH-PIPELINE-1 pt 9: UPDATE NOW off = security only -- no roll retry, no legacy-owner full run, nothing more
+        # read here (those are feature work; the nightly run takes them, as before).
+        if ($unEnabled -and "$unCs".Trim()) {
             try {
                 $unRtState = Read-PimUpdateState -ConnectionString $unCs
                 $unRtHead = $(if ($null -ne $unQ.signal -and "$($unQ.signal.source)" -eq 'head') { "$($unQ.signal.version)" } else { '' })
@@ -1693,7 +1734,7 @@ if ($unKind.kind -eq 'quick') {
         # keeps its own path), at most once an hour (SupportLegacyOwnerAttempt). Reads only the recorded state; no roll unless
         # one is due anyway. Nothing pending = no line, nothing else read.
         $unLo = $null
-        if (-not ($unRt -and $unRt.retry) -and "$unCs".Trim()) {
+        if ($unEnabled -and -not ($unRt -and $unRt.retry) -and "$unCs".Trim()) {
             try {
                 $unLoTrim = Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimWebTrimSettingName)
                 $unLoRec = Get-PimSqlSetting -ConnectionString $unCs -Name (Get-PimSupportLegacyOwnerSettingName)
@@ -1715,7 +1756,8 @@ if ($unKind.kind -eq 'quick') {
             Say $unRt.line 'Cyan'
             $script:PimUpdateRollRetry = $unRt
         } else {
-            Say $(if ($unRt -and "$($unRt.line)") { "$($unRt.line)" } else { $unQ.line }) 'DarkGray'
+            $unLine = $(if ($unRt -and "$($unRt.line)") { "$($unRt.line)" } else { $unQ.line })
+            if ("$($unDaysFact.state)" -eq 'unreadable') { Say "$unLine -- $($unDaysFact.line)" 'Yellow' } else { Say $unLine 'DarkGray' }
             exit 0
         }
     }
@@ -1723,7 +1765,9 @@ if ($unKind.kind -eq 'quick') {
     if (-not $script:PimUpdateRollRetry) {
         if (-not $unSet) { Say 'update now: a signal, but there is no store to record it in (at most one update per signal) -- not started' 'Yellow'; exit 0 }
         $unAp = Get-PimUpdateNowRingApproval -Cs $unCs
-        $unAd = Get-PimUpdateNowApprovalDecision -SignalVersion "$($unQ.signal.version)" -ApprovedVersion "$($unAp.version)" -RunningVersion "$($script:PimRunningVersion)" -Ring $ring
+        # 3.1.72 review N1/C1: a run let through by an IMAGE-ONLY signal (UPDATE NOW on or off) starts only when the ring
+        # approves an image-only build of the RUNNING version; otherwise exit 0 below ("waits for the nightly window").
+        $unAd = Get-PimUpdateNowApprovalDecision -SignalVersion "$($unQ.signal.version)" -ApprovedVersion "$($unAp.version)" -RunningVersion "$($script:PimRunningVersion)" -Ring $ring -ImageOnly ([bool]($unQ.imageOnly -or $unQ.securityOnly))
         if (-not $unAd.ok) { Say "$($unAd.line) ($($unAp.reason))" 'DarkGray'; exit 0 }
         # Mark FIRST, update second: at most ONE update per raisedAt, whatever happens next (a failed one is the nightly's to retry).
         if (-not (Set-PimUpdateNowHandled -GetState $unGet -SetState $unSet -Signal $unQ.signal)) { Say 'update now: the start could not be recorded -- not started (the nightly run takes it)' 'Yellow'; exit 0 }
@@ -1739,7 +1783,9 @@ if ($unKind.kind -eq 'quick') {
         Say 'nightly: another execution of the updater is running -- it is tonight''s update; this one stops.' 'Yellow'
         exit 0
     }
-    # The updater's OWN cron follows the switch: an existing install gets its 15-minute cron here, on its next full run.
+    # The updater's OWN cron: an existing install gets its 15-minute cron here, on its next full run. SEC-PATCH-PIPELINE-1 pt 9:
+    # ALWAYS the quarter-hour slot (the security check), whatever PIM_UPDATE_NOW says -- a daily-only or any other cron is
+    # restored to the quarter cron on the install's nightly minute (Get-PimUpdateNowSelfCronPlan); off never goes back to daily.
     try {
         $unArm = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
         $unCron = Invoke-PimUpdateNowSelfCronUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Arm $unArm -Enabled $unEnabled -ApiVersion $script:PimAcaApi
@@ -1956,6 +2002,7 @@ if ($plan.action -eq 'none') {
     # 🔑 A NO-OP IS A REPORT, NOT A NON-EVENT. "Nothing approved" and "this environment stopped
     # reporting" look identical from the fleet view unless the quiet nights are recorded too --
     # and telling them apart is most of "is THIS customer stuck".
+    if (Get-Command Invoke-PimUpdaterSecUpdateRemoval -ErrorAction SilentlyContinue) { [void](Invoke-PimUpdaterSecUpdateRemoval) }          # 3.1.72 review R4: a leftover caj-pim-secupdate goes on the quiet exit too
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ok'
     Save-PimUpdaterRunningImages -MaxAgeMinutes 360   # SEC-LANE-1: re-read what runs at most every 6 h on a quiet install
     Save-PimUpdaterRevisions -MaxAgeMinutes 360       # SEC-PATCH-PIPELINE-1 pt 6: nothing old answers (at most every 6 h when quiet)
@@ -2186,28 +2233,13 @@ if ($storeHeal.source -eq 'manager') {
     Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($storeHeal.database)"
 }
 
-# ---- 0-sec. 3.1.70 review F2 -- NEVER ROLL WHILE caj-pim-secupdate SWAPS ---------------------------------------------------
-# 3.1.71 I3 (3.1.70 re-review A4): this wait sits BEFORE the schema step (it was after it, before the Manager roll). A run that
-# applied the new schema and THEN ended waiting left the old image on the new schema. Now nothing is changed -- no quiesce, no
-# store init, no DDL, no roll -- until caj-pim-secupdate is idle. Only on the roll path (after the ahead / nothing-approved exits
-# and the target image is known); still bounded (600 s), fail closed, and the other job is never stopped.
-# Two rollers on one app race: the security image job could put its <build>.N over what this run rolls (a downgrade). While a
-# caj-pim-secupdate execution runs, this run WAITS (bounded, Wait-PimSecUpdateOtherIdle in PIM-SecUpdate.ps1) and then SKIPS:
-# outcome 'waiting' (the next 15-minute run retries, ROLL-RETRY-1). FAIL CLOSED: an unreadable job list or execution list, or
-# a Running execution with no start time, counts as running. The other job is NEVER stopped. No such job = go at once.
-if (Get-Command Wait-PimSecUpdateOtherIdle -ErrorAction SilentlyContinue) {
-    $suIdle = Wait-PimSecUpdateOtherIdle `
-        -ListJobs { @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs" -ApiVersion $script:PimAcaApi -All | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) } `
-        -ReadExecutions { param($j) @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$j/executions" -ApiVersion $script:PimAcaApi -All) } `
-        -MaxWaitSeconds 600 -PollSeconds 30
-    if (-not $suIdle.go) {
-        Say "NOT ROLLING: $($suIdle.reason)" 'Yellow'
-        Send-PimUpdateOutcome -Action 'schema' -Outcome 'waiting' -ToVersion "$($plan.version)" -ErrorText "security image job running: $($suIdle.reason)"
-        exit 0
-    }
-    if ($suIdle.waited) { Say "security image job: waited $($suIdle.waited)s -- $($suIdle.reason)" 'DarkGray' }
-}
-
+# ---- 0-sec. ⛔ SUPERSEDED 2026-11-27 (SEC-PATCH-PIPELINE-1 pt 8, owner via Invardia "and dont run except when needed"): "NEVER
+# ROLL WHILE caj-pim-secupdate SWAPS -- Wait-PimSecUpdateOtherIdle, bounded 600 s, then 'waiting'". There is no second roller
+# any more: caj-pim-secupdate is never created (2e-secupdate removes one that exists) and this updater applies image-only
+# releases itself, so the wait is gone.
+# 3.1.72 review R4 (2026-11-27): a LEFTOVER caj-pim-secupdate (3.1.70-3.1.72) is removed HERE, before the schema step and the
+# roll, so it cannot race them (step 2e, after the roll, only reports this result again).
+if (Get-Command Invoke-PimUpdaterSecUpdateRemoval -ErrorAction SilentlyContinue) { [void](Invoke-PimUpdaterSecUpdateRemoval) }
 Set-PimUpdTrackStage -Stage 'migrate'   # OPEN-13: the schema goes BEFORE any container moves (additive-only)
 $schemaOk = $true
 $schemaRefused = $null
@@ -2820,8 +2852,12 @@ try {
         # Get-PimRegistryLiveImages -- this process's copy is the value from before this run re-recorded it (3.1.15).
         $prKeepExtra = @(@{ image = "$selfImageBefore"; by = "$selfJob (the image this update run started on)" }) | Where-Object { "$($_.image)".Trim() }
         # IMAGE-PRUNE CONTRACT point 2: the previous release = what ran before the roll (0c) + the durable release record of
-        # the last update (pim.Settings 'ImageReleaseRecord'), both kept. The pre-roll read is REQUIRED: it failed (or found
-        # nothing) = $null = nothing deleted, whatever the stored record holds (stability first, owner 2026-11-12).
+        # the last update (pim.Settings 'ImageReleaseRecord'). The pre-roll read is REQUIRED: it failed (or found nothing) =
+        # $null = nothing deleted, whatever the stored record holds (stability first, owner 2026-11-12).
+        # 3.1.72 review C4 (owner 2026-11-16: "we agreed NOT to keep 1 previous, only the current"): that record only GATES the
+        # prune -- nothing is kept because it is "the previous release" (⛔ SUPERSEDED: "both kept"). What keeps an older image
+        # is only that something RUNS it or may start it: PIM_UPDATE_LAST_GOOD (the image this run started from, the watchdog's
+        # fallback) is a live setting, and $prKeepExtra above names the same image -- nothing else.
         $prStored = $null
         if ("$csUpd".Trim()) { try { $prRaw = Get-PimSqlSettingRaw -ConnectionString $csUpd -Name 'ImageReleaseRecord'; if ("$prRaw".Trim()) { $prStored = "$prRaw" | ConvertFrom-Json; if ($prStored -is [string]) { $prStored = $prStored | ConvertFrom-Json } } } catch { $prStored = $null } }
         # SEC-LANE-1 (owner 2026-11-14: "when swap works we remove old" -- an old image is Defender noise; framework IMAGE-PRUNE
@@ -2831,6 +2867,9 @@ try {
         # (Get-PimImageOnlyUpdateDecision), AND another PIM job execution has SUCCEEDED on the target image (waited for, at most
         # 10 minutes: the engine's tick runs every few minutes). Then the watchdog's last-known-good moves to the target and only
         # the CURRENT release is kept. Not proven in time = the previous release is kept (said). A full release keeps both.
+        # 3.1.72 review C4: ⛔ SUPERSEDED "the previous release is kept / stays as the rollback point" / "a full release keeps
+        # both" -- the old image stays ONLY because PIM_UPDATE_LAST_GOOD (the image the run started from) still names it and is
+        # live; once the swap is proven, PIM_UPDATE_LAST_GOOD moves to the target and nothing keeps the old image.
         $prProven = $false
         try {
             if ($prStored -and "$($prStored.version)" -eq "$($prRef.tag)" -and "$selfImageBefore" -eq "$targetImg" -and $roll.healthy -and
@@ -2848,14 +2887,14 @@ try {
                     }
                 }
                 if ($prOkJob) { $prProven = $true; Say "registry: a job SUCCEEDED on $($prRef.tag) ($prOkJob)" 'DarkGray' }
-                else { Say "registry: no PIM job has succeeded on $($prRef.tag) yet (waited 10 min) -- the previous release stays as the rollback point" 'Yellow' }
+                else { Say "registry: no PIM job has succeeded on $($prRef.tag) yet (waited 10 min) -- PIM_UPDATE_LAST_GOOD (the image this run started from) still names the old image, so it stays live" 'Yellow' }
             }
-        } catch { $prProven = $false; Say "registry: the image-only proof could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- the previous release is kept" 'Yellow' }
+        } catch { $prProven = $false; Say "registry: the image-only proof could not be read ($((("$($_.Exception.Message)") -split "`n")[0])) -- PIM_UPDATE_LAST_GOOD (the image this run started from) still names the old image, so it stays live" 'Yellow' }
         if ($prProven) {
             try {
                 [void](Set-PimAcaJobEnvValues -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Values @{ PIM_UPDATE_LAST_GOOD = "$targetImg" })
-                Say "registry: the image-only swap to $($prRef.tag) is proven (the new updater runs, the Manager is healthy) -- the previous release $($prStored.previous.version) is removed, only $($prRef.tag) is kept" 'Cyan'
-            } catch { $prProven = $false; Say "registry: the last-known-good image could not be moved to $($prRef.tag) ($((("$($_.Exception.Message)") -split "`n")[0])) -- the previous release is kept" 'Yellow' }
+                Say "registry: the image-only swap to $($prRef.tag) is proven (the new updater runs, the Manager is healthy) -- PIM_UPDATE_LAST_GOOD now names $($prRef.tag), so nothing keeps the previous release $($prStored.previous.version); only $($prRef.tag) is kept" 'Cyan'
+            } catch { $prProven = $false; Say "registry: the last-known-good image could not be moved to $($prRef.tag) ($((("$($_.Exception.Message)") -split "`n")[0])) -- PIM_UPDATE_LAST_GOOD still names the old image (the image this run started from), so it stays live" 'Yellow' }
         }
         $prPrev = $null
         if ($null -ne $prPreRoll -and @($prPreRoll).Count) {
@@ -2871,7 +2910,8 @@ try {
         $prLive = {
             # every app + job (Get-PimAcaApps / Get-PimAcaJobs shape) + the active revisions of a multi-revision app
             $prRes = @(Get-PimRegistryPruneResources -SubscriptionId $sub -ResourceGroup $rg -ApiVersion $script:PimAcaApi)
-            @(Get-PimRegistryLiveImages -Resources $prRes -LoginServer $prLs -WithSource) + @($prKeepExtra)
+            # 3.1.72 review R9: -CurrentVersion also keeps a PIM_UPDATE_TARGET_IMAGE pinned to a NEWER version (pin = $true)
+            @(Get-PimRegistryLiveImages -Resources $prRes -LoginServer $prLs -WithSource -CurrentVersion "$($prRef.tag)") + @($prKeepExtra)
         }
         # point 4: beat at least once a minute while the clean-up runs (the process beat every 45 s + a line at registry calls)
         Set-PimBeatStep 'image-prune'; [void](Set-PimBeatPeriod -Seconds 45)
@@ -2886,7 +2926,7 @@ try {
             # point 5: the release record BEFORE the first delete (the previous release of the NEXT update)
             ReleaseRecord = {
                 if (-not "$csUpd".Trim()) { throw 'no database connection for the release record' }
-                $prNowImgs = @(& $prLive | ForEach-Object { if ($_ -is [hashtable]) { "$($_.image)" } else { "$_" } } | Where-Object { "$_".Trim() } | Select-Object -Unique)
+                $prNowImgs = @(& $prLive | Where-Object { -not ($_ -is [hashtable] -and $_['pin']) } | ForEach-Object { if ($_ -is [hashtable]) { "$($_.image)" } else { "$_" } } | Where-Object { "$_".Trim() } | Select-Object -Unique)
                 $rel = [ordered]@{ schema = 1; version = "$($prRef.tag)"; atUtc = [datetime]::UtcNow.ToString('o'); images = @($prNowImgs)
                                    previous = [ordered]@{ version = "$($script:PimRunningVersion)"; images = @(@($prPreRoll) | ForEach-Object { "$($_.image)" } | Where-Object { "$_".Trim() } | Select-Object -Unique) } }
                 Set-PimSqlSetting -ConnectionString $csUpd -Name 'ImageReleaseRecord' -ValueJson (ConvertTo-Json -InputObject $rel -Depth 5 -Compress)
@@ -2944,4 +2984,17 @@ if ($fu.start) {
         Say "        The environment DID update and is healthy; the new updater runs at its next schedule instead." 'Yellow'
     }
 } else { Say "follow-up: none ($($fu.reason))" 'DarkGray' }
+
+# ---- 5. 3.1.72 K2 (framework UPLINK-SLOT-1: the post-update heartbeat never waits for its slot) -- THE LAST STEP --------------
+# Normal AND image-only path (both end here; every failure exited above): when THIS run moved the Manager to a new image, ONE
+# heartbeat goes now, through the uplink job's own code (engine/_shared/PIM-Uplink.ps1 Send-PimUplinkPostUpdateHeartbeat ->
+# Invoke-PimUplinkJob -PostUpdate), named with the version the install now runs -- so Invardia sees it within minutes, not at
+# the next hourly slot. Nothing rolled (the Manager already on the target: a quiet run, a follow-up run) = none. BOUNDED: it
+# never changes the outcome or the exit code; any failure is one line. Loaded only here, after everything else of the run.
+try {
+    if (-not (Get-Command Get-PimUplinkPostUpdateDecision -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Uplink.ps1') }
+    $puDec = Get-PimUplinkPostUpdateDecision -ManagerRolled ([bool]$roll.rolled) -Healthy $roll.healthy
+    if ($puDec.send) { [void](Send-PimUplinkPostUpdateHeartbeat -Version "$targetImg" -By 'updater' -Log { param($l) Say $l 'DarkGray' }) }
+    else { Say "post-update heartbeat: none -- $($puDec.reason)" 'DarkGray' }
+} catch { Say "post-update heartbeat: not sent -- $((("$($_.Exception.Message)") -split "`n")[0]) (the update is not affected)" 'DarkGray' }
 exit 0
