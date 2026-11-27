@@ -1050,7 +1050,7 @@ try {
                 if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to $($verdict.rollback.revision)")) {
                     # §53.6: the image anchor rides along, and is used only if the revision is gone.
                     $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }; if ("$SubscriptionId".Trim()) { $rbArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
-                    & $roller -Rollback $verdict.rollback.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs
+                    & $roller -Rollback $verdict.rollback.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -RollbackBy update @rbArgs   # 3.1.71 review K1: the pin marker
                 }
             } else {
                 $errDetail += " -- NO rollback target captured; MANUAL rollback required"
@@ -1070,7 +1070,7 @@ catch {
         try {
             $roller = Join-Path $here 'Update-PimContainers.ps1'
             $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }; if ("$SubscriptionId".Trim()) { $rbArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
-            & $roller -Rollback "$prevRev".Trim() -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs
+            & $roller -Rollback "$prevRev".Trim() -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -RollbackBy update @rbArgs   # 3.1.71 review K1: the pin marker
             $outcome = 'rolledback'
         } catch { Warn "auto-rollback also failed: $($_.Exception.Message)" }
     }

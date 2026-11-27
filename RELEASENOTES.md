@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 3.1.71 -- 2026-11-26
+
+- Safer rollbacks and a stricter check before a new SMTP sender is used.
+
+## 3.1.70 -- 2026-11-26
+
+- PIM Manager now reports its run history and when it last published data, serves only the newest version after an update, uses a new SMTP sender only after its test mail passes, and re-checks the Request for Access sender hourly.
+
 ## 3.1.69 -- 2026-11-26
 
 - One mail sender for every part of PIM Manager with a daily check; admins in role-assignable groups can be disabled again; a Security image release overview page; the Environment report is now System Documentation.

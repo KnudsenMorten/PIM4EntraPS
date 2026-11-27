@@ -2339,7 +2339,8 @@ function Invoke-PimEngine {
             if ($__gate -and $__gate.PSObject.Properties['ok'] -and -not $__gate.ok) {
                 Write-Host ("[engine] {0}: NOT CHECKED -- {1}" -f $s, "$($__gate.detail)") -ForegroundColor DarkYellow
                 $out.Add([pscustomobject]@{ scope = $s; ok = $true; notChecked = $true; skippedReason = "$($__gate.detail)"; skipped = 0
-                    desired = 0; live = 0; create = 0; update = 0; remove = 0; nochange = 0; errors = 0; plan = @() })
+                    desired = 0; live = 0; create = 0; update = 0; remove = 0; nochange = 0; errors = 0; plan = @()
+                    scopeStartedUtc = [datetime]::UtcNow.ToString('o'); scopeSec = 0 })   # TELEMETRY-SAME-1: a skipped step of LastRun
                 $__iScope++
                 continue
             }
@@ -2347,7 +2348,14 @@ function Invoke-PimEngine {
         # STALL-1: the scope this run starts now, on its locks -- a stall report then names the step exactly as this job's
         # OK report lists it in StepsOk (PIM-JobLanes.ps1 Set-PimRunCurrentScope; a no-op outside a tick, never a stop)
         if (-not $WhatIf -and (Get-Command Set-PimRunCurrentScope -ErrorAction SilentlyContinue)) { [void](Set-PimRunCurrentScope -Scope "$s") }
+        # TELEMETRY-SAME-1 (3.1.70): when the scope started and how long it took -- the run record's stepTimes (Get-PimEngineRunSteps
+        # -> Add-PimRunStepFields), which the heartbeat sends as LastRun.steps. Additive keys only; a stamp that fails is skipped.
+        $__scStart = [datetime]::UtcNow
         $out.Add((Invoke-PimEngineScope -Scope $s @common))
+        $__scRes = $out[$out.Count - 1]
+        if ($null -ne $__scRes -and $__scRes -isnot [array] -and $__scRes -isnot [System.Collections.IDictionary]) {
+            try { $__scRes | Add-Member -NotePropertyName scopeStartedUtc -NotePropertyValue $__scStart.ToString('o') -Force; $__scRes | Add-Member -NotePropertyName scopeSec -NotePropertyValue ([int][Math]::Max([double]0, [Math]::Round(([datetime]::UtcNow - $__scStart).TotalSeconds))) -Force } catch { }
+        }
         $__iScope++
         if ($__adDefer -and "$s" -ieq 'AdminMembers' -and (Get-Command Invoke-PimAdminDeferredDeletes -ErrorAction SilentlyContinue)) {
             $__adOut = @(Invoke-PimAdminDeferredDeletes -Context $Context)

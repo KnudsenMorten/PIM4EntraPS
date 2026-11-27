@@ -85,6 +85,7 @@ $pimBeat = Start-PimBeat; if ($pimBeat.started -or $pimBeat.reason -match 'could
 # AI-CHAT-CONVERGE-1 (3.1.27): the AI chat is Pro (engine/ai-chat is not in the Community release) -- loaded where it is there
 $aiChatLib = Join-Path $solRoot 'engine\ai-chat\PIM-AiChat.ps1'
 if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
+. (Join-Path $solRoot 'engine\_shared\PIM-SecUpdate.ps1')        # SEC-PATCH-PIPELINE-1 (3.1.70) the separate image-only job caj-pim-secupdate (step 2e-secupdate; OFF unless pim.Settings 'SecUpdateJob' is on)
 . (Join-Path $solRoot 'engine\_shared\PIM-Wake.ps1')             # WAKE-1 (3.1.26) the wake queue + the event-triggered wake job (step 2e-sexies; grants REPORTED only)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitJob.ps1')        # OPEN-06 the in-network database job on every install (created, NEVER started)
 . (Join-Path $solRoot 'engine\_shared\PIM-DbInitMembership.ps1') # framework 4.5 point 5: the database job identity in the SQL admin group, (a)-(d) + renewal
@@ -101,6 +102,7 @@ if (Test-Path -LiteralPath $aiChatLib) { . $aiChatLib }
 . (Join-Path $solRoot 'engine\_shared\PIM-SecretHandover.ps1')   # SECRETS-WRITE the sealed hand-over a person leaves for the updater (step 2f-ter-bis; writes secrets, never a role)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTrack.ps1')      # OPEN-13 / framework 8.8 UPDATE-TRACK: the run's stages to Invardia (best effort)
 . (Join-Path $solRoot 'engine\_shared\PIM-RunningImages.ps1')    # SEC-LANE-1: the images the install runs NOW (digest + .NET) -> heartbeat Update.runningImages
+. (Join-Path $solRoot 'engine\_shared\PIM-RevisionMode.ps1')     # SEC-PATCH-PIPELINE-1 pt 6: nothing old answers after a swap (the LAST step, Save-PimUpdaterRevisions)
 . (Join-Path $solRoot 'engine\_shared\PIM-RegistryPrune.ps1')    # IMAGE-PRUNE (framework IMAGE-PATCH-1): the own registry keeps current + previous (step 3b)
 . (Join-Path $solRoot 'engine\_shared\PIM-RightsList.ps1')       # WEB-TRIM-1: the approved rights list (the web identity's approved set, step 2h)
 . (Join-Path $solRoot 'engine\_shared\PIM-JobLanes.ps1')         # WEB-TRIM-1: Register-PimTrustStaleReport -- ONE fix request per reported item (step 2h)
@@ -523,6 +525,21 @@ function Invoke-PimUpdaterConvergeStep {
             Say ("wake ($When): job $($wk.state), rights on the queue $($wk.rights)$(if ($wk.state -ne 'ok' -or $wk.rights -ne 'ok') { ' -- Commit / Run now wait for the next scheduled start until it is ok' })") $(if ($wk.state -eq 'ok' -and $wk.rights -eq 'ok') { 'DarkGray' } else { 'Yellow' })
         }
     } catch { Say "  wake queue / job not converged: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e-secupdate. SEC-PATCH-PIPELINE-1 (3.1.70) -- THE SEPARATE IMAGE-ONLY SECURITY JOB, ONLY WHEN SWITCHED ON ----------------
+    # pim.Settings 'SecUpdateJob' not on (the default) = NOTHING is written here. On = caj-pim-secupdate is created / converged from
+    # this job (same image, identity, store settings), after the rights check against the approved list (a right not on it =
+    # nothing created, reported). No role is ever granted here. Never fails the update.
+    try {
+        if ((Get-Command Invoke-PimSecUpdateConverge -ErrorAction SilentlyContinue) -and "$csSize".Trim()) {
+            $suVal = $null; try { $suVal = Get-PimSqlSetting -ConnectionString $csSize -Name (Get-PimSecUpdateSettingName) } catch { $suVal = $null }
+            $suEn = Test-PimSecUpdateEnabled -Value $suVal
+            $suList = $null; if ($suEn.enabled) { try { $suList = Get-PimApprovedRightsList -Version "$([IO.File]::ReadAllText((Join-Path $solRoot 'VERSION')))".Trim() } catch { $suList = $null } }
+            $suArm = { param($m, $p, $b) $pp = ($p -split '\?')[0]; if ($m -eq 'GET') { try { return (Invoke-PimArm -Method GET -Path $pp -ApiVersion (Get-PimSecUpdateAcaApiVersion)) } catch { if ("$($_.Exception.Message)" -match '404|NotFound') { return $null }; throw } }; Invoke-PimArm -Method $m -Path $pp -Body $b -ApiVersion (Get-PimSecUpdateAcaApiVersion) }
+            $su = Invoke-PimSecUpdateConverge -SubscriptionId $sub -ResourceGroup $rg -UpdaterJob $selfJob -Enabled ([bool]$suEn.enabled) -EnabledReason $suEn.reason -Arm $suArm -RightsList $suList
+            foreach ($l in @($su.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+            $fixByHand += [int]$su.warnings
+        }
+    } catch { Say "  security image job not converged: $($_.Exception.Message)" 'Yellow' }
     # ---- 2f. framework 12.23 P8 EXCEPTION (owner 2026-10-18) -- A PRIVATE-SQL INSTALL NEVER CUT OVER MOVES BY ITSELF -----------
     # The Support app has no route to a private database. This updater reads (as dbo, still in the SQL admin group), decides
     # (run 1, later run 2) and STARTS the in-network admin job; the job does the admin SQL and reads it back. No admin SQL
@@ -1164,6 +1181,56 @@ function Save-PimUpdaterRunningImages {
         [void](Save-PimUpdateState -ConnectionString $riCs -Record ([pscustomobject]$riH))
         Say "running images: $(@($riList | ForEach-Object { "$($_.component)=$("$($_.digest)".Replace('sha256:', '').Substring(0, [Math]::Min(12, "$($_.digest)".Replace('sha256:', '').Length)))$(if ($_.dotnet) { " .NET $($_.dotnet)" })" }) -join '; ')" 'DarkGray'
     } catch { Say "running images: not recorded ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
+}
+
+# ---- SEC-PATCH-PIPELINE-1 point 6 (owner 2026-11-26 via Invardia) -- NOTHING OLD ANSWERS, the LAST step of every swap ---------
+# On the normal path AND the image-only path (both end here, after the roll + the clean-up), and on the quiet exits at most
+# every 6 h: every Container App of the install is read (activeRevisionsMode, the active revisions, the traffic); one that is
+# not Single with ONE active revision at 100 % latest is set back -- Single + latest 100 % through the read-modify-write of
+# properties.configuration (Set-PimArmAcaAppConfiguration, PIM-ArmSetup.ps1), read back, any other active revision
+# deactivated (engine/_shared/PIM-RevisionMode.ps1 has the rules; an app whose latest revision is not ready is NOT changed).
+# The fact goes into THIS run's record (UpdateState.revisions, read-modify-write; carried on by later records) and the
+# heartbeat sends it as Update.revisions. Best effort: never changes the outcome or the exit code. PIM_UPDATE_NO_REVISION_FIX=1
+# = read and report only.
+function Save-PimUpdaterRevisions {
+    param([int]$MaxAgeMinutes = 0)
+    try {
+        $rvCs = $null; try { $rvCs = Get-PimSqlConnectionString } catch { $rvCs = $null }
+        if (-not "$rvCs".Trim()) { return }
+        $rvUs = Read-PimUpdateState -ConnectionString $rvCs
+        if (-not $rvUs -or $rvUs -is [string]) { return }
+        if ($MaxAgeMinutes -gt 0) {
+            $rvOld = Get-PimUpdateStateField -Object $rvUs -Key 'revisions'
+            $rvT = [datetime]::MinValue
+            if ($rvOld -and [datetime]::TryParse("$($rvOld.readUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$rvT) -and ([datetime]::UtcNow - $rvT).TotalMinutes -lt $MaxAgeMinutes) { return }
+        }
+        $rvApps = @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/containerApps" -ApiVersion $script:PimAcaApi -All | Where-Object { $_ })
+        if (-not $rvApps.Count) { return }
+        $rvArmLib = Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1'
+        $rvFix = $null
+        if ("$($env:PIM_UPDATE_NO_REVISION_FIX)".Trim() -ne '1') {
+            $rvFix = { param($App)
+                if (-not (Get-Command Set-PimArmAcaAppConfiguration -ErrorAction SilentlyContinue)) { . $rvArmLib }
+                # 3.1.71 review K1: the same write removes a stale rollback pin marker (only sent when the app carries one)
+                [void](Set-PimArmAcaAppConfiguration -SubscriptionId $sub -ResourceGroup $rg -Name "$($App.name)" -Mutate { param($c) Set-PimRevisionModeSingleConfig -Configuration $c } -MutateTags { param($t) Remove-PimRollbackPinTag -Tags $t }) }
+        }
+        # 3.1.70 review F1: ONLY PIM's own apps -- the Manager and an app on the Manager's repository (the roll's rule)
+        $rvMgr = @($rvApps | Where-Object { "$($_.name)" -ieq $managerApp })[0]
+        $rvMgrImg = ''; if ($rvMgr) { $rvMc = Get-PimAcaManagerContainer -App $rvMgr -ContainerName $(if ("$container".Trim()) { $container } else { $managerApp }); if ($rvMc) { $rvMgrImg = "$($rvMc.image)" } }
+        $rvRes = Invoke-PimRevisionModeCheck -Apps $rvApps -ManagerApp $managerApp -ManagerImage $rvMgrImg `
+                    -ListRevisions { param($App) @(Invoke-PimArm -Method GET -Path "$($App.id)/revisions" -ApiVersion $script:PimAcaApi -All) } `
+                    -Fix $rvFix `
+                    -ReadApp { param($App) Invoke-PimArm -Method GET -Path "$($App.id)" -ApiVersion $script:PimAcaApi } `
+                    -Deactivate $(if ($rvFix) { { param($App, $Name) [void](Invoke-PimArm -Method POST -Path "$($App.id)/revisions/$Name/deactivate" -ApiVersion $script:PimAcaApi -Body @{}) } } else { $null }) `
+                    -Log { param($l) Say "  $l" $(if ("$l" -match 'could not|reads back|not changed|not single') { 'Yellow' } else { 'Cyan' }) }
+        if ($null -eq $rvRes.fact) { return }
+        $rvUs = Read-PimUpdateState -ConnectionString $rvCs   # again: the fix may have taken minutes
+        if (-not $rvUs -or $rvUs -is [string]) { return }
+        $rvH = [ordered]@{}; foreach ($pp in $rvUs.PSObject.Properties) { $rvH[$pp.Name] = $pp.Value }
+        $rvH['revisions'] = $rvRes.fact
+        [void](Save-PimUpdateState -ConnectionString $rvCs -Record ([pscustomobject]$rvH))
+        Say ("revisions: {0} PIM app(s), single={1}, highest active={2}{3}{4}" -f $rvRes.fact.apps, $rvRes.fact.single, $rvRes.fact.activeRevisions, $(if ($rvRes.fixed) { ", $($rvRes.fixed) set back to Single" } else { '' }), $(if ($rvRes.foreign) { "; $($rvRes.foreign) other app(s) not PIM's, left alone" } else { '' })) $(if ($rvRes.fact.single) { 'DarkGray' } else { 'Yellow' })
+    } catch { Say "revisions: not checked ($((("$($_.Exception.Message)") -split "`n")[0]))" 'DarkGray' }
 }
 
 # ---- SCHEMA-QUIESCE-818 (framework 8.18; owner 2026-11-05 "it can destroy schema") -- NO DATABASE CHANGE UNDER A RUN -------
@@ -1891,6 +1958,7 @@ if ($plan.action -eq 'none') {
     # and telling them apart is most of "is THIS customer stuck".
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ok'
     Save-PimUpdaterRunningImages -MaxAgeMinutes 360   # SEC-LANE-1: re-read what runs at most every 6 h on a quiet install
+    Save-PimUpdaterRevisions -MaxAgeMinutes 360       # SEC-PATCH-PIPELINE-1 pt 6: nothing old answers (at most every 6 h when quiet)
     exit 0
 }
 
@@ -1927,6 +1995,7 @@ if ($isAhead) {
     Invoke-PimUpdaterConvergeStep -When 'ahead of the ring'   # ... which also runs the web identity trim (2h) on this exit
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ahead'
     Save-PimUpdaterRunningImages -MaxAgeMinutes 360   # SEC-LANE-1
+    Save-PimUpdaterRevisions -MaxAgeMinutes 360       # SEC-PATCH-PIPELINE-1 pt 6
     exit 0
 }
 if (-not $dg.allowed) {
@@ -2115,6 +2184,28 @@ if ($storeHeal.source -eq 'manager') {
     else { Say "  NOTE: could not record the store settings on $selfJob ($($saved.reason)); this run continues with the copied values and the next run copies them again." 'Yellow' }
 } elseif ($storeHeal.source -eq 'job' -and "$($storeHeal.database)".Trim() -and -not "$($global:PIM_SqlDatabase)".Trim()) {
     Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($storeHeal.database)"
+}
+
+# ---- 0-sec. 3.1.70 review F2 -- NEVER ROLL WHILE caj-pim-secupdate SWAPS ---------------------------------------------------
+# 3.1.71 I3 (3.1.70 re-review A4): this wait sits BEFORE the schema step (it was after it, before the Manager roll). A run that
+# applied the new schema and THEN ended waiting left the old image on the new schema. Now nothing is changed -- no quiesce, no
+# store init, no DDL, no roll -- until caj-pim-secupdate is idle. Only on the roll path (after the ahead / nothing-approved exits
+# and the target image is known); still bounded (600 s), fail closed, and the other job is never stopped.
+# Two rollers on one app race: the security image job could put its <build>.N over what this run rolls (a downgrade). While a
+# caj-pim-secupdate execution runs, this run WAITS (bounded, Wait-PimSecUpdateOtherIdle in PIM-SecUpdate.ps1) and then SKIPS:
+# outcome 'waiting' (the next 15-minute run retries, ROLL-RETRY-1). FAIL CLOSED: an unreadable job list or execution list, or
+# a Running execution with no start time, counts as running. The other job is NEVER stopped. No such job = go at once.
+if (Get-Command Wait-PimSecUpdateOtherIdle -ErrorAction SilentlyContinue) {
+    $suIdle = Wait-PimSecUpdateOtherIdle `
+        -ListJobs { @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs" -ApiVersion $script:PimAcaApi -All | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) } `
+        -ReadExecutions { param($j) @(Invoke-PimArm -Method GET -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$j/executions" -ApiVersion $script:PimAcaApi -All) } `
+        -MaxWaitSeconds 600 -PollSeconds 30
+    if (-not $suIdle.go) {
+        Say "NOT ROLLING: $($suIdle.reason)" 'Yellow'
+        Send-PimUpdateOutcome -Action 'schema' -Outcome 'waiting' -ToVersion "$($plan.version)" -ErrorText "security image job running: $($suIdle.reason)"
+        exit 0
+    }
+    if ($suIdle.waited) { Say "security image job: waited $($suIdle.waited)s -- $($suIdle.reason)" 'DarkGray' }
 }
 
 Set-PimUpdTrackStage -Stage 'migrate'   # OPEN-13: the schema goes BEFORE any container moves (additive-only)
@@ -2831,6 +2922,7 @@ try {
     }
 } catch { Say "registry: not pruned ($((("$($_.Exception.Message)") -split "`n")[0])) -- the update is not affected" 'Yellow' }
 Save-PimUpdaterRunningImages   # SEC-LANE-1: what runs NOW, after the roll + the clean-up (best effort)
+Save-PimUpdaterRevisions       # SEC-PATCH-PIPELINE-1 pt 6: the LAST step of the swap (normal + image-only): Single, ONE active revision at 100 %
 
 # ---- 4. §71.44 -- ONE FOLLOW-UP RUN ON THE NEW UPDATER -------------------------------------------
 # 🔴 This run was executed by the PREVIOUS updater image, so whatever the new release changed in the

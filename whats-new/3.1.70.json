@@ -1,0 +1,4 @@
+{"version":"3.1.70","date":"2026-11-26","type":"feature",
+ "summary":"Clearer reporting to Invardia, only the newest version answers after an update, and safer mail sender changes.",
+ "new":[{"title":"Run history and safer updates","text":"PIM Manager now reports its run history and when it last published data, serves only the newest version after an update, uses a new SMTP sender only after its test mail passes, and re-checks the Request for Access sender hourly."}],
+ "fixes":[]}

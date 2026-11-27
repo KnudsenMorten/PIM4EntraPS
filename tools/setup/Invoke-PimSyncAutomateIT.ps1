@@ -277,7 +277,7 @@ if ($rb.action -eq 'rollback') {
     if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to $($rb.revision)")) {
         # §53.6: the image anchor rides along; the roller uses it only if the revision is gone.
         $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
-        & $roller -Rollback $rb.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs @rollSub
+        & $roller -Rollback $rb.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -RollbackBy sync @rbArgs @rollSub   # 3.1.71 review K1: the pin marker
     }
     throw "sync-automateit: post-update health check $(if ($state -eq 'unverified') { 'did NOT run in full (a skip is not a pass)' } else { 'FAILED' }) -- rolled back to $($rb.revision)."
 } elseif ($rb.action -eq 'none' -and -not $healthy) {

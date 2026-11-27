@@ -1191,9 +1191,12 @@ function Set-PimArmAcaAppConfiguration {
       -Mutate receives the current configuration object and changes it in place; the whole configuration is written back
       (configuration.secrets come back WITHOUT values from a GET, so they are re-read with listSecrets first and kept).
       az containerapp ingress update / registry set / secret set / ingress access-restriction set.
+      -MutateTags (3.1.71 review K1, the rollback pin marker): { param($Tags, $App) } receives an ordered copy of the app's tags
+      AS READ and changes it in place; ONLY when they changed does the SAME PATCH carry the whole tag set (ARM replaces the
+      tags as one), so a caller with nothing to change sends exactly the write it sent before.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
-          [Parameter(Mandatory)][scriptblock]$Mutate)
+          [Parameter(Mandatory)][scriptblock]$Mutate, [scriptblock]$MutateTags)
     $app = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
     if (-not $app) { throw "container app '$Name' not found in $ResourceGroup." }
     $cfg = $app.properties.configuration
@@ -1203,7 +1206,31 @@ function Set-PimArmAcaAppConfiguration {
     if ($secrets.Count -lt @($cfg.secrets | Where-Object { $_ }).Count) { throw "container app '$Name': listSecrets returned $($secrets.Count) secret(s) but the app declares $(@($cfg.secrets).Count) -- refusing to write a configuration that would drop secrets." }
     $cfg | Add-Member -NotePropertyName secrets -NotePropertyValue @($secrets | ForEach-Object { $s = [ordered]@{ name = "$($_.name)" }; if ("$($_.keyVaultUrl)".Trim()) { $s.keyVaultUrl = "$($_.keyVaultUrl)"; $s.identity = "$($_.identity)" } else { $s.value = "$($_.value)" }; [pscustomobject]$s }) -Force
     & $Mutate $cfg
-    Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Resource @{ properties = @{ configuration = $cfg } }
+    $resource = @{ properties = @{ configuration = $cfg } }
+    if ($MutateTags) {
+        $tags = ConvertTo-PimArmTagTable -Tags $app.tags
+        $before = ConvertTo-PimArmTagText -Tags $tags
+        & $MutateTags $tags $app
+        if ((ConvertTo-PimArmTagText -Tags $tags) -cne $before) { $resource['tags'] = $tags }
+    }
+    Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Resource $resource
+}
+
+function ConvertTo-PimArmTagTable {
+    <# PURE. ARM tags (pscustomobject or dictionary, or $null) -> an ordered, case-insensitive copy (3.1.71 review K1). #>
+    param([AllowNull()][object]$Tags)
+    $t = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::OrdinalIgnoreCase)
+    if ($null -eq $Tags) { return ,$t }
+    if ($Tags -is [System.Collections.IDictionary]) { foreach ($k in @($Tags.Keys)) { $t["$k"] = "$($Tags[$k])" } }
+    else { foreach ($p in @($Tags.PSObject.Properties)) { $t["$($p.Name)"] = "$($p.Value)" } }
+    return ,$t
+}
+
+function ConvertTo-PimArmTagText {
+    <# PURE. A tag table as one comparable line (sorted key=value). #>
+    param([AllowNull()][System.Collections.IDictionary]$Tags)
+    if ($null -eq $Tags) { return '' }
+    return (@($Tags.Keys | ForEach-Object { "$_" } | Sort-Object) | ForEach-Object { "$_=$($Tags[$_])" }) -join "`n"
 }
 
 function Get-PimArmAcaAppSecrets {

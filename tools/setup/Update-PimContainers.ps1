@@ -67,7 +67,10 @@ param(
     # reactivate would have produced. So: reactivate when the revision survives (cheaper, keeps
     # the revision history honest), fall back to the image when it does not.
     [string]$RollbackImage,
-    [switch]$SkipSmoke,    # opt OUT of the post-deploy GUI smoke gate (NOT recommended)
+    # 3.1.71 review K1: WHO pins the traffic on a -Rollback -- written into the pim-rollback-pin marker tag. The setup passes
+    # 'setup', the updater 'update', the sync 'sync'; a person running this by hand is 'operator' (the default).
+    [ValidateSet('operator', 'setup', 'update', 'sync')][string]$RollbackBy = 'operator',
+    [switch]$SkipSmoke,   # opt OUT of the post-deploy GUI smoke gate (NOT recommended)
     # --- inputs the post-deploy gate needs (DOC-06) --------------------------------------
     # The gate used to be invoked as `& $smoke -AsReleaseGate` with NOTHING passed, even though
     # this script already knows the resource group and the Manager's name. So on any deploy that
@@ -655,10 +658,20 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
             catch { throw "Update-PimContainers: revision activate FAILED ($($_.Exception.Message)) for $app -> $rev." }
             # `ingress traffic set --revision-weight <rev>=100`: read-modify-write of configuration.ingress.traffic.
             # Best-effort, as before (single-revision mode serves the active revision anyway).
+            # FIXED 2026-11-26 (3.1.71 review K1): the SAME write adds the rollback pin MARKER, the tag
+            #   pim-rollback-pin = <the app's latestRevisionName at pin time>|<utc>|<who: -RollbackBy>
+            # (format: engine/_shared/PIM-RevisionMode.ps1 New-PimRollbackPinTagValue). The revision check honours the
+            # pin only while that tag names the CURRENT latest revision; the next roll (a new revision) releases it.
+            # Inline here because a bound closure cannot see dot-sourced functions.
+            $pinSuffix = '{0}|{1}' -f [datetime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture), $RollbackBy
             try {
                 [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $app -Mutate {
                     param($cfg)
                     if ($cfg.ingress) { $cfg.ingress | Add-Member -NotePropertyName traffic -NotePropertyValue @([pscustomobject]@{ revisionName = $rev; weight = 100 }) -Force }
+                }.GetNewClosure() -MutateTags {
+                    param($tags, $appObj)
+                    $pinLatest = "$($appObj.properties.latestRevisionName)".Trim()
+                    if ($pinLatest -and $appObj.properties.configuration.ingress) { $tags['pim-rollback-pin'] = "$pinLatest|$pinSuffix" }
                 }.GetNewClosure())
             } catch { Write-Verbose "traffic weight for $app -> ${rev}: $($_.Exception.Message)" }
             Write-Host "  $app -> $rev (100%)" -ForegroundColor Green

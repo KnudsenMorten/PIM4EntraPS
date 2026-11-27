@@ -1,5 +1,30 @@
 # What's new in PIM Manager
 
+## 3.1.71 · 2026-11-26 · Fix-only
+
+Safer rollbacks and a stricter check before a new SMTP sender is used.
+
+### New features
+
+None in this version.
+
+### Fixes
+
+- **Rollbacks stay until the next update** - After a rollback, PIM Manager keeps serving the version you rolled back to until the next update, instead of switching back on its own.
+- **Clearer SMTP sender test** - A new SMTP sender is used only after a test sent over SMTP passes. If the test fails, the reason is now shown.
+
+## 3.1.70 · 2026-11-26 · Feature update
+
+Clearer reporting to Invardia, only the newest version answers after an update, and safer mail sender changes.
+
+### New features
+
+- **Run history and safer updates** - PIM Manager now reports its run history and when it last published data, serves only the newest version after an update, uses a new SMTP sender only after its test mail passes, and re-checks the Request for Access sender hourly.
+
+### Fixes
+
+None in this version.
+
 ## 3.1.69 · 2026-11-26 · Feature update
 
 One mail sender everywhere, a security image overview, and admins in protected groups can be disabled again.

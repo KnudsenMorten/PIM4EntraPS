@@ -218,8 +218,10 @@ function New-PimUpdateStateRecord {
     # (Update.runningImages / Update.imagePrune). Each says its own read time.
     # ROLL-HUNG-1 (3.1.60): 'hungStops' -- the hung runs the updater stopped (or failed to stop), newest first
     # (New-PimRollHungStopRecord), written by the quiesce right after the stop and carried the same way.
+    # SEC-PATCH-PIPELINE-1 pt 6 (3.1.70): 'revisions' -- the updater's last read of the apps' revision mode (Save-PimUpdaterRevisions),
+    # carried the same way (Update.revisions on the heartbeat).
     if ($Previous) {
-        foreach ($ck in 'runningImages', 'imagePrune', 'hungStops') {
+        foreach ($ck in 'runningImages', 'imagePrune', 'hungStops', 'revisions') {
             $cv = Get-PimUpdateStateField -Object $Previous -Key $ck
             if ($null -ne $cv -and -not ($cv -is [string] -and -not $cv.Trim())) { $rec[$ck] = $(if ($ck -in @('runningImages', 'hungStops')) { @($cv) } else { $cv }) }
         }

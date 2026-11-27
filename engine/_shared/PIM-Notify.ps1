@@ -462,8 +462,17 @@ function Invoke-PimMailEngineTest {
         else { foreach ($p in @($req.PSObject.Properties)) { $rec[$p.Name] = $p.Value } }
         $rec['status'] = 'sending'; $rec['claimedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
         & $Writer 'MailEngineTest' $rec
+        # ONE-SENDER-1 A1 (Invardia 2026-11-26): a test queued for a PENDING SMTP From (the request's fromPending, still the
+        # pending one now) is sent AS that From; only its pass makes it the relay's From (Complete-PimSmtpFromPending below)
+        $pendFrom = "$(if ($rec.Contains('fromPending')) { $rec['fromPending'] })".Trim(); $pendRec = $null; $pendUnsettled = ''
+        if ($pendFrom -and (Get-Command ConvertTo-PimSmtpFromPending -ErrorAction SilentlyContinue)) {
+            $pendRec = $null; try { $pendRec = ConvertTo-PimSmtpFromPending -Value (& $Reader (Get-PimSmtpFromPendingSettingName)) } catch { $pendRec = $null }
+            if ($null -eq $pendRec -or $pendRec.from -ine $pendFrom) { $pendFrom = ''; $pendRec = $null }
+        } else { $pendFrom = '' }
         $prevRole = $global:PIM_MailProofRole
+        $prevOv = $global:PIM_SmtpFromOverride
         $global:PIM_MailProofRole = 'engine'
+        if ($pendFrom) { $global:PIM_SmtpFromOverride = $pendFrom }
         $script:PimMailProofLast = $null   # this one send is always recorded (never throttled away)
         $r = $null
         try {
@@ -474,18 +483,48 @@ function Invoke-PimMailEngineTest {
                 # PIM 100.105: who acts / status / problem / what to do (a test: the product works, nobody has to act)
                 AlertWho = 'Customer'; AlertStatus = 'Information'; AlertProblem = 'This is a test mail: the PIM Manager engine can send mail'; AlertTodo = 'Nothing to do, this was a test'
                 WhenUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
-        } catch { $r = @{ sent = $false; reason = "$($_.Exception.Message)" } }
-        finally { $global:PIM_MailProofRole = $prevRole }
+        } catch {
+            $r = @{ sent = $false; reason = "$($_.Exception.Message)" }
+            # FIXED 2026-11-26 (3.1.71 review K3): a send that THREW while testing a pending SMTP From carried no sentAs / from,
+            # so Complete-PimSmtpFromPending recorded no lastTest and the UI showed "pending" with no reason. When the mode is
+            # smtp and this send went out with the pending From as its override, the failure is recorded AS that From's test
+            # (sentAs 'smtp', from = the pending From) -- with $ok false it records lastTest { ok = false; reason } and
+            # settles nothing as good.
+            $ctMode = ''; try { if (Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) { $ctMode = "$(Get-PimMailMode)" } } catch { $ctMode = '' }
+            if ($pendFrom -and $ctMode -ieq 'smtp' -and "$($global:PIM_SmtpFromOverride)".Trim() -ieq $pendFrom) { $r['sentAs'] = 'smtp'; $r['from'] = $pendFrom }
+        }
+        finally { $global:PIM_MailProofRole = $prevRole; $global:PIM_SmtpFromOverride = $prevOv }
         $ok = ("$($r.sent)" -match '(?i)^true$')
         $one = "$($r.reason)" -replace "[\r\n]+", ' '; if ($one.Length -gt 300) { $one = $one.Substring(0, 300) }
         $rec['status'] = $(if ($ok) { 'sent' } else { 'failed' }); $rec['at'] = (Get-Date).ToUniversalTime().ToString('o'); $rec['reason'] = $(if ($ok) { '' } else { $one })
         try { & $Writer 'MailEngineTest' $rec } catch { Write-Warning "  [Mail] the engine test mail result could not be recorded: $($_.Exception.Message)" }
+        if ($pendFrom) {
+            # ONE-SENDER-1 A1: pass -> the pending From becomes the From (then the proof below is taken against it); failure ->
+            # the current From stays and is NOT marked failed (the proof is skipped: it was not the From mail goes out as)
+            try {
+                $relRaw = $null; try { $relRaw = & $Reader 'SmtpRelay' } catch { $relRaw = $null }
+                $msRaw = ''; try { $msRaw = "$(& $Reader 'MailSender')" } catch { $msRaw = '' }
+                # 3.1.71 I4 (3.1.70 re-review B7): settled ONLY by a send that went out over the SMTP relay as the pending From
+                # (the send path's sentAs + from); a test that went out over Graph (mode switched after it was queued) leaves it pending
+                $cp = Complete-PimSmtpFromPending -Pending $pendRec -Relay $relRaw -MailSender $msRaw -Ok $ok -Reason $one -TestedFrom $pendFrom `
+                        -SentAs "$(if ($r) { $r.sentAs })" -SentFrom "$(if ($r) { $r.from })" -NowUtc $NowUtc
+                if ($cp.promote) {
+                    & $Writer 'SmtpRelay' $cp.relay
+                    if ("$($cp.mailSender)".Trim()) { & $Writer 'MailSender' "$($cp.mailSender)"; $global:PIM_MailSender = "$($cp.mailSender)" }
+                    $global:PIM_SmtpRelay = $cp.relay
+                }
+                if ($null -ne $cp.pending) { & $Writer (Get-PimSmtpFromPendingSettingName) $cp.pending }
+                Write-Host "  [Mail] $($cp.line)" -ForegroundColor $(if ($cp.promote) { 'Green' } else { 'Yellow' })
+                if (-not $cp.settled) { $pendUnsettled = "$($cp.line)" }
+            } catch { Write-Warning "  [Mail] the pending From could not be settled: $($_.Exception.Message) -- the relay keeps its current From" }
+            if (-not $ok) { return @{ ran = $true; sent = $false; detail = "engine test mail as the NEW From $pendFrom NOT sent: $one -- mail keeps going out as the current From" } }
+        }
         # SECURE-WEB-1 (3.1.26): the web app no longer sends a test mail of its own, so THIS send is the test-mail proof the
         # Get Started step reads (pim.Settings 'MailLastTest', against the settings it was sent with) -- and, for an SMTP relay
         # with a sign-in, the engine reads the relay password from Key Vault as ITS identity (the web reads no secret) and
         # records only whether it could (pim.Settings 'MailSmtpPasswordCheck'; the value is never kept).
         try { Save-PimMailEngineTestProof -Ok $ok -Reason $(if ($ok) { '' } else { $one }) -To "$($rec['to'])" -Reader $Reader -Writer $Writer -NowUtc $NowUtc } catch { Write-Warning "  [Mail] the test-mail proof could not be recorded: $($_.Exception.Message)" }
-        return @{ ran = $true; sent = $ok; detail = $(if ($ok) { "engine test mail sent to $($rec['to'])" } else { "engine test mail NOT sent: $one" }) }
+        return @{ ran = $true; sent = $ok; detail = $(if ($ok) { "engine test mail sent to $($rec['to'])$(if ($pendUnsettled) { " -- $pendUnsettled" })" } else { "engine test mail NOT sent: $one" }) }
     } catch {
         return @{ ran = $false; sent = $false; detail = "the engine test mail failed: $($_.Exception.Message)" }
     }
@@ -774,10 +813,17 @@ function Send-PimNotifyMail {
         # ONE-SENDER-1 (3.1.69 review): the relay's From is its own proven 'from' when set, else pim.Settings MailSender; a
         # different MailSender is DRIFT (reported by the mail check / heartbeat), never switched to unproven
         $smtpFrom = if (Get-Command Get-PimSmtpFromAddress -ErrorAction SilentlyContinue) { Get-PimSmtpFromAddress -MailSender $sender -Config $relay.config } else { "$($relay.config.from)" }
-        $sm = Send-PimSmtpMail -Config $relay.config -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments -From $smtpFrom
+        # ONE-SENDER-1 A1 (Invardia 2026-11-26): ONLY the engine's test mail of a PENDING From sets this (Invoke-PimMailEngineTest)
+        # -- that one send goes out as the new From; every other mail keeps the relay's current From
+        $smtpFromOv = "$($global:PIM_SmtpFromOverride)".Trim()
+        if ($smtpFromOv) { $smtpFrom = $smtpFromOv; $smtpConfig = [ordered]@{}; foreach ($__k in @($relay.config.Keys)) { $smtpConfig[$__k] = $relay.config[$__k] }; $smtpConfig['from'] = $smtpFromOv }
+        else { $smtpConfig = $relay.config }
+        $sm = Send-PimSmtpMail -Config $smtpConfig -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments -From $smtpFrom
         if (-not $sm.sent) { Write-Warning "  [Mail] send failed ($Type -> $rcpt) via SMTP relay: $($sm.reason)" }
-        Save-PimMailSendProof -Ok ([bool]$sm.sent) -Reason "$($sm.reason)" -Mode 'smtp' -Sender "$smtpFrom"
-        return @{ sent = [bool]$sm.sent; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($sm.reason)"; sentAs = 'smtp' }
+        # a FAILED test of a pending From is not a failure of the From mail goes out as -- no send proof for it
+        if (-not $smtpFromOv -or $sm.sent) { Save-PimMailSendProof -Ok ([bool]$sm.sent) -Reason "$($sm.reason)" -Mode 'smtp' -Sender "$smtpFrom" }
+        # 3.1.71 I4: 'from' = the From this send went out as (Complete-PimSmtpFromPending settles a pending From only on it)
+        return @{ sent = [bool]$sm.sent; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($sm.reason)"; sentAs = 'smtp'; from = "$smtpFrom" }
     }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
     if (-not $rcpt)   { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }

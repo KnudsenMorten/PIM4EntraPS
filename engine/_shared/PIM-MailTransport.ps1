@@ -174,6 +174,94 @@ function Resolve-PimMailSenderFromRelay {
     return @{ migrate = $true; sender = $f; reason = "MailSender was empty -- SmtpRelay.from '$f' becomes the ONE sender (one-time migration)" }
 }
 
+# ---- ONE-SENDER-1 A1 (Invardia 2026-11-26): a NEW SMTP From is held as PENDING until its test mail passes -------------------
+# An operator who saves another From for the relay (Settings > Mail & alerting, PUT /api/settings/mail) does not switch the
+# relay at once: the relay keeps sending as its CURRENT From (the address it is proven to accept), the new one is stored in
+# pim.Settings 'SmtpRelayFromPending', and the engine's next test mail is sent WITH the new From. Only a test that passes
+# makes it the From (SmtpRelay.from, and MailSender when that was the old From or empty); a failed test leaves the current
+# From in place and the pending one with its failure. The From is never blanked.
+function Get-PimSmtpFromPendingSettingName { <# PURE. The pim.Settings name of the pending From (a literal). #> return 'SmtpRelayFromPending' }
+
+function ConvertTo-PimSmtpFromPending {
+    <# PURE. The stored pending From -> { from; previous; savedUtc; by; lastTest } or $null (none, cleared, not a mail address). #>
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) { $t = "$v".Trim(); if (-not $t) { return $null }; try { $v = $t | ConvertFrom-Json } catch { return $null } }
+    if ($null -eq $v) { return $null }
+    $g = { param($k) if ($v -is [System.Collections.IDictionary]) { if ($v.Contains($k)) { $v[$k] } else { $null } } elseif ($v.PSObject.Properties[$k]) { $v.$k } else { $null } }
+    if ("$(& $g 'status')".Trim() -ne 'pending') { return $null }
+    $f = "$(& $g 'from')".Trim()
+    if (-not $f -or -not (Test-PimMailAddress -Value $f)) { return $null }
+    return [pscustomobject][ordered]@{ status = 'pending'; from = $f; previous = "$(& $g 'previous')".Trim(); savedUtc = "$(& $g 'savedUtc')".Trim(); by = "$(& $g 'by')".Trim(); lastTest = (& $g 'lastTest') }
+}
+
+function Resolve-PimSmtpFromSave {
+    <#
+      PURE. ONE-SENDER-1 A1: what a save of the relay's From does. -CurrentFrom = the stored relay record's From; -WantedFrom =
+      the From the operator typed. Returns @{ from (the From the relay record keeps NOW); pending (the address held until its
+      test mail passes, '' = none); clearPending (a pending one is dropped); reason }:
+        nothing typed                  -> the current From stays (never blanked)
+        the relay has no From yet      -> the typed one is the From at once (nothing proven to keep)
+        the same address               -> unchanged; a pending one is dropped (the operator went back)
+        another address                -> the CURRENT From stays, the typed one is PENDING
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$CurrentFrom, [AllowEmptyString()][AllowNull()][string]$WantedFrom)
+    $c = "$CurrentFrom".Trim().Trim('"'); $w = "$WantedFrom".Trim().Trim('"')
+    if (-not $w) { return @{ from = $c; pending = ''; clearPending = $false; reason = $(if ($c) { "no From typed -- the relay keeps $c" } else { 'no From typed' }) } }
+    if (-not $c) { return @{ from = $w; pending = ''; clearPending = $true; reason = "the relay had no From yet -- $w is its From" } }
+    if ($w -ieq $c) { return @{ from = $c; pending = ''; clearPending = $true; reason = "the From is unchanged ($c)" } }
+    return @{ from = $c; pending = $w; clearPending = $false
+              reason = "the new From $w is held until its test mail passes -- mail keeps going out as $c until then" }
+}
+
+function New-PimSmtpFromPendingRecord {
+    <# PURE. The pim.Settings 'SmtpRelayFromPending' record of a save (status pending), or of a dropped one (-Cleared). #>
+    param([AllowEmptyString()][string]$From = '', [AllowEmptyString()][string]$Previous = '', [AllowEmptyString()][string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow, [switch]$Cleared)
+    $at = $NowUtc.ToUniversalTime().ToString('o')
+    if ($Cleared) { return [ordered]@{ status = 'cleared'; from = ''; previous = ''; savedUtc = $at; by = "$By".Trim(); lastTest = $null } }
+    return [ordered]@{ status = 'pending'; from = "$From".Trim(); previous = "$Previous".Trim(); savedUtc = $at; by = "$By".Trim(); lastTest = $null }
+}
+
+function Complete-PimSmtpFromPending {
+    <#
+      PURE. ONE-SENDER-1 A1: after the engine's test mail sent WITH the pending From (-TestedFrom). Returns @{ promote; relay
+      (the relay config to store, $null = unchanged); mailSender (the MailSender to store, '' = unchanged); pending (the record
+      to store); line }. A pass -> the pending From becomes SmtpRelay.from, and MailSender too when it was empty or the old
+      From (so the two stay one); the pending record is cleared. A failure -> nothing changes but the pending record's
+      lastTest. A pending From that changed since the test was queued (or none) -> nothing is changed at all.
+      3.1.71 I4 (3.1.70 re-review B7): it settles ONLY a test that the send path says went out over the SMTP relay
+      (-SentAs 'smtp', Send-PimNotifyMail's sentAs) WITH the pending From as its From (-SentFrom, the send path's from). A test
+      that went out over Graph (the mode was switched to shared mailbox after it was queued), as another From, or with no
+      answer (blank -- fail closed) settles nothing: the pending From stays pending, untouched (settled = $false).
+    #>
+    param([AllowNull()][object]$Pending, [AllowNull()][object]$Relay, [AllowEmptyString()][AllowNull()][string]$MailSender, [bool]$Ok,
+          [AllowEmptyString()][string]$Reason = '', [AllowEmptyString()][string]$TestedFrom = '',
+          [AllowEmptyString()][AllowNull()][string]$SentAs = '', [AllowEmptyString()][AllowNull()][string]$SentFrom = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $p = ConvertTo-PimSmtpFromPending -Value $Pending
+    $tf = "$TestedFrom".Trim()
+    if ($null -eq $p -or -not $tf -or $p.from -ine $tf) { return @{ promote = $false; settled = $false; relay = $null; mailSender = ''; pending = $null; line = 'no pending From for this test mail -- nothing changed' } }
+    $sa = "$SentAs".Trim(); $sf = "$SentFrom".Trim()
+    if ($sa -ine 'smtp' -or $sf -ine $p.from) {
+        return @{ promote = $false; settled = $false; relay = $null; mailSender = ''; pending = $null
+                  line = "the test mail did not go out over the SMTP relay as $($p.from) (sent as '$(if ($sa) { $sa } else { 'unknown' })'$(if ($sf) { ", from $sf" })) -- the pending From stays pending; send the test mail again over the relay" }
+    }
+    $at = $NowUtc.ToUniversalTime().ToString('o')
+    if (-not $Ok) {
+        $one = "$Reason" -replace "[\r\n]+", ' '; if ($one.Length -gt 300) { $one = $one.Substring(0, 300) }
+        $rec = [ordered]@{ status = 'pending'; from = $p.from; previous = $p.previous; savedUtc = $p.savedUtc; by = $p.by; lastTest = [ordered]@{ ok = $false; at = $at; reason = $one } }
+        return @{ promote = $false; settled = $true; relay = $null; mailSender = ''; pending = $rec; line = "the test mail as $($p.from) did not pass -- the relay keeps its current From" }
+    }
+    $cfg = ConvertTo-PimSmtpRelayConfig -Value $Relay
+    if (-not $cfg.ok) { return @{ promote = $false; settled = $false; relay = $null; mailSender = ''; pending = $null; line = 'the stored relay record is not valid -- the pending From was not applied' } }
+    $old = "$($cfg.config.from)".Trim()
+    $new = [ordered]@{}; foreach ($k in @($cfg.config.Keys)) { $new[$k] = $cfg.config[$k] }
+    $new['from'] = $p.from
+    $ms = "$MailSender".Trim().Trim('"')
+    $msNew = if (-not $ms -or ($old -and $ms -ieq $old)) { $p.from } else { '' }
+    return @{ promote = $true; settled = $true; relay = $new; mailSender = $msNew; pending = (New-PimSmtpFromPendingRecord -Cleared -By $p.by -NowUtc $NowUtc)
+              line = "the test mail as $($p.from) passed -- it is the relay's From now$(if ($old) { " (was $old)" })" }
+}
+
 function Get-PimSmtpRelayPassword {
     # The relay password, read at send time from Key Vault by THIS process's identity (the managed identity when hosted).
     # '' when the relay needs no sign-in. Throws when it needs one and the secret cannot be read (the caller reports it).

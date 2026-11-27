@@ -17,6 +17,9 @@
      in updates, Invardia relays only"): -Ring <0-3> publishes AND releases to that ring in one call (&ring=N); without
      -Ring the version is only registered. Ring 2 / 3 reach customers, so they need -OperatorApproval carrying the
      operator's own words ("release <version> to ring 2"), printed in the plan and the result.
+     TWO-AGENT-CHECK-1 (3.1.70): the publish call's body is the zip, so a ring set there (&ring=N) carries NO testGate --
+     Invardia refuses a ring-0 call without testGate.reviews + findings from 2026-12-01. The release tool therefore publishes
+     WITHOUT -Ring and sets every ring, ring 0 included, by -Promote -Ring N -TestGateJson <proof + reviews + findings>.
   Without -Apply it is a plan: the zip is built and checked, nothing is sent.
 
   Identity: client id + certificate thumbprint from -KeyVault (invardia-publisher-clientid-pim-manager /
@@ -62,7 +65,8 @@ param(
     # IMAGE-ONLY-SEND (owner 2026-11-11, framework IMAGE-PATCH-1 point 8 / IMAGE-ONLY-AUTO-1): the ring call claims
     # "imageOnly": true with "imageDiff" { fromVersion = the version that ring runs now; files[{ path, removed, added }] }.
     # Refused HERE (nothing sent) when a changed file is product code; Invardia answering 422 imageOnly/imageDiff = the call is
-    # sent once more WITHOUT the claim (it then needs the owner's per-version yes, as before).
+    # sent once more WITHOUT the claim (it then needs the owner's per-version yes, as before) -- 3.1.71 J1: ONLY when the testGate
+    # carries two PASS reviews and -NoClaimFallback is not given (Test-PimClaimFallbackAllowed); an exempt release is refused.
     [switch]$ImageOnly,
     # DIGEST-PROOF-1 (framework, Invardia 2026-11-23; SEC-LANE-1 G8): an image patch of an OLDER build (e.g. 3.1.60.1 for the
     # rings that run 3.1.60) never runs on rings 0/1 itself; it is proven by a NEWER version rings 0/1 run with the same base
@@ -79,7 +83,13 @@ param(
     # tag and the publish. Implies -CheckOnly; needs no tag; the image-only diff is base tag -> the WORKING TREE (the fix is not
     # committed yet in step 1); body { version; plan: true; imageOnly?; imageDiff?; provenBy? }. A not-yet-published version is
     # a NOTE in Invardia's answer, never a refusal. Sends nothing else.
-    [switch]$PlanCheck
+    [switch]$PlanCheck,
+    # 3.1.71 J1 (re-review A1/B1, Invardia decision (3) 2026-11-26): an EXEMPT image-only release (the TWO-AGENT-CHECK-1 image-only
+    # exemption: no reviews, the claim instead) is NEVER re-sent without its claim. The 422 retry below happens only when the
+    # testGate carries two PASS reviews (Test-PimClaimFallbackAllowed); an exempt caller passes -NoClaimFallback as well.
+    [switch]$NoClaimFallback,
+    # 3.1.71 J3 (re-review B5): -Ring on the PUBLISH call (no -Promote) carries no testGate -- REFUSED unless this switch is given
+    [switch]$LegacyRingPublish
 )
 if ($PlanCheck) { $CheckOnly = [switch]$true }
 $ErrorActionPreference = 'Stop'
@@ -113,6 +123,25 @@ function ConvertTo-PimTestGateBody {
         $out['findings'] = $fo
     }
     return $out
+}
+function Test-PimClaimFallbackAllowed {
+    <# PURE. 3.1.71 J1 (re-review A1/B1). May a ring / register call whose image-only claim Invardia refused (HTTP 422 naming
+       imageOnly / imageDiff) be sent ONCE more WITHOUT the claim? Only when its testGate carries two PASS reviews from two
+       different agents (the call then still has its reviews). An exempt image-only release (no reviews -- the claim is all it
+       has) or -NoClaimFallback = NO: refused, nothing more is sent. -> @{ ok; why }
+       ⛔ SUPERSEDED (3.1.71 J1, 2026-11-26): "Invardia answering 422 imageOnly/imageDiff = the call is sent once more WITHOUT the
+       claim" for EVERY call -- that let an exempt release reach a ring with neither reviews nor the claim. #>
+    param($TestGate = $null, [switch]$NoClaimFallback)
+    if ($NoClaimFallback) { return @{ ok = $false; why = '-NoClaimFallback: an exempt image-only release is never sent without its claim' } }
+    $rv = @(if ($TestGate) { @($TestGate.reviews) | Where-Object { $_ -and "$($_.verdict)" -ceq 'PASS' -and "$($_.agent)".Trim() } })
+    $agents = @($rv | ForEach-Object { "$($_.agent)".Trim().ToLowerInvariant() } | Select-Object -Unique)
+    if ($agents.Count -lt 2) { return @{ ok = $false; why = 'the testGate carries no two PASS reviews (the image-only exemption): without the claim the call would carry neither' } }
+    return @{ ok = $true; why = '' }
+}
+function Test-PimLegacyRingPublishRefused {
+    <# PURE. 3.1.71 J3: $true = refuse (a ring on the publish call, no -Promote, no -LegacyRingPublish). #>
+    param([int]$Ring = -1, [switch]$Promote, [switch]$LegacyRingPublish)
+    return [bool]($Ring -ge 0 -and -not $Promote -and -not $LegacyRingPublish)
 }
 function Test-PimImageOnlyPath {
     <# PURE (IMAGE-ONLY-SEND). Is a changed file one an image-only release may touch? 'image' = a Dockerfile / lock file /
@@ -166,6 +195,21 @@ function Get-PimImageOnlyDiff {
     }
     if ($lines -gt 20000) { return @{ ok = $false; reason = "more than 20,000 changed lines ($lines)"; files = @() } }
     return @{ ok = $true; reason = ''; files = @($files.ToArray()) }
+}
+function Get-PimImageOnlyClaim {
+    <# IMAGE-ONLY-SEND, 3.1.70 (every ring call of an image-only patch: Pro rings 0-3 AND the Community register / rings). The
+       ONE builder of the claim: -BaseVersion = the version that ring runs now (read from Invardia's state by the caller), -ToTag =
+       the release tag ('' = the working tree, a plan check). -> @{ ok; reason; imageDiff = [ordered]@{ fromVersion; files } }.
+       ok=$false (nothing is claimed, the caller sends nothing) when the base is unknown, its tag is not in -RepoRoot, or a
+       changed file is product code (Get-PimImageOnlyDiff). #>
+    param([Parameter(Mandatory)][string]$RepoRoot, [AllowEmptyString()][string]$BaseVersion = '', [AllowEmptyString()][string]$ToTag = '')
+    $b = "$BaseVersion".Trim()
+    if (-not $b) { return @{ ok = $false; reason = 'the version that ring runs now could not be read from Invardia'; imageDiff = $null } }
+    & git -C $RepoRoot rev-parse --verify --quiet "refs/tags/PIM4EntraPS-v$b" 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { return @{ ok = $false; reason = "the tag PIM4EntraPS-v$b (the version that ring runs now) is not in this repository"; imageDiff = $null } }
+    $d = Get-PimImageOnlyDiff -RepoRoot $RepoRoot -FromTag "PIM4EntraPS-v$b" -ToTag $ToTag
+    if (-not $d.ok) { return @{ ok = $false; reason = "$($d.reason)"; imageDiff = $null } }
+    return @{ ok = $true; reason = ''; imageDiff = [ordered]@{ fromVersion = $b; files = @($d.files) } }
 }
 function Get-PimProvenByBody {
     <# DIGEST-PROOF-1. The "provenBy" body for an image patch -PatchFiles (Get-PimImageOnlyDiff files) proven by -ProvenByVersion:
@@ -340,12 +384,12 @@ if ($Promote) {
     if ($ImageOnly) {
         $ioBase = Get-PimRingBaseVersion -State (Invoke-PimInvardiaReadBack -Endpoint $Endpoint -Token $token -Kind $Kind -Version $Version) -Ring $Ring -Target $Version
         if (-not $ioBase) { throw "-ImageOnly: the version ring $Ring runs now could not be read from Invardia -- nothing was sent" }
-        & git -C $repo rev-parse --verify --quiet "refs/tags/PIM4EntraPS-v$ioBase" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "-ImageOnly: the tag PIM4EntraPS-v$ioBase (ring $Ring's version) is not in this repository -- nothing was sent" }
-        $io = Get-PimImageOnlyDiff -RepoRoot $repo -FromTag "PIM4EntraPS-v$ioBase" -ToTag $tag
+        # 3.1.70: the ONE builder (Get-PimImageOnlyClaim) -- the Community register (ops community-register.ps1) uses the same
+        $io = Get-PimImageOnlyClaim -RepoRoot $repo -BaseVersion $ioBase -ToTag $tag
         if (-not $io.ok) { throw "-ImageOnly refused: $($io.reason) -- release it with the owner's per-version yes instead; nothing was sent" }
+        $io['files'] = @($io.imageDiff.files)
         $pBody['imageOnly'] = $true
-        $pBody['imageDiff'] = [ordered]@{ fromVersion = $ioBase; files = @($io.files) }
+        $pBody['imageDiff'] = $io.imageDiff
         Write-Host ("    imageOnly: {0} -> {1}, {2} file(s): {3}" -f $ioBase, $Version, @($io.files).Count, ((@($io.files) | ForEach-Object { $_.path }) -join ', '))
         if ("$ProvenBy".Trim()) {
             $pb = Get-PimProvenByBody -RepoRoot $repo -ProvenByVersion "$ProvenBy".Trim() -PatchFiles @($io.files)
@@ -371,6 +415,9 @@ if ($Promote) {
     Step "POST $purl"
     $pr = Invoke-PimInvardiaCall -Method POST -Url $purl -Token $token -Body ($pBody | ConvertTo-Json -Compress -Depth 8) -ContentType 'application/json'
     if ($ImageOnly -and [int]$pr.status -eq 422 -and "$($pr.content)" -match '(?i)imageOnly|imageDiff') {
+        # 3.1.71 J1: only a call that still carries two PASS reviews may go again without the claim; an exempt one is REFUSED here
+        $fb = Test-PimClaimFallbackAllowed -TestGate $pBody['testGate'] -NoClaimFallback:$NoClaimFallback
+        if (-not $fb.ok) { throw ("Invardia did not accept the image-only claim of $Version on ring $Ring (HTTP 422: {0}) and it is NOT re-sent without it -- {1}; nothing more was sent" -f ("$($pr.content)" -replace '\s+', ' ').Substring(0, [Math]::Min(200, ("$($pr.content)").Length)), $fb.why) }
         # framework IMAGE-PATCH-1 point 8 / 12.22 3b: a claim Invardia does not accept -> once more WITHOUT it (a normal ring call)
         Write-Host ("    Invardia did not accept the image-only claim (HTTP 422: {0}) -- sent once more as a normal ring call" -f ("$($pr.content)" -replace '\s+', ' ').Substring(0, [Math]::Min(200, ("$($pr.content)").Length))) -ForegroundColor Yellow
         $pBody.Remove('imageOnly'); $pBody.Remove('imageDiff'); $pBody.Remove('provenBy')
@@ -398,6 +445,10 @@ if ($Promote) {
     if (-not $ok) { throw "Invardia refused the promotion (HTTP $status)" }
     return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl; changedScopes = @($(if ($pBody.Contains('changedScopes')) { $pScopes })) }
 }
+# 3.1.71 J3 (re-review B5): a ring on the PUBLISH call carries no testGate (its body is the zip) -- REFUSED before anything is
+# built or sent, unless -LegacyRingPublish says so explicitly. ⛔ SUPERSEDED (3.1.71 J3, 2026-11-26): "keeps -Ring on the publish
+# call for older callers but warns that it carries no testGate".
+if (Test-PimLegacyRingPublishRefused -Ring $Ring -Promote:$Promote -LegacyRingPublish:$LegacyRingPublish) { throw "REFUSED: -Ring $Ring without -Promote publishes AND releases in one call that carries no testGate (TWO-AGENT-CHECK-1) -- publish without -Ring, then -Promote -Ring $Ring -TestGateJson <proof + reviews + findings> (the ops release tool release-pim-fix.ps1 does this); -LegacyRingPublish only when you mean the old path. Nothing was sent" }
 Step 'build the release zip from the tag'
 if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -466,6 +517,7 @@ $scopesQuery = ConvertTo-PimChangedScopesQuery -Scopes $scopes
 $urlNoScopes = $url
 if ($scopesQuery) { $url = "$url&changedScopes=$scopesQuery" }
 Write-Host ("    changedScopes: {0}" -f $(if ($scopes.Count) { $scopes -join ',' } elseif ($scopesOn) { '(none -- docs / tests only; not sent)' } else { '(not sent: PIM_PUBLISH_CHANGEDSCOPES off, or held after a refusal)' }))
+if ($Ring -ge 0) { Write-Host "    WARNING (TWO-AGENT-CHECK-1, -LegacyRingPublish): a ring on the PUBLISH call carries no testGate -- publish without -Ring, then -Promote -Ring $Ring -TestGateJson <proof + reviews + findings>" -ForegroundColor Yellow }
 Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 # REQUIREMENTS 33.0 RELEASE CONTEXT: the fix list as X-Release-Notes on the PUBLISH call only (switch PIM_PUBLISH_RELEASENOTES)
 $notesHeaders = @{}

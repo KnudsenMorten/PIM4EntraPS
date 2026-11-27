@@ -19,7 +19,9 @@
                        RELEASENOTES.md (one line: -Notes) -- text surgery, formatting kept
       4 commit + push  explicit paths only (never a wildcard add), push, git ls-remote == HEAD ("Changes must be made through a pull
                        request" is not a failure), the tags PIM4EntraPS-<v> + PIM4EntraPS-v<v>, pushed and read back
-      5 publish        Publish-PimInvardiaRelease.ps1 -Ring 1 -Apply (a 409 versionExists -> -Promote to ring 1)
+      5 publish        SUPERSEDED (3.1.71 J3): "Publish-PimInvardiaRelease.ps1 -Ring 1 -Apply (a 409 versionExists -> -Promote
+                       to ring 1)" -- that call carries no testGate and is refused; a real run (-From <= 5) stops before step 1
+                       and names the ops release tool (release-pim-fix.ps1). -WhatIf still plans every step.
       6 hand-over      every tools\setup\Build-Pim*.ps1 hand-over builder present (support scripts; settings docs, the security
                        pack and the setup catalog share <HandoverRoot>\docs) into <HandoverRoot>\<kind>\pim-manager\<v>
       7 timing         the table of step times against the 15 / 10 min targets
@@ -78,6 +80,10 @@ function Red([string]$m) {
     exit 1
 }
 function Show([string]$cmd) { Write-Host "    > $cmd" -ForegroundColor $(if ($plan) { 'Yellow' } else { 'DarkGray' }) }
+# 3.1.71 J3: the Invardia publish of this tool (-Ring on the publish call, no testGate) is refused -- a real run that would reach
+# step 5 stops BEFORE step 1 (never a pushed + tagged version that is then not published); -WhatIf still plans every step.
+$script:UseOpsReleaseTool = 'use the ops release tool (release-pim-fix.ps1 on the release machine): it publishes without a ring, then sets each ring by -Promote with the full testGate (proof + reviews + findings)'
+if (-not $plan -and $From -le 5) { Write-Host "`nRED: Release-PimFix.ps1 no longer publishes to Invardia (3.1.71 J3, TWO-AGENT-CHECK-1) -- $script:UseOpsReleaseTool; nothing was changed" -ForegroundColor Red; exit 1 }
 # NOT named "Git": a function Git calling git resolves to ITSELF (PowerShell names are case-insensitive) and recurses
 function RepoGit { $ErrorActionPreference = 'Continue'; $o = & git.exe -C $Repo @args 2>&1; $script:GitExit = $LASTEXITCODE; return $o }
 
@@ -249,24 +255,12 @@ if ($From -le 4) {
 if ($From -le 5) {
     Step 5 'publish: Invardia ring 1'
     $pub = Join-Path $sol 'tools\setup\Publish-PimInvardiaRelease.ps1'
-    $pubArgs = @{ Version = $Version; Ring = $Ring; TenantId = $(if ($PublisherTenantId) { $PublisherTenantId } else { '<publisher tenant>' }); Apply = $true }
-    if ($KeyVault) { $pubArgs['KeyVault'] = $KeyVault }
-    if ($KeyVaultSubscription) { $pubArgs['KeyVaultSubscription'] = $KeyVaultSubscription }
     if ($Ring -ne 1) { Red 'ring 1 only' }
-    Show ("{0}pwsh -NoProfile -File {1} -Version {2} -Ring 1 -TenantId {3}{4}{5} -Apply   (409 versionExists -> the same with -Promote)" -f $(if ($AzureConfigDir) { "`$env:AZURE_CONFIG_DIR='$AzureConfigDir'; " } else { '' }), $pub, $Version, $pubArgs.TenantId, $(if ($KeyVault) { " -KeyVault $KeyVault" } else { '' }), $(if ($KeyVaultSubscription) { " -KeyVaultSubscription $KeyVaultSubscription" } else { '' }))
-    if (-not $plan) {
-        $prevCfg = $env:AZURE_CONFIG_DIR
-        if ($AzureConfigDir) { $env:AZURE_CONFIG_DIR = $AzureConfigDir }
-        try {
-            $o = & $pub @pubArgs 2>&1; $c = $LASTEXITCODE
-            $o | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-            if ($c -and ("$o" -match 'versionExists|409')) {
-                Write-Host '    already published -- releasing it to ring 1 (-Promote)' -ForegroundColor Yellow
-                $o = & $pub @pubArgs -Promote 2>&1; $c = $LASTEXITCODE; $o | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-            }
-        } finally { $env:AZURE_CONFIG_DIR = $prevCfg }
-        if ($c) { Red "Invardia publish ring 1 failed (exit $c)" }
-    }
+    # 3.1.71 J3 (re-review B5): this tool published WITH -Ring 1 on the publish call (no testGate, no reviews) -- Publish-PimInvardiaRelease
+    # refuses that now. This tool never asks for the legacy switch: step 5 is refused, the ops release tool does the publish.
+    # SUPERSEDED (3.1.71 J3, 2026-11-26): "Publish-PimInvardiaRelease.ps1 -Ring 1 -Apply (a 409 versionExists -> -Promote to ring 1)".
+    Show ("REFUSED in a real run: {0} -Version {1} -Ring 1 on the publish call carries no testGate (TWO-AGENT-CHECK-1) -- {2}" -f $pub, $Version, $script:UseOpsReleaseTool)
+    if (-not $plan) { Red $script:UseOpsReleaseTool }
 }
 
 # =====================================================================================================================

@@ -117,6 +117,7 @@ trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { t
 . "$shared\PIM-MailTemplateStore.ps1"  # the ONE mail template store (pim.Settings MailTemplates); merged/seeded at wiring below
 . "$shared\PIM-MailLayout.ps1"         # MAIL-2: the designed mail / report layout (the daily changes + tier report mails)
 . "$shared\PIM-MailNotifications.ps1"  # MAIL-2: per-recipient Notifications + audience links, read by every sender at send time
+if (Test-Path -LiteralPath "$shared\PIM-MailSenderProbe.ps1") { . "$shared\PIM-MailSenderProbe.ps1" }   # ONE-SENDER-1 D: the daily sender probe (Invoke-PimMailSenderProbeScheduled) -- loaded by name, not only through PIM-Notify
 . "$shared\PIM-GetStartedReminder.ps1" # MAIL-2 item 8: the Get Started helpers (status reader, step links) the pending reminder reuses
 . "$shared\PIM-PendingReminders.ps1"   # 100.57: the pending-actions reminder to the SuperAdmins (Get Started + approvals), run by every tick
 . "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL

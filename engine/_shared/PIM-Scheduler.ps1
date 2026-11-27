@@ -4408,7 +4408,18 @@ function Get-PimEngineRunSteps {
         if ($nc) { continue }
         if ($r.PSObject.Properties['ok'] -and [bool]$r.ok -and -not $ok.Contains($id)) { [void]$ok.Add($id) }
     }
-    return [pscustomobject]@{ ok = @($ok.ToArray()); failed = @($failed.ToArray()) }
+    # TELEMETRY-SAME-1 (3.1.70): the same steps WITH their times (the scope's scopeStartedUtc / scopeSec, stamped by
+    # Invoke-PimEngine) -> the run record's stepTimes -> the heartbeat's LastRun.steps. result: ok (ran clean) | failed (failed
+    # items / no provider) | skipped (not checked, or held / waiting without being clean). A scope without a time is left out.
+    $timed = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Results | Where-Object { $_ })) {
+        $id = ConvertTo-PimRunStepId -Scope "$($r.scope)"
+        if (-not $id -or -not $r.PSObject.Properties['scopeStartedUtc'] -or -not "$($r.scopeStartedUtc)".Trim()) { continue }
+        $res = if ($failed.Contains($id)) { 'failed' } elseif ($ok.Contains($id) -and -not ($r.PSObject.Properties['notChecked'] -and [bool]$r.notChecked)) { 'ok' } else { 'skipped' }
+        $sec = 0; if ($r.PSObject.Properties['scopeSec']) { [void][int]::TryParse("$($r.scopeSec)", [ref]$sec) }
+        $timed.Add([pscustomobject][ordered]@{ step = $id; startedUtc = "$($r.scopeStartedUtc)"; sec = [int][Math]::Max(0, $sec); result = $res })
+    }
+    return [pscustomobject]@{ ok = @($ok.ToArray()); failed = @($failed.ToArray()); timed = @($timed.ToArray()) }
 }
 function Add-PimRunStepFields {
     <#
@@ -4422,6 +4433,8 @@ function Add-PimRunStepFields {
     $global:PimEngineRunSteps = $null
     $Run | Add-Member -NotePropertyName stepsOk -NotePropertyValue @($g.steps.ok) -Force
     $Run | Add-Member -NotePropertyName failedSteps -NotePropertyValue @($g.steps.failed) -Force
+    # TELEMETRY-SAME-1 (3.1.70): the steps with their start + length (LastRun.steps on the heartbeat); at most 20, run order
+    if ($g.steps.PSObject.Properties['timed'] -and @($g.steps.timed).Count) { $Run | Add-Member -NotePropertyName stepTimes -NotePropertyValue @(@($g.steps.timed) | Select-Object -First 20) -Force }
     return $Run
 }
 function Add-PimTickReconciled {

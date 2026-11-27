@@ -6666,6 +6666,8 @@ function Get-PimManagerMailState {
         senderAddress = $(if ($mode -eq 'sharedMailbox') { "$($shown.address)" } else { $sender }); senderShown = $(if ($mode -eq 'sharedMailbox') { "$($shown.text)" } else { $sender })
         mailbox = $mailbox; domains = @($doms)
         smtp = $(if ($relayRaw) { $relay.config } else { $null }); smtpErrors = $(if ($relayRaw) { $relay.errors } else { @{} })
+        # ONE-SENDER-1 A1: a new relay From waiting for its test mail ({ from; previous; savedUtc; by; lastTest }), else $null
+        smtpFromPending = $(if ($mode -eq 'smtp') { try { ConvertTo-PimSmtpFromPending -Value (Get-PimManagerSetting -Name (Get-PimSmtpFromPendingSettingName)) } catch { $null } } else { $null })
         done = [bool]$state.done; off = [bool]$state.off; note = "$($state.note)"; proven = $state.proven
         lastTest = $last
         canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
@@ -6800,6 +6802,9 @@ function Request-PimManagerMailEngineTest {
         if ($mode -eq 'smtp' -and -not $st.smtp) { $o.detail = 'the SMTP relay is not saved yet -- save it first'; $o.note = "Not queued: $($o.detail)"; return $o }
         if ($mode -notin @('sharedMailbox', 'smtp')) { $o.detail = 'mail is switched off -- choose a shared mailbox or an SMTP relay first'; $o.note = "Not queued: $($o.detail)"; return $o }
         $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode $mode -Sender $(if ($mode -eq 'smtp') { Get-PimSmtpFromAddress -MailSender "$($st.sender)" -Config $st.smtp } else { "$($st.sender)" })   # ONE-SENDER-1: the From is MailSender
+        # ONE-SENDER-1 A1 (Invardia 2026-11-26): a PENDING relay From is what this test proves -- the engine sends it as that
+        # From, and only a pass makes it the From (the current From stays until then)
+        if ($mode -eq 'smtp' -and $st.smtpFromPending -and "$($st.smtpFromPending.from)".Trim()) { $rec['sender'] = "$($st.smtpFromPending.from)".Trim(); $rec['fromPending'] = "$($st.smtpFromPending.from)".Trim() }
         Set-PimManagerSetting -Name 'MailEngineTest' -Value $rec
         $script:PimMailCheckCache = $null
         $o.queued = $true
@@ -19648,6 +19653,14 @@ function Handle-Request {
                 try { $relay = ConvertTo-PimSmtpRelayConfig -Value (Get-PimManagerSetting -Name 'SmtpRelay') } catch { $relay = $null }
                 if (-not $relay -or -not $relay.ok) { $errors['smtp.host'] = 'Fill in the SMTP relay (server, port).' }
             }
+            # ONE-SENDER-1 A1 (Invardia 2026-11-26): a NEW From typed for the relay is held as PENDING -- the stored record keeps
+            # its CURRENT From until the engine's test mail with the new one passes (Complete-PimSmtpFromPending); never blanked
+            $fromSave = $null
+            if ($wantMode -eq 'smtp' -and $relay -and $relay.ok -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) {
+                $curRelayFrom = ''; try { $curRelayFrom = "$((ConvertTo-PimSmtpRelayConfig -Value (Get-PimManagerSetting -Name 'SmtpRelay')).config.from)".Trim() } catch { $curRelayFrom = '' }
+                $fromSave = Resolve-PimSmtpFromSave -CurrentFrom $curRelayFrom -WantedFrom "$($relay.config.from)"
+                $relay.config['from'] = "$($fromSave.from)"
+            }
             # ONE-SENDER-1 (Invardia 2026-11-25; CORRECTED after the 3.1.69 review): the relay keeps its OWN From -- the address
             # it is proven to accept -- and the save NEVER blanks it. A MailSender that differs is drift (the mail check says so);
             # it is never switched to unproven. One-time migration: no MailSender yet -> it takes the relay's From (same address).
@@ -19669,13 +19682,22 @@ function Handle-Request {
                     $pwRes = Get-PimManagerSmtpPasswordRefusal -Setup $(try { (Get-PimManagerMailState -NoChecks).setup } catch { $null }) -Smtp $relay.config
                 }
                 if ($relay -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) { Set-PimManagerSetting -Name 'SmtpRelay' -Value $relay.config; $global:PIM_SmtpRelay = $relay.config }
+                # ONE-SENDER-1 A1: the new From is stored as PENDING (the relay record above kept the current one); the same
+                # address again / a relay without a From yet drops a pending one
+                if ($fromSave -and "$($fromSave.pending)".Trim()) {
+                    Set-PimManagerSetting -Name (Get-PimSmtpFromPendingSettingName) -Value (New-PimSmtpFromPendingRecord -From "$($fromSave.pending)" -Previous "$($fromSave.from)" -By "$(try { Get-PimManagerActorName } catch { '' })")
+                } elseif ($fromSave -and $fromSave.clearPending) {
+                    $hadPend = $null; try { $hadPend = ConvertTo-PimSmtpFromPending -Value (Get-PimManagerSetting -Name (Get-PimSmtpFromPendingSettingName)) } catch { $hadPend = $null }
+                    if ($null -ne $hadPend) { Set-PimManagerSetting -Name (Get-PimSmtpFromPendingSettingName) -Value (New-PimSmtpFromPendingRecord -Cleared -By "$(try { Get-PimManagerActorName } catch { '' })") }
+                }
                 if ($wantSender) { Set-PimManagerSetting -Name 'MailSender' -Value $wantSender; $global:PIM_MailSender = $wantSender }
                 Set-PimManagerSetting -Name 'MailMode' -Value $wantMode; $global:PIM_MailMode = $wantMode
                 $script:PimMailCheckCache = $null   # MAIL CHECK: changed settings are checked again
                 $after = Get-PimManagerMailState
                 Write-PimManagerAuditEvent -Action 'settings.mail.save' -Target 'MailMode,MailSender,SmtpRelay' -Result 'ok' -Before $before `
-                    -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; passwordToKeyVault = $(if ($pwRes) { $false } else { $null }) })
+                    -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; smtpFromPending = $(if ($fromSave -and "$($fromSave.pending)".Trim()) { "$($fromSave.pending)" } else { $null }); passwordToKeyVault = $(if ($pwRes) { $false } else { $null }) })
                 $after['password'] = $(if ($pwRes) { $pwRes } else { $null })
+                if ($fromSave -and "$($fromSave.pending)".Trim()) { $after['fromNote'] = "$($fromSave.reason). Press Send test mail: the engine sends it as the new From, and only a test that passes makes it the From." }
                 Write-JsonResponse -Response $resp -Status 200 -Body $after
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }

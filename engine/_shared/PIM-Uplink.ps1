@@ -2651,6 +2651,170 @@ function New-PimUplinkCollectionsField {
     return $out.ToArray()   # callers wrap in @() (an empty list then stays a list)
 }
 
+# ---- LastRun + Published (TELEMETRY-SAME-1, Invardia 2026-11-26: the contract is LIVE) ---------------------------------
+# Every product sends the same core blocks. The EXACT keys (Invardia heartbeatstate.ts, SI's LastRun):
+#   LastRun   { runId (<= 80, [A-Za-z0-9._:-]); kind full|manual|scheduled|resume; startedUtc; endedUtc; totalSec (int);
+#               result complete|cancelled|failed|partial; collectionUtc (ISO); steps [{ step (slug <= 60); startedUtc; sec (int);
+#               result ok|failed|skipped|cancelled }] at most 20 }
+#   Published { collectionId (int, required); collectionUtc (ISO, required); publishedUtc (ISO, required); copiedUtc;
+#               newestCompleteUtc }
+# Both SOFT: a block whose data is unknown is LEFT OUT, an invalid value is never sent (the block, or the one optional key,
+# goes without it). Each has its own switch PIM_UPLINK_LASTRUN / PIM_UPLINK_PUBLISHED (ON by default; 0/off/false/no = off).
+function Get-PimUplinkLastRunKinds       { <# PURE. LITERAL. LastRun.kind (Invardia's closed list). #> return @('full', 'manual', 'scheduled', 'resume') }
+function Get-PimUplinkLastRunResults     { <# PURE. LITERAL. LastRun.result (Invardia's closed list). #> return @('complete', 'cancelled', 'failed', 'partial') }
+function Get-PimUplinkLastRunStepResults { <# PURE. LITERAL. LastRun.steps[].result (Invardia's closed list). #> return @('ok', 'failed', 'skipped', 'cancelled') }
+function Get-PimUplinkLastRunStepsMax    { <# PURE. LITERAL. At most 20 steps (Invardia). #> return 20 }
+
+function Test-PimUplinkCoreBlockOn {
+    <# PURE. LastRun / Published: ON unless PIM_UPLINK_<NAME> is 0 / false / off / no (-Value: that variable's text). #>
+    param([AllowNull()][string]$Value)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
+}
+
+function ConvertTo-PimUplinkIsoSecond {
+    <# PURE. A stored time as 'yyyy-MM-ddTHH:mm:ssZ' (UTC), or $null. #>
+    param([AllowNull()][object]$Value)
+    $t = ConvertTo-PimUplinkUtc $Value
+    if ($t) { return $t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    return $null
+}
+
+function ConvertTo-PimUplinkLastRunResult {
+    <#
+      PURE. One finished engine run record -> LastRun.result, or $null (the run says nothing that maps -- never a guess):
+        completed / warning   complete (partial when the handler said its data is not whole: trusted = false)
+        failed (or ok=false)  failed
+        cancelled/interrupted cancelled
+        throttled             partial (it stopped part-way and is retried)
+    #>
+    param([AllowNull()][object]$Run)
+    if ($null -eq $Run) { return $null }
+    $st = "$($Run.status)".Trim().ToLowerInvariant()
+    if ($st -in @('cancelled', 'interrupted')) { return 'cancelled' }
+    if ($st -eq 'throttled') { return 'partial' }
+    if ($st -eq 'failed' -or ($Run.PSObject.Properties['ok'] -and $null -ne $Run.ok -and -not [bool]$Run.ok)) { return 'failed' }
+    if ($st -in @('completed', 'warning')) {
+        if ($Run.PSObject.Properties['trusted'] -and $null -ne $Run.trusted -and -not [bool]$Run.trusted) { return 'partial' }
+        return 'complete'
+    }
+    return $null
+}
+
+function New-PimUplinkLastRunField {
+    <#
+      PURE. LastRun = the LAST FINISHED engine run (engine-delta / engine-full / msp-pull) of the run history -- the same run
+      Pipeline.lastEndedUtc names (Get-PimPipelineLastEnded's rule: a run that did nothing -- skipped / held / queued /
+      unimplemented / out of scope / disabled -- is not "a run that ended"). The run's OWN record only:
+        runId       the Container Apps execution name when plain, else the engine's run id (its correlation id); [A-Za-z0-9._:-]{1,80}
+        kind        manual (a trigger: Run now, a commit, a queue pickup) | full (the scheduled daily full reconcile) | scheduled
+                    ('resume' is never sent: PIM does not resume a run, it starts a new one)
+        startedUtc / endedUtc   the record's own times; totalSec = its durationMs (else end - start), a whole number
+        result      ConvertTo-PimUplinkLastRunResult
+        steps       the record's stepTimes (the engine scopes in run order with their start + length, Get-PimEngineRunSteps),
+                    at most 20; a step whose values do not fit Invardia's shape is left out; none recorded = no 'steps' key
+        collectionUtc  NOT sent: an engine run reads Entra live while it applies, it does not work from one stored
+                    collection, and a key is never invented
+      No finished engine run, or a run id / time / result that does not fit = $null (LastRun left out).
+    #>
+    param([AllowNull()][object[]]$Runs)
+    $types = @('engine-delta', 'engine-full', 'msp-pull')
+    $best = $null; $bestEnd = $null
+    foreach ($r in @($Runs)) {
+        if ($null -eq $r) { continue }
+        $ty = "$($r.type)".Trim(); if ($ty -and $ty -notin $types) { continue }
+        if (-not $ty) { continue }
+        $st = "$($r.status)".Trim().ToLowerInvariant()
+        if ($st -in @('', 'running', 'skipped', 'held', 'queued', 'unimplemented', 'outofscope', 'disabled')) { continue }
+        if ($r.PSObject.Properties['held'] -and [bool]$r.held) { continue }
+        $e = ConvertTo-PimUplinkUtc $r.finishedUtc
+        if ($null -eq $e) { continue }
+        if ($null -eq $bestEnd -or $e -gt $bestEnd) { $best = $r; $bestEnd = $e }
+    }
+    if ($null -eq $best) { return $null }
+    $rid = ''
+    foreach ($c in @($(if ($best.PSObject.Properties['execution']) { "$($best.execution)" } else { '' }), "$($best.runId)")) { $v = "$c".Trim(); if ($v -match '^[A-Za-z0-9._:-]{1,80}$') { $rid = $v; break } }
+    if (-not $rid) { return $null }
+    $s = ConvertTo-PimUplinkUtc $best.startedUtc
+    if ($null -eq $s -or $s -gt $bestEnd) { return $null }
+    $res = ConvertTo-PimUplinkLastRunResult -Run $best
+    if ($res -notin (Get-PimUplinkLastRunResults)) { return $null }
+    $trig = ($best.PSObject.Properties['trigger'] -and "$($best.trigger)" -match '^(?i)true$')
+    $kind = if ($trig) { 'manual' } elseif ("$($best.type)".Trim() -eq 'engine-full') { 'full' } else { 'scheduled' }
+    $tot = $null
+    if ($best.PSObject.Properties['durationMs']) { $dm = ConvertTo-PimUplinkCount $best.durationMs; if ($null -ne $dm) { $tot = [long][Math]::Round($dm / 1000.0) } }
+    if ($null -eq $tot) { $tot = [long][Math]::Round(($bestEnd - $s).TotalSeconds) }
+    if ($tot -lt 0 -or $tot -gt [int]::MaxValue) { return $null }
+    $o = [ordered]@{ runId = $rid; kind = $kind; startedUtc = (ConvertTo-PimUplinkIsoSecond $s); endedUtc = (ConvertTo-PimUplinkIsoSecond $bestEnd); totalSec = [int]$tot; result = $res }
+    $steps = New-Object System.Collections.Generic.List[object]
+    if ($best.PSObject.Properties['stepTimes']) {
+        foreach ($x in @($best.stepTimes)) {
+            if ($null -eq $x -or $steps.Count -ge (Get-PimUplinkLastRunStepsMax)) { continue }
+            $sn = "$(Get-PimUplinkField $x 'step')".Trim().ToLowerInvariant()
+            if ($sn -notmatch '^[a-z0-9][a-z0-9-]{0,59}$') { continue }
+            $sa = ConvertTo-PimUplinkIsoSecond (Get-PimUplinkField $x 'startedUtc'); if (-not $sa) { continue }
+            $sv = Get-PimUplinkField $x 'sec'; if ($sv -is [bool]) { continue }
+            $sc = ConvertTo-PimUplinkCount $sv; if ($null -eq $sc -or $sc -gt [int]::MaxValue) { continue }
+            $sr = "$(Get-PimUplinkField $x 'result')".Trim().ToLowerInvariant(); if ($sr -notin (Get-PimUplinkLastRunStepResults)) { continue }
+            $steps.Add([pscustomobject][ordered]@{ step = $sn; startedUtc = $sa; sec = [int]$sc; result = $sr })
+        }
+    }
+    if ($steps.Count) { $o['steps'] = [object[]]$steps.ToArray() }
+    return [pscustomobject]$o
+}
+
+function Get-PimUplinkPublishedSql {
+    <#
+      PURE. Published's source: the newest COMPLETE active-assignment generation (pim.ActiveAssignmentSnapshots, State
+      'complete') -- the last complete directory read the Manager shows (its pages serve the newest complete generation). One
+      row or none; read-only.
+    #>
+    return @'
+SET NOCOUNT ON;
+SELECT TOP (1) s.SnapshotId AS collectionId, s.StartedUtc AS startedUtc, s.CompletedUtc AS completedUtc
+FROM pim.ActiveAssignmentSnapshots s WHERE s.State = N'complete' AND s.CompletedUtc IS NOT NULL ORDER BY s.SnapshotId DESC;
+'@
+}
+
+function New-PimUplinkPublishedField {
+    <#
+      PURE. The row of Get-PimUplinkPublishedSql -> Published { collectionId; collectionUtc; publishedUtc; newestCompleteUtc }:
+        collectionId       the generation's SnapshotId (a whole number 1 .. 2^53-1)
+        collectionUtc      when that read STARTED (the time the data was collected)
+        publishedUtc       when it was COMPLETED = when the Manager started to show it
+        newestCompleteUtc  the newest complete generation's completion -- the same generation in PIM (the Manager shows the
+                           newest complete one)
+        copiedUtc          NOT sent: PIM publishes in place (no copy step), and a key is never invented
+      No row, or an id / time that does not fit (a completion before its start) = $null (Published left out).
+    #>
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row -or $Row -is [System.DBNull]) { return $null }
+    $idV = Get-PimUplinkField $Row 'collectionId'
+    if ($idV -is [bool]) { return $null }
+    $id = ConvertTo-PimUplinkCount $idV
+    if ($null -eq $id -or $id -lt 1 -or $id -gt 9007199254740991) { return $null }
+    $s = ConvertTo-PimUplinkUtc (Get-PimUplinkField $Row 'startedUtc'); $c = ConvertTo-PimUplinkUtc (Get-PimUplinkField $Row 'completedUtc')
+    if ($null -eq $s -or $null -eq $c -or $c -lt $s) { return $null }
+    return [pscustomobject][ordered]@{ collectionId = [long]$id; collectionUtc = (ConvertTo-PimUplinkIsoSecond $s); publishedUtc = (ConvertTo-PimUplinkIsoSecond $c); newestCompleteUtc = (ConvertTo-PimUplinkIsoSecond $c) }
+}
+
+function Get-PimUplinkPublished {
+    <# -Query { param($sql) rows } (read-only) -> New-PimUplinkPublishedField of its first row, or $null. Never throws. #>
+    param([Parameter(Mandatory)][scriptblock]$Query)
+    try { $row = @(& $Query (Get-PimUplinkPublishedSql)) | Select-Object -First 1; return (New-PimUplinkPublishedField -Row $row) }
+    catch { Write-Warning "[uplink] Published could not be read: $($_.Exception.Message)"; return $null }
+}
+
+function Test-PimUplinkCoreBlockJson {
+    <#
+      PURE. The block as it would leave (-Json: the heartbeat's JSON text) holds -Name as an OBJECT, and LastRun.steps (when
+      present) as a JSON ARRAY (the ActiveGuards lesson: PS 5.1 can write a list as {"value":[..]}).
+    #>
+    param([Parameter(Mandatory)][string]$Json, [Parameter(Mandatory)][string]$Name, [AllowNull()][object]$Value)
+    if (-not $Json.Contains("`"${Name}`":{")) { return $false }
+    if ($Name -eq 'LastRun' -and $null -ne $Value -and $Value.PSObject.Properties['steps'] -and -not $Json.Contains('"steps":[')) { return $false }
+    return $true
+}
+
 # ---- Jobs --------------------------------------------------------------------------------------------------------
 function Get-PimUplinkJobsMax { <# PURE. At most 60 items (Invardia). #> return 60 }
 
@@ -2867,7 +3031,35 @@ function New-PimUplinkUpdateField {
         $ri = ConvertTo-PimUplinkRunningImages -Value (Get-PimUplinkField $us 'runningImages')
         if ($null -ne $ri) { $o['runningImages'] = @($ri) }
     }
+    # SEC-PATCH-PIPELINE-1 point 6 (Invardia 2026-11-26, TELEMETRY-SAME-1 shape, live): Update.revisions -- the updater's last
+    # read of the apps' revision mode (UpdateState.revisions, Save-PimUpdaterRevisions). PIM_UPLINK_REVISIONS=0/off leaves it
+    # out; no (valid) record = left out (soft).
+    if ("$([Environment]::GetEnvironmentVariable('PIM_UPLINK_REVISIONS'))".Trim() -notmatch '^(?i)(0|off|false|no)$') {
+        $rv = ConvertTo-PimUplinkRevisions -Value (Get-PimUplinkField $us 'revisions')
+        if ($null -ne $rv) { $o['revisions'] = $rv }
+    }
     return [pscustomobject]$o
+}
+
+function ConvertTo-PimUplinkRevisions {
+    <#
+      PURE. Invardia's Update.revisions (SEC-PATCH-PIPELINE-1 point 6, TELEMETRY-SAME-1), EXACTLY { single: bool (every
+      container app read is Single with latest 100 %); activeRevisions: int (the HIGHEST active count on any one app; 1 = good);
+      apps: int (apps read); readUtc: ISO }. NO app names. Anything invalid -- a missing / non-boolean single, a negative or
+      non-whole count, apps 0, an unreadable time -- = $null (the key is left out, never a guess).
+    #>
+    param([AllowNull()][object]$Value)
+    $v = ConvertFrom-PimUplinkStoredValue $Value
+    if ($null -eq $v) { return $null }
+    $sg = Get-PimUplinkField $v 'single'
+    if ($sg -is [bool]) { $single = $sg } elseif ("$sg" -match '^(?i)(true|false)$') { $single = ("$sg" -match '^(?i)true$') } else { return $null }
+    $ar = Get-PimUplinkField $v 'activeRevisions'; $ap = Get-PimUplinkField $v 'apps'
+    if ($ar -is [bool] -or $ap -is [bool]) { return $null }
+    $arN = ConvertTo-PimUplinkCount $ar; $apN = ConvertTo-PimUplinkCount $ap
+    if ($null -eq $arN -or $null -eq $apN -or $apN -lt 1 -or $arN -gt 1000 -or $apN -gt 1000) { return $null }
+    $t = ConvertTo-PimUplinkUtc (Get-PimUplinkField $v 'readUtc'); if (-not $t) { return $null }
+    return [pscustomobject][ordered]@{ single = [bool]$single; activeRevisions = [int]$arN; apps = [int]$apN
+                                       readUtc = $t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
 }
 
 function ConvertTo-PimUplinkRunningImages {
@@ -3713,6 +3905,11 @@ function Invoke-PimUplinkCycle {
           # the newest read was kept back). INVOKED ONLY when the IDENTIFIED heartbeat is due and the additive fields are on;
           # $null / a throw = left out.
           [AllowNull()][scriptblock]$CountsAsOf = $null,
+          # TELEMETRY-SAME-1 (Invardia 2026-11-26, LIVE): LastRun (New-PimUplinkLastRunField: the last finished engine run) and
+          # { } -> Published (Get-PimUplinkPublished: the last complete directory read the Manager shows), on the IDENTIFIED
+          # heartbeat, ADDITIVE (a refusal naming one holds just it for 24 h). $null / a throw = left out (soft).
+          [AllowNull()][object]$LastRun = $null,
+          [AllowNull()][scriptblock]$Published = $null,
           # INV-S16: { param($Name, $Value) } an insert that never replaces a value (Add-PimSqlSettingIfAbsent), used ONCE to
           # create the install's lasting id; $null = -SetSetting. The id rides on every IDENTIFIED record (Add-PimUplinkInstallId).
           [AllowNull()][scriptblock]$CreateSetting = $null,
@@ -4170,6 +4367,20 @@ function Invoke-PimUplinkCycle {
                     if ($plText.Contains('"Pipeline":{') -and $plState -in @('running', 'idle', 'failed', 'succeeded', 'stopped')) { $hbAdd += 'Pipeline' }
                     else { $hb.PSObject.Properties.Remove('Pipeline'); Write-Warning '[uplink] Pipeline could not be written as the agreed JSON -- the heartbeat goes without it.' }
                 } catch { try { $hb.PSObject.Properties.Remove('Pipeline') } catch { } }
+            }
+            # TELEMETRY-SAME-1 (Invardia 2026-11-26, LIVE): LastRun + Published -- each PROVEN in the record's JSON text before it
+            # leaves (an object; LastRun.steps an array), else that block alone is left out. Soft: unknown = no block.
+            $coreBlocks = [ordered]@{ LastRun = $LastRun; Published = $null }
+            if ($Published) { try { $coreBlocks['Published'] = & $Published } catch { $coreBlocks['Published'] = $null; Write-Warning "[uplink] Published could not be built: $($_.Exception.Message)" } }
+            foreach ($cbName in @($coreBlocks.Keys)) {
+                $cbVal = $coreBlocks[$cbName]
+                if ($null -eq $cbVal) { continue }
+                try {
+                    $hb | Add-Member -NotePropertyName $cbName -NotePropertyValue $cbVal -Force
+                    $cbText = ''; try { $cbText = "$($hb | ConvertTo-Json -Depth 6 -Compress)" } catch { $cbText = '' }
+                    if ($cbText -and (Test-PimUplinkCoreBlockJson -Json $cbText -Name $cbName -Value $cbVal)) { $hbAdd += $cbName }
+                    else { $hb.PSObject.Properties.Remove($cbName); Write-Warning "[uplink] $cbName could not be written as the agreed JSON -- the heartbeat goes without it." }
+                } catch { try { $hb.PSObject.Properties.Remove($cbName) } catch { } }
             }
         }
         # PIM 100.167 / framework 8.16: Capabilities + Licences -- identified only, the cause switch on, ONE probe per heartbeat.
@@ -4921,11 +5132,22 @@ function Invoke-PimUplinkJob {
             }
         } catch { $plField = $null; Write-Warning "[uplink] Pipeline could not be built: $($_.Exception.Message)" }
     }
+    # TELEMETRY-SAME-1 (Invardia 2026-11-26, LIVE): LastRun from the run history this job already read (not read = no block);
+    # Published = a PLAIN scriptblock (dynamic scope: $pubJobCs, a name nothing in the cycle shadows), invoked by the cycle only
+    # when the identified heartbeat is due. PIM_UPLINK_LASTRUN / PIM_UPLINK_PUBLISHED = 0/off switch one off. Identified only.
+    $lastRunField = $null; $publishedSb = $null
+    if ($on -and "$key".Trim()) {
+        if ($runsRead -and (Test-PimUplinkCoreBlockOn -Value "$env:PIM_UPLINK_LASTRUN")) { try { $lastRunField = New-PimUplinkLastRunField -Runs $runs } catch { $lastRunField = $null; Write-Warning "[uplink] LastRun could not be built: $($_.Exception.Message)" } }
+        if ((Test-PimUplinkCoreBlockOn -Value "$env:PIM_UPLINK_PUBLISHED") -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) {
+            $pubJobCs = $cs
+            $publishedSb = { Get-PimUplinkPublished -Query { param($sql) @(Invoke-PimSqlQuery -ConnectionString $pubJobCs -Sql $sql) } }
+        }
+    }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -CreateSetting $create -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $pause @cyc `
             -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints -AdoptionCounts $adoption `
             -ScenarioRole $scRole -ManagingTenantId $mgTid -EngineFailures $engFails -UpdateRun $updRun -Causes $causesOn -LicenceProbe $licProbe -HybridAd $hyAd `
-            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField -CountsAsOf $countsAsOfSb `
+            -ReleaseControl $rcOn -ReleaseControlFields $rcFields -ScopeStability $ssField -StateFields $stateSb -SupportSqlAccess $ssaSb -Pipeline $plField -CountsAsOf $countsAsOfSb -LastRun $lastRunField -Published $publishedSb `
             -EnvironmentName (Test-PimUplinkEnvironmentNameOn) -EnvironmentTransport $envNameXport -CountFailedCycle ($MaxPerCycle -le 0)
     # PIM 100.75: a failed send / an install that should be identified but is anonymous = a WARNING run (never a failure).
     $rawKey = ''; try { $rawKey = "$(& $get 'InvardiaInstallKey')".Trim() } catch { $rawKey = '' }
